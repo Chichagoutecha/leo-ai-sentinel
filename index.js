@@ -16,7 +16,7 @@ const PROMPT = `
 Tu es LEO-AI SENTINEL v5.0.
 
 MISSION :
-Gérer automatiquement un portefeuille agent eToro réel.
+Gérer automatiquement un portefeuille eToro.
 
 OBJECTIF :
 - protéger le capital
@@ -50,7 +50,9 @@ app.get("/", (req, res) => {
 });
 
 app.get("/etoro-test", async (req, res) => {
+
   try {
+
     const response = await fetch(
       "https://public-api.etoro.com/api/v1/trading/info/portfolio",
       {
@@ -72,21 +74,70 @@ app.get("/etoro-test", async (req, res) => {
     });
 
   } catch (error) {
+
     res.json({
       error: error.message
     });
+
   }
+
+});
+
+app.get("/buy-test", async (req, res) => {
+
+  try {
+
+    const response = await fetch(
+      "https://public-api.etoro.com/api/v1/trading/execution/market-open-orders/by-amount",
+      {
+        method: "POST",
+
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": process.env.ETORO_API_KEY,
+          "x-user-key": process.env.ETORO_USER_KEY,
+          "x-request-id": randomUUID()
+        },
+
+        body: JSON.stringify({
+          instrumentId: "AAPL",
+          isBuy: true,
+          leverage: 1,
+          amount: 10
+        })
+
+      }
+    );
+
+    const data = await response.json();
+
+    res.json({
+      status: response.status,
+      ok: response.ok,
+      data
+    });
+
+  } catch (error) {
+
+    res.json({
+      error: error.message
+    });
+
+  }
+
 });
 
 async function scanMarket() {
 
   const response = await client.chat.completions.create({
     model: "gpt-4.1-mini",
+
     messages: [
       {
         role: "system",
         content: PROMPT
       },
+
       {
         role: "user",
         content:
