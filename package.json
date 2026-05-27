@@ -1,12 +1,13 @@
 {
   "name": "leo-ai-sentinel",
   "version": "1.0.0",
-  "description": "AI trading sentinel",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "openai": "^4.0.0",
+    "node-cron": "^3.0.3"
   }
 }
