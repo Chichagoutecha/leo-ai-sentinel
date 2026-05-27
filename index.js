@@ -1,4 +1,4 @@
-const express = require("express");
+cconst express = require("express");
 const OpenAI = require("openai");
 const cron = require("node-cron");
 const { randomUUID } = require("crypto");
@@ -21,27 +21,48 @@ Gérer automatiquement un portefeuille eToro.
 OBJECTIF :
 - protéger le capital
 - éviter les grosses pertes
-- profiter des tendances fortes
-- conserver une logique prudente
-
-RÈGLES :
-- jamais de levier
-- jamais de all-in
-- maximum 1 ordre par scan
-- montant max : 10$
+- croissance progressive long terme
 - HOLD par défaut
-- SELL si risque élevé
-- BUY uniquement si signal clair
-- priorité absolue : survie du portefeuille
+- BUY seulement si signal fort
+- SELL seulement si risque élevé ou thèse cassée
 
-FORMAT :
+RÈGLES DE RISQUE :
+- jamais de levier
+- jamais all-in
+- ordre max : 10€
+- 1 ordre maximum par scan
+- cash toujours protégé
+- éviter FOMO
+- éviter actifs ultra spéculatifs
+
+SECTEURS PRIORITAIRES :
+- IA
+- Big Tech
+- Crypto
+- Chine
+- Énergie
+- Or
+- Quantum
+- Espace
+
+ACTIFS À SURVEILLER :
+- NVIDIA
+- Microsoft
+- Bitcoin
+- Tencent
+- Rocket Lab
+- IonQ
+- Gold ETF
+- Palantir
+
+FORMAT JSON STRICT :
 {
- "decision":"BUY|SELL|HOLD",
- "asset":"nom actif ou NONE",
- "amount_usd":0,
- "confidence":0-100,
- "reason":"explication courte",
- "risk_check":"passed|failed"
+  "decision":"BUY|SELL|HOLD",
+  "asset":"nom actif ou NONE",
+  "amount_eur":0,
+  "confidence":0-100,
+  "reason":"explication courte",
+  "risk_check":"passed|failed"
 }
 `;
 
@@ -49,12 +70,18 @@ app.get("/", (req, res) => {
   res.send("LEO-AI SENTINEL actif");
 });
 
+
+
+// =========================
+// TEST ETORO
+// =========================
+
 app.get("/etoro-test", async (req, res) => {
 
   try {
 
     const response = await fetch(
-      "https://public-api.etoro.com/api/v1/trading/info/portfolio",
+      "https://public-api.etoro.com/api/v1/agent-portfolios/client-portfolio",
       {
         method: "GET",
         headers: {
@@ -83,29 +110,25 @@ app.get("/etoro-test", async (req, res) => {
 
 });
 
-app.get("/buy-test", async (req, res) => {
+
+
+// =========================
+// RECHERCHE INSTRUMENTS
+// =========================
+
+app.get("/test-instruments", async (req, res) => {
 
   try {
 
     const response = await fetch(
-      "https://public-api.etoro.com/api/v1/trading/execution/market-open-orders/by-amount",
+      "https://public-api.etoro.com/api/v1/market-data/instruments?query=tencent",
       {
-        method: "POST",
-
+        method: "GET",
         headers: {
-          "Content-Type": "application/json",
           "x-api-key": process.env.ETORO_API_KEY,
           "x-user-key": process.env.ETORO_USER_KEY,
           "x-request-id": randomUUID()
-        },
-
-        body: JSON.stringify({
-          instrumentId: "AAPL",
-          isBuy: true,
-          leverage: 1,
-          amount: 10
-        })
-
+        }
       }
     );
 
@@ -127,21 +150,25 @@ app.get("/buy-test", async (req, res) => {
 
 });
 
+
+
+// =========================
+// SCAN IA
+// =========================
+
 async function scanMarket() {
 
   const response = await client.chat.completions.create({
     model: "gpt-4.1-mini",
-
     messages: [
       {
         role: "system",
         content: PROMPT
       },
-
       {
         role: "user",
         content:
-          "Analyse le marché actuel et décide BUY SELL ou HOLD."
+          "Analyse marchés : IA, Big Tech, crypto, Chine, énergie, or, quantum et espace. Décide BUY SELL ou HOLD."
       }
     ]
   });
@@ -152,6 +179,12 @@ async function scanMarket() {
 
   return text;
 }
+
+
+
+// =========================
+// ROUTE SCAN
+// =========================
 
 app.get("/scan", async (req, res) => {
 
@@ -169,6 +202,12 @@ app.get("/scan", async (req, res) => {
 
 });
 
+
+
+// =========================
+// CRON AUTOMATIQUE
+// =========================
+
 cron.schedule("0 */2 * * *", async () => {
 
   console.log("Scan automatique toutes les 2h lancé");
@@ -177,7 +216,19 @@ cron.schedule("0 */2 * * *", async () => {
 
 });
 
+
+
+// =========================
+// SERVEUR
+// =========================
+
 const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+
+  console.log("LEO-AI SENTINEL lancé sur le port " + PORT);
+
+});
 
 app.listen(PORT, () => {
 
