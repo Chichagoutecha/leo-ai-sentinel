@@ -1,6 +1,7 @@
 const express = require("express");
 const OpenAI = require("openai");
 const cron = require("node-cron");
+const { randomUUID } = require("crypto");
 
 const app = express();
 app.use(express.json());
@@ -35,6 +36,31 @@ Règles :
 
 app.get("/", (req, res) => {
   res.send("LEO-AI SENTINEL actif");
+});
+
+app.get("/etoro-test", async (req, res) => {
+  try {
+    const response = await fetch("https://public-api.etoro.com/api/v1/agent-portfolios", {
+      method: "GET",
+      headers: {
+        "x-api-key": process.env.ETORO_API_KEY,
+        "x-user-key": process.env.ETORO_USER_KEY,
+        "x-request-id": randomUUID()
+      }
+    });
+
+    const data = await response.json();
+
+    res.json({
+      status: response.status,
+      ok: response.ok,
+      data
+    });
+  } catch (error) {
+    res.json({
+      error: error.message
+    });
+  }
 });
 
 async function scanMarket() {
