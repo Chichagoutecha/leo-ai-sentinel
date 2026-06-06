@@ -138,6 +138,37 @@ app.get("/buy-test", async (req, res) => {
   }
 });
 
+app.get("/resolve-symbol", async (req, res) => {
+  try {
+    const symbol = req.query.symbol;
+
+    if (!symbol) {
+      return res.json({
+        error: "Ajoute ?symbol=NVDA par exemple"
+      });
+    }
+
+    const response = await fetch(
+      `https://public-api.etoro.com/api/v1/market-data/search?internalSymbolFull=${encodeURIComponent(symbol)}&fields=instrumentId,internalSymbolFull,displayname`,
+      {
+        method: "GET",
+        headers: etoroHeaders()
+      }
+    );
+
+    const data = await response.json();
+
+    res.json({
+      symbol,
+      status: response.status,
+      ok: response.ok,
+      data
+    });
+  } catch (error) {
+    res.json({ error: error.message });
+  }
+});
+
 async function scanMarket() {
   const response = await client.chat.completions.create({
     model: "gpt-4.1-mini",
