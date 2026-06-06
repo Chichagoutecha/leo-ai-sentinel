@@ -31,27 +31,94 @@ const WATCHLIST = {
 };
 
 const PROMPT = `
-Tu es LEO-AI SENTINEL v5.1.
-Objectif : protéger le capital avant le profit.
+Tu es LEO-AI SENTINEL v6.0.
 
-Portefeuille agent eToro autonome.
-Budget réduit : prudence maximale.
+MISSION :
+Faire croître progressivement le portefeuille tout en protégeant le capital avant tout.
 
-Actifs autorisés uniquement :
-NVDA, AMD, ORCL, MSFT, GOOG, AMZN, BABA, COIN, PLTR, RKLB, IONQ, ASTS, BTC, ETH, SOL.
+MODE :
+TRADING AUTONOME RÉEL ACTIVÉ.
 
-Règles obligatoires :
+STYLE :
+- trader IA prudent
+- anti-panique
+- anti-FOMO
+- anti-all-in
+- priorité à la survie long terme
+- priorité à la qualité plutôt qu'à la quantité
+
+ACTIFS AUTORISÉS UNIQUEMENT :
+NVDA,
+AMD,
+ORCL,
+MSFT,
+GOOG,
+AMZN,
+BABA,
+COIN,
+PLTR,
+RKLB,
+IONQ,
+ASTS,
+BTC,
+ETH,
+SOL
+
+RÈGLES ABSOLUES :
 - jamais de levier
+- jamais de short
 - jamais de all-in
-- 1 ordre max par scan
-- ordre max 10$
+- maximum 1 ordre par scan
+- maximum 10$ par ordre
 - HOLD par défaut
-- BUY uniquement si signal très clair
-- SELL uniquement si risque élevé, surchauffe ou thèse cassée
-- ne jamais acheter un actif non listé
-- ne jamais dépasser 10$
+- ne jamais acheter après une hausse verticale
+- éviter les achats émotionnels
+- protéger le cash
 - si doute : HOLD
-- répondre uniquement en JSON strict :
+- privilégier les leaders solides
+- spéculatif seulement si très forte conviction
+- ne jamais acheter un actif hors watchlist
+- éviter les achats pendant euphorie marché
+
+ACHAT AUTORISÉ UNIQUEMENT SI :
+- confiance >= 75
+- momentum positif raisonnable
+- risque acceptable
+- pas de surchauffe extrême
+- opportunité crédible moyen/long terme
+
+VENTE AUTORISÉE UNIQUEMENT SI :
+- risque élevé
+- momentum cassé
+- thèse détruite
+- euphorie excessive
+- protection du capital nécessaire
+
+LOGIQUE DE PRIORITÉ :
+1. Protection du capital
+2. Réduction du risque
+3. Opportunités fortes uniquement
+4. Croissance long terme
+
+ANALYSE À EFFECTUER :
+- Big Tech IA
+- crypto
+- Chine tech
+- espace
+- quantum computing
+- sentiment marché
+- prudence macro-économique
+- volatilité
+- momentum
+
+RÈGLES DE CONFIANCE :
+- confidence < 75 = HOLD obligatoire
+- confidence >= 75 = BUY possible
+- confidence >= 90 = très forte conviction
+
+FORMAT OBLIGATOIRE :
+Répondre UNIQUEMENT en JSON strict.
+
 {
  "decision":"BUY|SELL|HOLD",
  "asset":"NVDA|AMD|ORCL|MSFT|GOOG|AMZN|BABA|COIN|PLTR|RKLB|IONQ|ASTS|BTC|ETH|SOL|NONE",
@@ -72,7 +139,11 @@ function etoroHeaders() {
 }
 
 app.get("/", (req, res) => {
-  res.send("LEO-AI SENTINEL v5.1 actif");
+  res.send("LEO-AI SENTINEL v6.0 actif");
+});
+
+app.get("/watchlist", (req, res) => {
+  res.json(WATCHLIST);
 });
 
 app.get("/etoro-test", async (req, res) => {
@@ -86,14 +157,17 @@ app.get("/etoro-test", async (req, res) => {
     );
 
     const data = await response.json();
-    res.json({ status: response.status, ok: response.ok, data });
-  } catch (error) {
-    res.json({ error: error.message });
-  }
-});
 
-app.get("/watchlist", (req, res) => {
-  res.json(WATCHLIST);
+    res.json({
+      status: response.status,
+      ok: response.ok,
+      data
+    });
+  } catch (error) {
+    res.json({
+      error: error.message
+    });
+  }
 });
 
 app.get("/resolve-symbol", async (req, res) => {
@@ -101,7 +175,9 @@ app.get("/resolve-symbol", async (req, res) => {
     const symbol = req.query.symbol;
 
     if (!symbol) {
-      return res.json({ error: "Ajoute ?symbol=NVDA par exemple" });
+      return res.json({
+        error: "Ajoute ?symbol=NVDA par exemple"
+      });
     }
 
     const response = await fetch(
@@ -113,9 +189,17 @@ app.get("/resolve-symbol", async (req, res) => {
     );
 
     const data = await response.json();
-    res.json({ symbol, status: response.status, ok: response.ok, data });
+
+    res.json({
+      symbol,
+      status: response.status,
+      ok: response.ok,
+      data
+    });
   } catch (error) {
-    res.json({ error: error.message });
+    res.json({
+      error: error.message
+    });
   }
 });
 
@@ -123,15 +207,24 @@ async function executeBuy(asset, amount) {
   const instrumentId = WATCHLIST[asset];
 
   if (!instrumentId) {
-    return { skipped: true, reason: "Actif non autorisé" };
+    return {
+      skipped: true,
+      reason: "Actif non autorisé"
+    };
   }
 
   if (!AUTO_TRADE) {
-    return { skipped: true, reason: "AUTO_TRADE désactivé" };
+    return {
+      skipped: true,
+      reason: "AUTO_TRADE désactivé"
+    };
   }
 
   if (amount > 10) {
-    return { skipped: true, reason: "Montant supérieur à 10$ interdit" };
+    return {
+      skipped: true,
+      reason: "Montant supérieur à 10$ interdit"
+    };
   }
 
   const response = await fetch(
@@ -164,7 +257,10 @@ async function scanMarket() {
   const response = await client.chat.completions.create({
     model: "gpt-4.1-mini",
     messages: [
-      { role: "system", content: PROMPT },
+      {
+        role: "system",
+        content: PROMPT
+      },
       {
         role: "user",
         content:
@@ -174,6 +270,7 @@ async function scanMarket() {
   });
 
   const raw = response.choices[0].message.content;
+
   console.log("SCAN IA :", raw);
 
   let decision;
@@ -187,7 +284,10 @@ async function scanMarket() {
     };
   }
 
-  let execution = { skipped: true, reason: "Aucun ordre exécuté" };
+  let execution = {
+    skipped: true,
+    reason: "Aucun ordre exécuté"
+  };
 
   if (
     decision.decision === "BUY" &&
@@ -197,7 +297,10 @@ async function scanMarket() {
     decision.amount_usd > 0 &&
     decision.amount_usd <= 10
   ) {
-    execution = await executeBuy(decision.asset, decision.amount_usd);
+    execution = await executeBuy(
+      decision.asset,
+      decision.amount_usd
+    );
   }
 
   return {
@@ -212,7 +315,9 @@ app.get("/scan", async (req, res) => {
     const result = await scanMarket();
     res.json(result);
   } catch (err) {
-    res.json({ error: "Erreur scan : " + err.message });
+    res.json({
+      error: "Erreur scan : " + err.message
+    });
   }
 });
 
@@ -223,15 +328,19 @@ app.get("/buy-test", async (req, res) => {
 
     if (!asset || !WATCHLIST[asset]) {
       return res.json({
-        error: "Actif invalide. Exemple : /buy-test?asset=NVDA&amount=10",
+        error:
+          "Actif invalide. Exemple : /buy-test?asset=NVDA&amount=10",
         allowed_assets: Object.keys(WATCHLIST)
       });
     }
 
     const result = await executeBuy(asset, amount);
+
     res.json(result);
   } catch (error) {
-    res.json({ error: error.message });
+    res.json({
+      error: error.message
+    });
   }
 });
 
@@ -243,5 +352,7 @@ cron.schedule("0 */2 * * *", async () => {
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-  console.log("LEO-AI SENTINEL v5.1 lancé sur le port " + PORT);
+  console.log(
+    "LEO-AI SENTINEL v6.0 lancé sur le port " + PORT
+  );
 });
