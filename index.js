@@ -10,21 +10,34 @@ const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-const VERSION = "v8.3-monitoring-safety-autonomous";
+const VERSION = "v9.0-marketdata-agent-autonomous";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const BOT_SECRET = process.env.BOT_SECRET || "";
 
+/*
+  Option stricte :
+  - false par défaut pour éviter de bloquer le bot si l'endpoint rates eToro répond mal.
+  - si tu veux forcer le bot à n'exécuter QUE si le prix live est disponible :
+    ajoute dans Render Environment :
+    REQUIRE_FRESH_RATE_FOR_EXECUTION=true
+*/
+const REQUIRE_FRESH_RATE_FOR_EXECUTION =
+  process.env.REQUIRE_FRESH_RATE_FOR_EXECUTION === "true";
+
 const MAX_ORDER_USD = 10;
 const MAX_OPEN_POSITIONS = 10;
 const BUY_COOLDOWN_HOURS = 6;
-const MAX_LOGS = 80;
+const MAX_LOGS = 100;
 
 const MAX_EXECUTED_ORDERS_24H = 3;
 const MAX_BUYS_24H = 2;
 const MAX_SELLS_24H = 2;
 const MIN_HOURS_BETWEEN_EXECUTIONS = 4;
 const PENDING_ORDER_WARNING_HOURS = 6;
+
+const MAX_ACCEPTABLE_SPREAD_PCT = 2.5;
+const MAX_RATE_AGE_MINUTES = 30;
 
 const WATCHLIST = {
   NVDA: 8760,
@@ -70,15 +83,27 @@ const runtimeState = {
   cooldownMemory: {},
   logs: [],
   lastDecision: null,
-  executionHistory: []
+  executionHistory: [],
+  lastMarketData: null
 };
 
 const PROMPT = `
-Tu es LEO-AI SENTINEL v8.3.
+Tu es LEO-AI SENTINEL v9.0.
 
 MISSION :
 Gérer un petit portefeuille eToro de manière autonome.
 Objectif : faire mieux qu'un investisseur humain prudent, sans prendre de risques absurdes.
+
+NOUVEAUTÉ v9 :
+Tu disposes maintenant d'un MarketDataAgent.
+Il peut fournir des prix live eToro :
+- bid
+- ask
+- mid
+- spread %
+- date du prix
+- âge du prix
+- état du marché par actif
 
 STYLE :
 - Investisseur IA actif mais prudent.
@@ -104,6 +129,9 @@ RÈGLES ABSOLUES :
 - HOLD si le signal est faible.
 - BUY possible si le signal est bon.
 - SELL possible si la thèse se casse, si le risque augmente fortement, ou si la protection du capital l'exige.
+- Ne pas acheter si le spread est anormalement élevé.
+- Ne pas acheter si les données de marché sont incohérentes.
+- Ne pas prétendre connaître des informations non fournies.
 
 PHILOSOPHIE :
 Le bot ne doit pas être trop bridé.
@@ -127,6 +155,13 @@ ACTIFS TRÈS SPÉCULATIFS :
 SOL, RKLB, IONQ, ASTS.
 Achat seulement si très forte conviction.
 
+UTILISATION DU MARKETDATAAGENT :
+- Utilise le spread pour éviter les mauvais points d'entrée.
+- Si un actif a un spread trop large, évite BUY.
+- Si le marché semble incohérent ou données absentes, privilégie HOLD.
+- Les données live sont un filtre de prudence, pas une garantie.
+- Ne surpondère pas un mouvement instantané : tu n'as pas encore d'historique complet.
+
 DIVERSIFICATION :
 Si le portefeuille est trop concentré sur un seul actif, privilégier une diversification prudente vers un actif solide.
 Éviter d'empiler plusieurs achats sur le même actif.
@@ -138,11 +173,6 @@ Vendre seulement si :
 - mauvaise nouvelle majeure,
 - thèse d'investissement cassée,
 - besoin clair de protéger le capital.
-
-IMPORTANT :
-Tu n'as pas encore de vraies données de marché live complètes.
-Donc ne prétends pas connaître un prix exact intraday.
-Raisonne prudemment à partir du contexte fourni.
 
 FORMAT OBLIGATOIRE :
 Répondre uniquement en JSON strict.
@@ -164,12 +194,22 @@ function nowIso() {
 
 function hoursSince(dateLike) {
   if (!dateLike) return null;
-
   const time = new Date(dateLike).getTime();
-
   if (!Number.isFinite(time)) return null;
-
   return (Date.now() - time) / (1000 * 60 * 60);
+}
+
+function minutesSince(dateLike) {
+  const h = hoursSince(dateLike);
+  if (h === null) return null;
+  return h * 60;
+}
+
+function roundNumber(value, digits = 4) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const factor = Math.pow(10, digits);
+  return Math.round(n * factor) / factor;
 }
 
 function addLog(entry) {
@@ -295,6 +335,15 @@ function getInstrumentIdFromOrder(order) {
   );
 }
 
+function getInstrumentIdFromRate(rate) {
+  return Number(
+    rate.instrumentID ??
+    rate.instrumentId ??
+    rate.InstrumentID ??
+    rate.InstrumentId
+  );
+}
+
 function getPositionId(position) {
   const value =
     position.positionID ??
@@ -332,6 +381,161 @@ async function getPortfolio() {
   };
 }
 
+async function getMarketRates() {
+  const instrumentIds = Object.values(WATCHLIST).join(",");
+
+  const response = await fetch(
+    `https://public-api.etoro.com/api/v1/market-data/instruments/rates?instrumentIds=${encodeURIComponent(instrumentIds)}`,
+    {
+      method: "GET",
+      headers: etoroHeaders()
+    }
+  );
+
+  const data = await readJsonResponse(response);
+  const normalized = normalizeMarketRates(data);
+
+  runtimeState.lastMarketData = {
+    time: nowIso(),
+    status: response.status,
+    ok: response.ok,
+    data,
+    normalized
+  };
+
+  return {
+    status: response.status,
+    ok: response.ok,
+    data,
+    normalized
+  };
+}
+
+function normalizeMarketRates(data) {
+  const rawRates = Array.isArray(data?.rates) ? data.rates : [];
+
+  const ratesByAsset = {};
+  const rates = [];
+
+  for (const rate of rawRates) {
+    const instrumentId = getInstrumentIdFromRate(rate);
+    const asset = assetFromInstrumentId(instrumentId);
+
+    if (asset === "UNKNOWN") continue;
+
+    const bid = Number(rate.bid);
+    const ask = Number(rate.ask);
+    const lastExecution = Number(rate.lastExecution);
+
+    const hasBidAsk = Number.isFinite(bid) && Number.isFinite(ask) && bid > 0 && ask > 0;
+    const mid = hasBidAsk ? (bid + ask) / 2 : null;
+    const spread = hasBidAsk ? ask - bid : null;
+    const spreadPct = hasBidAsk && mid > 0 ? (spread / mid) * 100 : null;
+
+    const priceDate = rate.date || null;
+    const ageMinutes = priceDate ? minutesSince(priceDate) : null;
+
+    const normalized = {
+      asset,
+      instrumentId,
+      bid: roundNumber(bid, 6),
+      ask: roundNumber(ask, 6),
+      mid: roundNumber(mid, 6),
+      lastExecution: Number.isFinite(lastExecution) ? roundNumber(lastExecution, 6) : null,
+      spread: roundNumber(spread, 6),
+      spreadPct: roundNumber(spreadPct, 4),
+      date: priceDate,
+      ageMinutes: ageMinutes === null ? null : roundNumber(ageMinutes, 2),
+      healthy:
+        hasBidAsk &&
+        spreadPct !== null &&
+        spreadPct <= MAX_ACCEPTABLE_SPREAD_PCT &&
+        (ageMinutes === null || ageMinutes <= MAX_RATE_AGE_MINUTES)
+    };
+
+    ratesByAsset[asset] = normalized;
+    rates.push(normalized);
+  }
+
+  const warnings = [];
+
+  for (const asset of Object.keys(WATCHLIST)) {
+    if (!ratesByAsset[asset]) {
+      warnings.push({
+        type: "MISSING_RATE",
+        asset
+      });
+    }
+  }
+
+  for (const rate of rates) {
+    if (rate.spreadPct !== null && rate.spreadPct > MAX_ACCEPTABLE_SPREAD_PCT) {
+      warnings.push({
+        type: "HIGH_SPREAD",
+        asset: rate.asset,
+        spreadPct: rate.spreadPct
+      });
+    }
+
+    if (rate.ageMinutes !== null && rate.ageMinutes > MAX_RATE_AGE_MINUTES) {
+      warnings.push({
+        type: "STALE_RATE",
+        asset: rate.asset,
+        ageMinutes: rate.ageMinutes
+      });
+    }
+  }
+
+  return {
+    rates,
+    ratesByAsset,
+    warnings,
+    availableCount: rates.length,
+    requestedCount: Object.keys(WATCHLIST).length,
+    maxAcceptableSpreadPct: MAX_ACCEPTABLE_SPREAD_PCT,
+    maxRateAgeMinutes: MAX_RATE_AGE_MINUTES
+  };
+}
+
+function getMarketRateForAsset(marketData, asset) {
+  return marketData?.normalized?.ratesByAsset?.[asset] || null;
+}
+
+function isMarketRateTradable(marketData, asset) {
+  const rate = getMarketRateForAsset(marketData, asset);
+
+  if (!rate) {
+    return {
+      ok: !REQUIRE_FRESH_RATE_FOR_EXECUTION,
+      reason: REQUIRE_FRESH_RATE_FOR_EXECUTION
+        ? `Prix live manquant pour ${asset}`
+        : `Prix live manquant pour ${asset}, strict mode désactivé`
+    };
+  }
+
+  if (rate.spreadPct !== null && rate.spreadPct > MAX_ACCEPTABLE_SPREAD_PCT) {
+    return {
+      ok: false,
+      reason: `Spread trop élevé sur ${asset} (${rate.spreadPct}% > ${MAX_ACCEPTABLE_SPREAD_PCT}%)`,
+      rate
+    };
+  }
+
+  if (rate.ageMinutes !== null && rate.ageMinutes > MAX_RATE_AGE_MINUTES) {
+    return {
+      ok: false,
+      reason: `Prix trop ancien sur ${asset} (${rate.ageMinutes} min > ${MAX_RATE_AGE_MINUTES} min)`,
+      rate
+    };
+  }
+
+  return {
+    ok: true,
+    reason: `Prix live acceptable pour ${asset}`,
+    rate
+  };
+}
+
 function getClientPortfolio(portfolioResponse) {
   return portfolioResponse?.data?.clientPortfolio || {};
 }
@@ -360,7 +564,7 @@ function extractOrderSummary(order) {
     leverage: order.leverage ?? null,
     statusID: order.statusID ?? order.statusId ?? null,
     openDateTime: getOrderOpenDate(order),
-    ageHours: ageHours === null ? null : Math.round(ageHours * 100) / 100
+    ageHours: ageHours === null ? null : roundNumber(ageHours, 2)
   };
 }
 
@@ -512,7 +716,7 @@ function sanitizeDecision(decision) {
   return clean;
 }
 
-function riskController(decision, portfolioResponse) {
+function riskController(decision, portfolioResponse, marketData) {
   const d = sanitizeDecision(decision);
   const summary = extractPortfolioSummary(portfolioResponse);
   const executionStats = getExecutionStats24h();
@@ -556,6 +760,21 @@ function riskController(decision, portfolioResponse) {
         risk_check: "failed"
       },
       reason: "Actif hors watchlist"
+    };
+  }
+
+  const marketCheck = isMarketRateTradable(marketData, d.asset);
+
+  if (!marketCheck.ok) {
+    return {
+      approved: false,
+      finalDecision: {
+        ...d,
+        decision: "HOLD",
+        asset: "NONE",
+        amount_usd: 0
+      },
+      reason: `MarketDataAgent bloque : ${marketCheck.reason}`
     };
   }
 
@@ -685,7 +904,7 @@ function riskController(decision, portfolioResponse) {
     return {
       approved: true,
       finalDecision: d,
-      reason: "BUY approuvé"
+      reason: `BUY approuvé ; ${marketCheck.reason}`
     };
   }
 
@@ -758,7 +977,7 @@ function riskController(decision, portfolioResponse) {
     return {
       approved: true,
       finalDecision: d,
-      reason: "SELL approuvé"
+      reason: `SELL approuvé ; ${marketCheck.reason}`
     };
   }
 
@@ -940,7 +1159,7 @@ async function executeSell(asset) {
   };
 }
 
-async function askDecisionAgent(portfolioSummary, source) {
+async function askDecisionAgent(portfolioSummary, marketSummary, source) {
   const response = await client.chat.completions.create({
     model: "gpt-4.1-mini",
     response_format: { type: "json_object" },
@@ -964,12 +1183,18 @@ async function askDecisionAgent(portfolioSummary, source) {
             max_sells_24h: MAX_SELLS_24H,
             min_hours_between_executions: MIN_HOURS_BETWEEN_EXECUTIONS
           },
+          market_constraints: {
+            max_acceptable_spread_pct: MAX_ACCEPTABLE_SPREAD_PCT,
+            max_rate_age_minutes: MAX_RATE_AGE_MINUTES,
+            require_fresh_rate_for_execution: REQUIRE_FRESH_RATE_FOR_EXECUTION
+          },
           watchlist: WATCHLIST,
           asset_rules: ASSET_RULES,
           portfolio_summary: portfolioSummary,
+          market_data_summary: marketSummary,
           execution_stats_24h: getExecutionStats24h(),
           instruction:
-            "Analyse le portefeuille et décide BUY, SELL ou HOLD. Tu peux être actif mais pas imprudent. Une seule décision."
+            "Analyse le portefeuille et les données de marché live. Décide BUY, SELL ou HOLD. Tu peux être actif mais pas imprudent. Une seule décision."
         })
       }
     ]
@@ -996,10 +1221,38 @@ async function scanMarket(source = "manual-scan") {
     const portfolio = await getPortfolio();
     const portfolioSummary = extractPortfolioSummary(portfolio);
 
+    let marketData;
+
+    try {
+      marketData = await getMarketRates();
+    } catch (error) {
+      marketData = {
+        status: null,
+        ok: false,
+        error: error.message,
+        normalized: {
+          rates: [],
+          ratesByAsset: {},
+          warnings: [
+            {
+              type: "MARKET_DATA_ERROR",
+              message: error.message
+            }
+          ],
+          availableCount: 0,
+          requestedCount: Object.keys(WATCHLIST).length
+        }
+      };
+    }
+
     let decisionRaw;
 
     try {
-      decisionRaw = await askDecisionAgent(portfolioSummary, source);
+      decisionRaw = await askDecisionAgent(
+        portfolioSummary,
+        marketData.normalized,
+        source
+      );
     } catch (error) {
       const failed = {
         version: VERSION,
@@ -1011,13 +1264,15 @@ async function scanMarket(source = "manual-scan") {
       addLog({
         source,
         event: "AI_DECISION_ERROR",
-        error: error.message
+        error: error.message,
+        marketDataStatus: marketData.status,
+        marketDataOk: marketData.ok
       });
 
       return failed;
     }
 
-    const control = riskController(decisionRaw, portfolio);
+    const control = riskController(decisionRaw, portfolio, marketData);
 
     let execution = {
       skipped: true,
@@ -1040,8 +1295,11 @@ async function scanMarket(source = "manual-scan") {
       source,
       auto_trade_enabled: AUTO_TRADE,
       portfolio_status: portfolio.status,
+      market_data_status: marketData.status,
+      market_data_ok: marketData.ok,
       agents: {
         portfolioSummary,
+        marketDataAgent: marketData.normalized,
         executionStats24h: getExecutionStats24h(),
         decisionAgentRaw: decisionRaw,
         riskController: control
@@ -1057,6 +1315,13 @@ async function scanMarket(source = "manual-scan") {
       risk_reason: control.reason,
       execution,
       executionStats24h: getExecutionStats24h(),
+      market: {
+        status: marketData.status,
+        ok: marketData.ok,
+        availableCount: marketData.normalized?.availableCount,
+        requestedCount: marketData.normalized?.requestedCount,
+        warnings: marketData.normalized?.warnings || []
+      },
       portfolio: {
         positionsCount: portfolioSummary.positionsCount,
         ordersForOpenCount: portfolioSummary.ordersForOpenCount,
@@ -1083,16 +1348,36 @@ function htmlEscape(value) {
     .replaceAll('"', "&quot;");
 }
 
-function renderDashboard({ summary, metrics, secret }) {
+function renderDashboard({ summary, metrics, market, secret }) {
   const last = runtimeState.lastDecision;
   const openAssets = summary.openAssets.join(", ") || "Aucun";
   const pendingWarnings = summary.pendingWarnings.length
     ? summary.pendingWarnings.map((w) => `${w.asset} ordre ${w.orderId} depuis ${w.ageHours}h`).join(" | ")
     : "Aucune";
 
+  const marketWarnings = market?.warnings?.length
+    ? market.warnings.map((w) => `${w.type}:${w.asset || ""}`).join(" | ")
+    : "Aucune";
+
   const lastDecisionText = last
     ? `${last.time} — ${last.decision?.decision || "?"} ${last.decision?.asset || ""} — ${last.risk_reason || ""}`
     : "Aucune décision enregistrée depuis le dernier redémarrage.";
+
+  const rateRows = (market?.rates || [])
+    .map((rate) => {
+      return `
+        <tr>
+          <td>${htmlEscape(rate.asset)}</td>
+          <td>${htmlEscape(rate.bid)}</td>
+          <td>${htmlEscape(rate.ask)}</td>
+          <td>${htmlEscape(rate.mid)}</td>
+          <td>${htmlEscape(rate.spreadPct)}</td>
+          <td>${htmlEscape(rate.ageMinutes)}</td>
+          <td>${rate.healthy ? "✅" : "⚠️"}</td>
+        </tr>
+      `;
+    })
+    .join("");
 
   const rows = runtimeState.logs
     .slice(0, 20)
@@ -1144,6 +1429,10 @@ function renderDashboard({ summary, metrics, secret }) {
       <div class="big ${AUTO_TRADE ? "ok" : "bad"}">${AUTO_TRADE ? "ACTIF" : "OFF"}</div>
     </div>
     <div class="card">
+      <div class="muted">MarketDataAgent</div>
+      <div class="big ${market?.availableCount > 0 ? "ok" : "warn"}">${market?.availableCount || 0}/${market?.requestedCount || 0}</div>
+    </div>
+    <div class="card">
       <div class="muted">Positions ouvertes</div>
       <div class="big">${summary.positionsCount}</div>
     </div>
@@ -1159,10 +1448,6 @@ function renderDashboard({ summary, metrics, secret }) {
       <div class="muted">Ordres exécutés 24h</div>
       <div class="big">${metrics.executionStats24h.total}/${MAX_EXECUTED_ORDERS_24H}</div>
     </div>
-    <div class="card">
-      <div class="muted">Dernier ordre</div>
-      <div class="big">${metrics.executionStats24h.hoursSinceLastExecution === null ? "Aucun" : metrics.executionStats24h.hoursSinceLastExecution.toFixed(1) + "h"}</div>
-    </div>
   </div>
 
   <div class="card">
@@ -1173,10 +1458,35 @@ function renderDashboard({ summary, metrics, secret }) {
   </div>
 
   <div class="card">
+    <h2>MarketDataAgent</h2>
+    <p><strong>Warnings :</strong> ${htmlEscape(marketWarnings)}</p>
+    <p><strong>Spread max accepté :</strong> ${MAX_ACCEPTABLE_SPREAD_PCT}%</p>
+    <p><strong>Âge prix max :</strong> ${MAX_RATE_AGE_MINUTES} min</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Actif</th>
+          <th>Bid</th>
+          <th>Ask</th>
+          <th>Mid</th>
+          <th>Spread %</th>
+          <th>Âge min</th>
+          <th>OK</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rateRows || "<tr><td colspan='7'>Aucune donnée marché</td></tr>"}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
     <h2>Dernière décision</h2>
     <p>${htmlEscape(lastDecisionText)}</p>
     <p>
       <a href="/status?secret=${encodeURIComponent(secret)}">Status JSON</a> —
+      <a href="/metrics?secret=${encodeURIComponent(secret)}">Metrics JSON</a> —
+      <a href="/market-summary?secret=${encodeURIComponent(secret)}">Market JSON</a> —
       <a href="/logs?secret=${encodeURIComponent(secret)}">Logs JSON</a> —
       <a href="/last-decision?secret=${encodeURIComponent(secret)}">Dernière décision JSON</a>
     </p>
@@ -1214,6 +1524,7 @@ app.get("/health", (req, res) => {
     ok: true,
     auto_trade_enabled: AUTO_TRADE,
     bot_secret_configured: Boolean(BOT_SECRET),
+    require_fresh_rate_for_execution: REQUIRE_FRESH_RATE_FOR_EXECUTION,
     time: nowIso()
   });
 });
@@ -1227,6 +1538,7 @@ app.get("/status", requireSecret, async (req, res) => {
       version: VERSION,
       auto_trade_enabled: AUTO_TRADE,
       bot_secret_configured: Boolean(BOT_SECRET),
+      require_fresh_rate_for_execution: REQUIRE_FRESH_RATE_FOR_EXECUTION,
       portfolio_status: portfolio.status,
       portfolio_ok: portfolio.ok,
       positions_count: summary.positionsCount,
@@ -1239,6 +1551,16 @@ app.get("/status", requireSecret, async (req, res) => {
       pending_warnings: summary.pendingWarnings,
       execution_stats_24h: getExecutionStats24h(),
       cooldown_memory: runtimeState.cooldownMemory,
+      last_market_data_status: runtimeState.lastMarketData
+        ? {
+            time: runtimeState.lastMarketData.time,
+            status: runtimeState.lastMarketData.status,
+            ok: runtimeState.lastMarketData.ok,
+            availableCount: runtimeState.lastMarketData.normalized?.availableCount,
+            requestedCount: runtimeState.lastMarketData.normalized?.requestedCount,
+            warnings: runtimeState.lastMarketData.normalized?.warnings || []
+          }
+        : null,
       last_decision: runtimeState.lastDecision
     });
   } catch (error) {
@@ -1268,7 +1590,51 @@ app.get("/metrics", requireSecret, async (req, res) => {
       pending_warnings: summary.pendingWarnings,
       execution_stats_24h: getExecutionStats24h(),
       scan_running: runtimeState.scanRunning,
-      logs_count: runtimeState.logs.length
+      logs_count: runtimeState.logs.length,
+      last_market_data_status: runtimeState.lastMarketData
+        ? {
+            time: runtimeState.lastMarketData.time,
+            status: runtimeState.lastMarketData.status,
+            ok: runtimeState.lastMarketData.ok,
+            availableCount: runtimeState.lastMarketData.normalized?.availableCount,
+            requestedCount: runtimeState.lastMarketData.normalized?.requestedCount,
+            warnings: runtimeState.lastMarketData.normalized?.warnings || []
+          }
+        : null
+    });
+  } catch (error) {
+    res.json({
+      version: VERSION,
+      error: error.message
+    });
+  }
+});
+
+app.get("/market-rates", requireSecret, async (req, res) => {
+  try {
+    const rates = await getMarketRates();
+    res.json({
+      version: VERSION,
+      status: rates.status,
+      ok: rates.ok,
+      raw: rates.data
+    });
+  } catch (error) {
+    res.json({
+      version: VERSION,
+      error: error.message
+    });
+  }
+});
+
+app.get("/market-summary", requireSecret, async (req, res) => {
+  try {
+    const rates = await getMarketRates();
+    res.json({
+      version: VERSION,
+      status: rates.status,
+      ok: rates.ok,
+      summary: rates.normalized
     });
   } catch (error) {
     res.json({
@@ -1283,8 +1649,25 @@ app.get("/dashboard", requireSecret, async (req, res) => {
     const portfolio = await getPortfolio();
     const summary = extractPortfolioSummary(portfolio);
 
+    let marketData;
+
+    try {
+      marketData = await getMarketRates();
+    } catch {
+      marketData = {
+        normalized: {
+          rates: [],
+          ratesByAsset: {},
+          warnings: [{ type: "MARKET_DATA_ERROR" }],
+          availableCount: 0,
+          requestedCount: Object.keys(WATCHLIST).length
+        }
+      };
+    }
+
     const html = renderDashboard({
       summary,
+      market: marketData.normalized,
       metrics: {
         executionStats24h: getExecutionStats24h()
       },
@@ -1359,6 +1742,16 @@ app.get("/buy-test", requireSecret, async (req, res) => {
     }
 
     const portfolio = await getPortfolio();
+    const marketData = await getMarketRates();
+    const marketCheck = isMarketRateTradable(marketData, asset);
+
+    if (!marketCheck.ok) {
+      return res.json({
+        skipped: true,
+        reason: marketCheck.reason,
+        marketCheck
+      });
+    }
 
     if (hasOpenPosition(portfolio, asset)) {
       return res.json({
@@ -1374,6 +1767,7 @@ app.get("/buy-test", requireSecret, async (req, res) => {
       event: "MANUAL_BUY",
       asset,
       amount,
+      marketCheck,
       execution: result,
       executionStats24h: getExecutionStats24h()
     });
