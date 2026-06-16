@@ -10,13 +10,15 @@ const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-const VERSION = "v8.1-simple-balanced-autonomous";
+const VERSION = "v8.2-secure-logs-autonomous";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
+const BOT_SECRET = process.env.BOT_SECRET || "";
 
 const MAX_ORDER_USD = 10;
 const MAX_OPEN_POSITIONS = 10;
 const BUY_COOLDOWN_HOURS = 6;
+const MAX_LOGS = 50;
 
 const WATCHLIST = {
   NVDA: 8760,
@@ -57,14 +59,19 @@ const ASSET_RULES = {
   ASTS: { category: "SPACE_SPECULATIVE", buyThreshold: 82, sellThreshold: 76 }
 };
 
-const cooldownMemory = {};
+const runtimeState = {
+  scanRunning: false,
+  cooldownMemory: {},
+  logs: [],
+  lastDecision: null
+};
 
 const PROMPT = `
-Tu es LEO-AI SENTINEL v8.1.
+Tu es LEO-AI SENTINEL v8.2.
 
 MISSION :
 Gérer un petit portefeuille eToro de manière autonome.
-Objectif : faire mieux qu'un investisseur humain débutant/prudent, sans prendre de risques absurdes.
+Objectif : faire mieux qu'un investisseur humain prudent, sans prendre de risques absurdes.
 
 STYLE :
 - Investisseur IA actif mais prudent.
@@ -143,6 +150,46 @@ Pas de texte hors JSON.
 }
 `;
 
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function addLog(entry) {
+  const log = {
+    time: nowIso(),
+    version: VERSION,
+    ...entry
+  };
+
+  runtimeState.logs.unshift(log);
+
+  if (runtimeState.logs.length > MAX_LOGS) {
+    runtimeState.logs = runtimeState.logs.slice(0, MAX_LOGS);
+  }
+
+  runtimeState.lastDecision = log;
+}
+
+function requireSecret(req, res, next) {
+  if (!BOT_SECRET) {
+    return res.status(500).json({
+      error: "BOT_SECRET manquant dans Render Environment Variables",
+      action: "Ajoute BOT_SECRET dans Render, puis redeploy."
+    });
+  }
+
+  const providedSecret = req.query.secret || req.headers["x-bot-secret"];
+
+  if (providedSecret !== BOT_SECRET) {
+    return res.status(401).json({
+      error: "Accès refusé",
+      hint: "Ajoute ?secret=TON_SECRET à l'URL."
+    });
+  }
+
+  next();
+}
+
 function etoroHeaders() {
   return {
     "Content-Type": "application/json",
@@ -152,12 +199,20 @@ function etoroHeaders() {
   };
 }
 
+async function readJsonResponse(response) {
+  const text = await response.text();
+
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    return { raw: text };
+  }
+}
+
 function normalizeConfidence(value) {
   let confidence = Number(value);
 
-  if (!Number.isFinite(confidence)) {
-    return 0;
-  }
+  if (!Number.isFinite(confidence)) return 0;
 
   if (confidence > 0 && confidence <= 10) {
     confidence = confidence * 10;
@@ -171,10 +226,6 @@ function normalizeConfidence(value) {
   return confidence;
 }
 
-function nowIso() {
-  return new Date().toISOString();
-}
-
 function getInstrumentIdFromPosition(position) {
   return Number(
     position.instrumentID ??
@@ -185,12 +236,14 @@ function getInstrumentIdFromPosition(position) {
 }
 
 function getPositionId(position) {
-  return Number(
+  const value =
     position.positionID ??
     position.positionId ??
     position.PositionID ??
-    position.PositionId
-  );
+    position.PositionId;
+
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 function assetFromInstrumentId(instrumentId) {
@@ -210,7 +263,7 @@ async function getPortfolio() {
     }
   );
 
-  const data = await response.json();
+  const data = await readJsonResponse(response);
 
   return {
     status: response.status,
@@ -219,8 +272,12 @@ async function getPortfolio() {
   };
 }
 
+function getClientPortfolio(portfolioResponse) {
+  return portfolioResponse?.data?.clientPortfolio || {};
+}
+
 function extractPortfolioSummary(portfolioResponse) {
-  const clientPortfolio = portfolioResponse?.data?.clientPortfolio || {};
+  const clientPortfolio = getClientPortfolio(portfolioResponse);
 
   const positions = clientPortfolio.positions || [];
   const ordersForOpen = clientPortfolio.ordersForOpen || [];
@@ -228,6 +285,7 @@ function extractPortfolioSummary(portfolioResponse) {
 
   const openPositions = positions.map((p) => {
     const instrumentId = getInstrumentIdFromPosition(p);
+
     return {
       asset: assetFromInstrumentId(instrumentId),
       instrumentId,
@@ -261,7 +319,7 @@ function extractPortfolioSummary(portfolioResponse) {
 }
 
 function hasOpenPosition(portfolioResponse, asset) {
-  const clientPortfolio = portfolioResponse?.data?.clientPortfolio || {};
+  const clientPortfolio = getClientPortfolio(portfolioResponse);
   const positions = clientPortfolio.positions || [];
   const wantedId = WATCHLIST[asset];
 
@@ -269,7 +327,7 @@ function hasOpenPosition(portfolioResponse, asset) {
 }
 
 function findOpenPosition(portfolioResponse, asset) {
-  const clientPortfolio = portfolioResponse?.data?.clientPortfolio || {};
+  const clientPortfolio = getClientPortfolio(portfolioResponse);
   const positions = clientPortfolio.positions || [];
   const wantedId = WATCHLIST[asset];
 
@@ -277,7 +335,7 @@ function findOpenPosition(portfolioResponse, asset) {
 }
 
 function hasOpenOrder(portfolioResponse, asset) {
-  const clientPortfolio = portfolioResponse?.data?.clientPortfolio || {};
+  const clientPortfolio = getClientPortfolio(portfolioResponse);
   const ordersForOpen = clientPortfolio.ordersForOpen || [];
   const wantedId = WATCHLIST[asset];
 
@@ -293,12 +351,27 @@ function hasOpenOrder(portfolioResponse, asset) {
   });
 }
 
-function isInCooldown(asset) {
-  const lastTime = cooldownMemory[asset];
+function hasCloseOrder(portfolioResponse, asset) {
+  const clientPortfolio = getClientPortfolio(portfolioResponse);
+  const ordersForClose = clientPortfolio.ordersForClose || [];
+  const wantedId = WATCHLIST[asset];
 
-  if (!lastTime) {
-    return false;
-  }
+  return ordersForClose.some((o) => {
+    const instrumentId = Number(
+      o.instrumentID ??
+      o.instrumentId ??
+      o.InstrumentID ??
+      o.InstrumentId
+    );
+
+    return instrumentId === wantedId;
+  });
+}
+
+function isInCooldown(asset) {
+  const lastTime = runtimeState.cooldownMemory[asset];
+
+  if (!lastTime) return false;
 
   const elapsedMs = Date.now() - lastTime;
   const cooldownMs = BUY_COOLDOWN_HOURS * 60 * 60 * 1000;
@@ -307,7 +380,7 @@ function isInCooldown(asset) {
 }
 
 function setCooldown(asset) {
-  cooldownMemory[asset] = Date.now();
+  runtimeState.cooldownMemory[asset] = Date.now();
 }
 
 function sanitizeDecision(decision) {
@@ -316,7 +389,7 @@ function sanitizeDecision(decision) {
     asset: String(decision?.asset || "NONE").toUpperCase(),
     amount_usd: Number(decision?.amount_usd || 0),
     confidence: normalizeConfidence(decision?.confidence),
-    reason: String(decision?.reason || "Aucune raison fournie"),
+    reason: String(decision?.reason || "Aucune raison fournie").slice(0, 300),
     risk_check: String(decision?.risk_check || "failed").toLowerCase()
   };
 
@@ -352,6 +425,7 @@ function sanitizeDecision(decision) {
 
 function riskController(decision, portfolioResponse) {
   const d = sanitizeDecision(decision);
+  const summary = extractPortfolioSummary(portfolioResponse);
 
   if (d.decision === "HOLD") {
     return {
@@ -411,6 +485,19 @@ function riskController(decision, portfolioResponse) {
       };
     }
 
+    if (summary.ordersForOpenCount > 0) {
+      return {
+        approved: false,
+        finalDecision: {
+          ...d,
+          decision: "HOLD",
+          asset: "NONE",
+          amount_usd: 0
+        },
+        reason: "Ordre d'achat déjà en attente dans le portefeuille"
+      };
+    }
+
     if (hasOpenPosition(portfolioResponse, d.asset)) {
       return {
         approved: false,
@@ -450,8 +537,6 @@ function riskController(decision, portfolioResponse) {
       };
     }
 
-    const summary = extractPortfolioSummary(portfolioResponse);
-
     if (summary.positionsCount >= MAX_OPEN_POSITIONS) {
       return {
         approved: false,
@@ -483,6 +568,32 @@ function riskController(decision, portfolioResponse) {
           amount_usd: 0
         },
         reason: `Confiance SELL trop faible (${d.confidence} < ${rules.sellThreshold})`
+      };
+    }
+
+    if (summary.ordersForCloseCount > 0) {
+      return {
+        approved: false,
+        finalDecision: {
+          ...d,
+          decision: "HOLD",
+          asset: "NONE",
+          amount_usd: 0
+        },
+        reason: "Ordre de vente déjà en attente dans le portefeuille"
+      };
+    }
+
+    if (hasCloseOrder(portfolioResponse, d.asset)) {
+      return {
+        approved: false,
+        finalDecision: {
+          ...d,
+          decision: "HOLD",
+          asset: "NONE",
+          amount_usd: 0
+        },
+        reason: `Ordre de vente déjà en attente sur ${d.asset}`
       };
     }
 
@@ -560,7 +671,7 @@ async function executeBuy(asset, amount) {
     }
   );
 
-  const data = await response.json();
+  const data = await readJsonResponse(response);
 
   if (response.ok) {
     setCooldown(asset);
@@ -591,8 +702,7 @@ async function executeSell(asset) {
   if (!position) {
     return {
       skipped: true,
-      reason: `Aucune position ouverte trouvée pour ${asset}`,
-      portfolio
+      reason: `Aucune position ouverte trouvée pour ${asset}`
     };
   }
 
@@ -608,17 +718,18 @@ async function executeSell(asset) {
   }
 
   const response = await fetch(
-    "https://public-api.etoro.com/api/v1/trading/execution/market-close-orders",
+    `https://public-api.etoro.com/api/v1/trading/execution/market-close-orders/positions/${positionId}`,
     {
       method: "POST",
       headers: etoroHeaders(),
       body: JSON.stringify({
-        positionId
+        InstrumentId: instrumentId,
+        UnitsToDeduct: null
       })
     }
   );
 
-  const data = await response.json();
+  const data = await readJsonResponse(response);
 
   return {
     status: response.status,
@@ -666,63 +777,109 @@ async function askDecisionAgent(portfolioSummary, source) {
 }
 
 async function scanMarket(source = "manual-scan") {
-  const portfolio = await getPortfolio();
-  const portfolioSummary = extractPortfolioSummary(portfolio);
-
-  let decisionRaw;
-
-  try {
-    decisionRaw = await askDecisionAgent(portfolioSummary, source);
-  } catch (error) {
+  if (runtimeState.scanRunning) {
     return {
       version: VERSION,
-      error: "Erreur décision IA",
-      details: error.message
+      skipped: true,
+      reason: "Un scan est déjà en cours"
     };
   }
 
-  const control = riskController(decisionRaw, portfolio);
+  runtimeState.scanRunning = true;
 
-  let execution = {
-    skipped: true,
-    reason: "Aucun ordre exécuté"
-  };
+  try {
+    const portfolio = await getPortfolio();
+    const portfolioSummary = extractPortfolioSummary(portfolio);
 
-  if (control.approved && control.finalDecision.decision === "BUY") {
-    execution = await executeBuy(
-      control.finalDecision.asset,
-      control.finalDecision.amount_usd
-    );
+    let decisionRaw;
+
+    try {
+      decisionRaw = await askDecisionAgent(portfolioSummary, source);
+    } catch (error) {
+      const failed = {
+        version: VERSION,
+        source,
+        error: "Erreur décision IA",
+        details: error.message
+      };
+
+      addLog({
+        source,
+        event: "AI_DECISION_ERROR",
+        error: error.message
+      });
+
+      return failed;
+    }
+
+    const control = riskController(decisionRaw, portfolio);
+
+    let execution = {
+      skipped: true,
+      reason: "Aucun ordre exécuté"
+    };
+
+    if (control.approved && control.finalDecision.decision === "BUY") {
+      execution = await executeBuy(
+        control.finalDecision.asset,
+        control.finalDecision.amount_usd
+      );
+    }
+
+    if (control.approved && control.finalDecision.decision === "SELL") {
+      execution = await executeSell(control.finalDecision.asset);
+    }
+
+    const result = {
+      version: VERSION,
+      source,
+      auto_trade_enabled: AUTO_TRADE,
+      portfolio_status: portfolio.status,
+      agents: {
+        portfolioSummary,
+        decisionAgentRaw: decisionRaw,
+        riskController: control
+      },
+      decision: control.finalDecision,
+      execution
+    };
+
+    addLog({
+      source,
+      event: "SCAN_COMPLETED",
+      decision: control.finalDecision,
+      risk_reason: control.reason,
+      execution,
+      portfolio: {
+        positionsCount: portfolioSummary.positionsCount,
+        ordersForOpenCount: portfolioSummary.ordersForOpenCount,
+        ordersForCloseCount: portfolioSummary.ordersForCloseCount,
+        openAssets: portfolioSummary.openAssets,
+        categoryCounts: portfolioSummary.categoryCounts
+      }
+    });
+
+    return result;
+  } finally {
+    runtimeState.scanRunning = false;
   }
-
-  if (control.approved && control.finalDecision.decision === "SELL") {
-    execution = await executeSell(control.finalDecision.asset);
-  }
-
-  return {
-    version: VERSION,
-    source,
-    auto_trade_enabled: AUTO_TRADE,
-    portfolio_status: portfolio.status,
-    agents: {
-      portfolioSummary,
-      decisionAgentRaw: decisionRaw,
-      riskController: control
-    },
-    decision: control.finalDecision,
-    execution
-  };
 }
 
 app.get("/", (req, res) => {
   res.send(`LEO-AI SENTINEL ${VERSION} actif`);
 });
 
-app.get("/watchlist", (req, res) => {
-  res.json(WATCHLIST);
+app.get("/health", (req, res) => {
+  res.json({
+    version: VERSION,
+    ok: true,
+    auto_trade_enabled: AUTO_TRADE,
+    bot_secret_configured: Boolean(BOT_SECRET),
+    time: nowIso()
+  });
 });
 
-app.get("/status", async (req, res) => {
+app.get("/status", requireSecret, async (req, res) => {
   try {
     const portfolio = await getPortfolio();
     const summary = extractPortfolioSummary(portfolio);
@@ -730,7 +887,7 @@ app.get("/status", async (req, res) => {
     res.json({
       version: VERSION,
       auto_trade_enabled: AUTO_TRADE,
-      watchlist: WATCHLIST,
+      bot_secret_configured: Boolean(BOT_SECRET),
       portfolio_status: portfolio.status,
       portfolio_ok: portfolio.ok,
       positions_count: summary.positionsCount,
@@ -738,7 +895,8 @@ app.get("/status", async (req, res) => {
       orders_for_close_count: summary.ordersForCloseCount,
       open_assets: summary.openAssets,
       category_counts: summary.categoryCounts,
-      cooldown_memory: cooldownMemory
+      cooldown_memory: runtimeState.cooldownMemory,
+      last_decision: runtimeState.lastDecision
     });
   } catch (error) {
     res.json({
@@ -748,7 +906,31 @@ app.get("/status", async (req, res) => {
   }
 });
 
-app.get("/portfolio", async (req, res) => {
+app.get("/logs", requireSecret, (req, res) => {
+  const limit = Math.min(Number(req.query.limit || 20), MAX_LOGS);
+
+  res.json({
+    version: VERSION,
+    logs: runtimeState.logs.slice(0, limit)
+  });
+});
+
+app.get("/last-decision", requireSecret, (req, res) => {
+  res.json({
+    version: VERSION,
+    last_decision: runtimeState.lastDecision
+  });
+});
+
+app.get("/watchlist", requireSecret, (req, res) => {
+  res.json({
+    version: VERSION,
+    watchlist: WATCHLIST,
+    asset_rules: ASSET_RULES
+  });
+});
+
+app.get("/portfolio", requireSecret, async (req, res) => {
   try {
     const portfolio = await getPortfolio();
     res.json(portfolio);
@@ -759,7 +941,7 @@ app.get("/portfolio", async (req, res) => {
   }
 });
 
-app.get("/scan", async (req, res) => {
+app.get("/scan", requireSecret, async (req, res) => {
   try {
     const result = await scanMarket("manual-scan");
     res.json(result);
@@ -772,14 +954,14 @@ app.get("/scan", async (req, res) => {
   }
 });
 
-app.get("/buy-test", async (req, res) => {
+app.get("/buy-test", requireSecret, async (req, res) => {
   try {
     const asset = String(req.query.asset || "").toUpperCase();
     const amount = Number(req.query.amount || MAX_ORDER_USD);
 
     if (!asset || !WATCHLIST[asset]) {
       return res.json({
-        error: "Actif invalide. Exemple : /buy-test?asset=NVDA&amount=10",
+        error: "Actif invalide. Exemple : /buy-test?asset=NVDA&amount=10&secret=TON_SECRET",
         allowed_assets: Object.keys(WATCHLIST)
       });
     }
@@ -794,6 +976,15 @@ app.get("/buy-test", async (req, res) => {
     }
 
     const result = await executeBuy(asset, amount);
+
+    addLog({
+      source: "manual-buy-test",
+      event: "MANUAL_BUY",
+      asset,
+      amount,
+      execution: result
+    });
+
     res.json(result);
   } catch (error) {
     res.json({
@@ -802,18 +993,26 @@ app.get("/buy-test", async (req, res) => {
   }
 });
 
-app.get("/sell-test", async (req, res) => {
+app.get("/sell-test", requireSecret, async (req, res) => {
   try {
     const asset = String(req.query.asset || "").toUpperCase();
 
     if (!asset || !WATCHLIST[asset]) {
       return res.json({
-        error: "Actif invalide. Exemple : /sell-test?asset=NVDA",
+        error: "Actif invalide. Exemple : /sell-test?asset=NVDA&secret=TON_SECRET",
         allowed_assets: Object.keys(WATCHLIST)
       });
     }
 
     const result = await executeSell(asset);
+
+    addLog({
+      source: "manual-sell-test",
+      event: "MANUAL_SELL",
+      asset,
+      execution: result
+    });
+
     res.json(result);
   } catch (error) {
     res.json({
@@ -822,7 +1021,7 @@ app.get("/sell-test", async (req, res) => {
   }
 });
 
-app.get("/resolve-symbol", async (req, res) => {
+app.get("/resolve-symbol", requireSecret, async (req, res) => {
   try {
     const symbol = req.query.symbol;
 
@@ -840,7 +1039,7 @@ app.get("/resolve-symbol", async (req, res) => {
       }
     );
 
-    const data = await response.json();
+    const data = await readJsonResponse(response);
 
     res.json({
       symbol,
