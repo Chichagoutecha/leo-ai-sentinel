@@ -10,18 +10,11 @@ const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-const VERSION = "v9.0-marketdata-agent-autonomous";
+const VERSION = "v9.1-marketdata-fallback-autonomous";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const BOT_SECRET = process.env.BOT_SECRET || "";
 
-/*
-  Option stricte :
-  - false par défaut pour éviter de bloquer le bot si l'endpoint rates eToro répond mal.
-  - si tu veux forcer le bot à n'exécuter QUE si le prix live est disponible :
-    ajoute dans Render Environment :
-    REQUIRE_FRESH_RATE_FOR_EXECUTION=true
-*/
 const REQUIRE_FRESH_RATE_FOR_EXECUTION =
   process.env.REQUIRE_FRESH_RATE_FOR_EXECUTION === "true";
 
@@ -88,15 +81,19 @@ const runtimeState = {
 };
 
 const PROMPT = `
-Tu es LEO-AI SENTINEL v9.0.
+Tu es LEO-AI SENTINEL v9.1.
 
 MISSION :
 Gérer un petit portefeuille eToro de manière autonome.
 Objectif : faire mieux qu'un investisseur humain prudent, sans prendre de risques absurdes.
 
-NOUVEAUTÉ v9 :
-Tu disposes maintenant d'un MarketDataAgent.
-Il peut fournir des prix live eToro :
+NOUVEAUTÉ v9.1 :
+Tu disposes maintenant d'un MarketDataAgent plus robuste.
+Il tente de récupérer les prix eToro :
+- en bloc pour toute la watchlist
+- puis actif par actif si la requête globale échoue
+
+Le MarketDataAgent peut fournir :
 - bid
 - ask
 - mid
@@ -317,6 +314,25 @@ function normalizeConfidence(value) {
   return confidence;
 }
 
+function getFirstNumber(object, keys) {
+  for (const key of keys) {
+    const value = object?.[key];
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+  }
+
+  return null;
+}
+
+function getFirstValue(object, keys) {
+  for (const key of keys) {
+    const value = object?.[key];
+    if (value !== undefined && value !== null) return value;
+  }
+
+  return null;
+}
+
 function getInstrumentIdFromPosition(position) {
   return Number(
     position.instrumentID ??
@@ -340,7 +356,9 @@ function getInstrumentIdFromRate(rate) {
     rate.instrumentID ??
     rate.instrumentId ??
     rate.InstrumentID ??
-    rate.InstrumentId
+    rate.InstrumentId ??
+    rate.instrumentIDField ??
+    rate.instrumentIdField
   );
 }
 
@@ -382,37 +400,139 @@ async function getPortfolio() {
 }
 
 async function getMarketRates() {
-  const instrumentIds = Object.values(WATCHLIST).join(",");
+  const allEntries = Object.entries(WATCHLIST);
+  const allIds = allEntries.map(([asset, id]) => id);
 
-  const response = await fetch(
-    `https://public-api.etoro.com/api/v1/market-data/instruments/rates?instrumentIds=${encodeURIComponent(instrumentIds)}`,
-    {
-      method: "GET",
-      headers: etoroHeaders()
+  async function fetchRates(ids) {
+    const idsParam = ids.join(",");
+
+    const response = await fetch(
+      `https://public-api.etoro.com/api/v1/market-data/instruments/rates?instrumentIds=${encodeURIComponent(idsParam)}`,
+      {
+        method: "GET",
+        headers: etoroHeaders()
+      }
+    );
+
+    const data = await readJsonResponse(response);
+
+    return {
+      status: response.status,
+      ok: response.ok,
+      data
+    };
+  }
+
+  let primary = await fetchRates(allIds);
+
+  if (
+    primary.ok &&
+    primary.data &&
+    normalizeMarketRates(primary.data).availableCount > 0
+  ) {
+    const normalized = normalizeMarketRates(primary.data);
+
+    runtimeState.lastMarketData = {
+      time: nowIso(),
+      source: "bulk",
+      status: primary.status,
+      ok: primary.ok,
+      data: primary.data,
+      normalized
+    };
+
+    return {
+      status: primary.status,
+      ok: primary.ok,
+      source: "bulk",
+      data: primary.data,
+      normalized
+    };
+  }
+
+  const collectedRates = [];
+  const failures = [];
+
+  for (const [asset, instrumentId] of allEntries) {
+    try {
+      const single = await fetchRates([instrumentId]);
+      const normalizedSingle = normalizeMarketRates(single.data);
+
+      if (single.ok && normalizedSingle.availableCount > 0) {
+        const singleRates = extractRawRates(single.data);
+        collectedRates.push(...singleRates);
+      } else {
+        failures.push({
+          asset,
+          instrumentId,
+          status: single.status,
+          ok: single.ok,
+          data: single.data
+        });
+      }
+    } catch (error) {
+      failures.push({
+        asset,
+        instrumentId,
+        error: error.message
+      });
     }
-  );
+  }
 
-  const data = await readJsonResponse(response);
-  const normalized = normalizeMarketRates(data);
+  const fallbackData = {
+    rates: collectedRates
+  };
+
+  const normalized = normalizeMarketRates(fallbackData);
+
+  for (const failure of failures) {
+    normalized.warnings.push({
+      type: "RATE_FETCH_FAILED",
+      asset: failure.asset,
+      instrumentId: failure.instrumentId,
+      status: failure.status || null,
+      error: failure.error || null
+    });
+  }
 
   runtimeState.lastMarketData = {
     time: nowIso(),
-    status: response.status,
-    ok: response.ok,
-    data,
+    source: "fallback-one-by-one",
+    status: primary.status,
+    ok: collectedRates.length > 0,
+    primaryStatus: primary.status,
+    primaryOk: primary.ok,
+    primaryData: primary.data,
+    failures,
     normalized
   };
 
   return {
-    status: response.status,
-    ok: response.ok,
-    data,
+    status: primary.status,
+    ok: collectedRates.length > 0,
+    source: "fallback-one-by-one",
+    data: {
+      primaryStatus: primary.status,
+      primaryOk: primary.ok,
+      primaryData: primary.data,
+      collectedRatesCount: collectedRates.length,
+      failures
+    },
     normalized
   };
 }
 
+function extractRawRates(data) {
+  if (Array.isArray(data?.rates)) return data.rates;
+  if (Array.isArray(data?.items)) return data.items;
+  if (Array.isArray(data?.data)) return data.data;
+  if (Array.isArray(data?.Data)) return data.Data;
+  if (Array.isArray(data)) return data;
+  return [];
+}
+
 function normalizeMarketRates(data) {
-  const rawRates = Array.isArray(data?.rates) ? data.rates : [];
+  const rawRates = extractRawRates(data);
 
   const ratesByAsset = {};
   const rates = [];
@@ -423,16 +543,38 @@ function normalizeMarketRates(data) {
 
     if (asset === "UNKNOWN") continue;
 
-    const bid = Number(rate.bid);
-    const ask = Number(rate.ask);
-    const lastExecution = Number(rate.lastExecution);
+    const bid = getFirstNumber(rate, ["bid", "Bid", "BID"]);
+    const ask = getFirstNumber(rate, ["ask", "Ask", "ASK"]);
+    const lastExecution = getFirstNumber(rate, [
+      "lastExecution",
+      "LastExecution",
+      "last",
+      "Last",
+      "price",
+      "Price"
+    ]);
 
-    const hasBidAsk = Number.isFinite(bid) && Number.isFinite(ask) && bid > 0 && ask > 0;
-    const mid = hasBidAsk ? (bid + ask) / 2 : null;
+    const hasBidAsk =
+      Number.isFinite(bid) &&
+      Number.isFinite(ask) &&
+      bid > 0 &&
+      ask > 0;
+
+    const mid = hasBidAsk ? (bid + ask) / 2 : lastExecution;
     const spread = hasBidAsk ? ask - bid : null;
     const spreadPct = hasBidAsk && mid > 0 ? (spread / mid) * 100 : null;
 
-    const priceDate = rate.date || null;
+    const priceDate = getFirstValue(rate, [
+      "date",
+      "Date",
+      "time",
+      "Time",
+      "lastUpdate",
+      "LastUpdate",
+      "lastUpdated",
+      "LastUpdated"
+    ]);
+
     const ageMinutes = priceDate ? minutesSince(priceDate) : null;
 
     const normalized = {
@@ -441,15 +583,17 @@ function normalizeMarketRates(data) {
       bid: roundNumber(bid, 6),
       ask: roundNumber(ask, 6),
       mid: roundNumber(mid, 6),
-      lastExecution: Number.isFinite(lastExecution) ? roundNumber(lastExecution, 6) : null,
+      lastExecution: Number.isFinite(lastExecution)
+        ? roundNumber(lastExecution, 6)
+        : null,
       spread: roundNumber(spread, 6),
       spreadPct: roundNumber(spreadPct, 4),
       date: priceDate,
       ageMinutes: ageMinutes === null ? null : roundNumber(ageMinutes, 2),
       healthy:
-        hasBidAsk &&
-        spreadPct !== null &&
-        spreadPct <= MAX_ACCEPTABLE_SPREAD_PCT &&
+        Number.isFinite(mid) &&
+        mid > 0 &&
+        (spreadPct === null || spreadPct <= MAX_ACCEPTABLE_SPREAD_PCT) &&
         (ageMinutes === null || ageMinutes <= MAX_RATE_AGE_MINUTES)
     };
 
@@ -1297,6 +1441,7 @@ async function scanMarket(source = "manual-scan") {
       portfolio_status: portfolio.status,
       market_data_status: marketData.status,
       market_data_ok: marketData.ok,
+      market_data_source: marketData.source || "unknown",
       agents: {
         portfolioSummary,
         marketDataAgent: marketData.normalized,
@@ -1318,6 +1463,7 @@ async function scanMarket(source = "manual-scan") {
       market: {
         status: marketData.status,
         ok: marketData.ok,
+        source: marketData.source || "unknown",
         availableCount: marketData.normalized?.availableCount,
         requestedCount: marketData.normalized?.requestedCount,
         warnings: marketData.normalized?.warnings || []
@@ -1352,7 +1498,9 @@ function renderDashboard({ summary, metrics, market, secret }) {
   const last = runtimeState.lastDecision;
   const openAssets = summary.openAssets.join(", ") || "Aucun";
   const pendingWarnings = summary.pendingWarnings.length
-    ? summary.pendingWarnings.map((w) => `${w.asset} ordre ${w.orderId} depuis ${w.ageHours}h`).join(" | ")
+    ? summary.pendingWarnings
+        .map((w) => `${w.asset} ordre ${w.orderId} depuis ${w.ageHours}h`)
+        .join(" | ")
     : "Aucune";
 
   const marketWarnings = market?.warnings?.length
@@ -1554,6 +1702,7 @@ app.get("/status", requireSecret, async (req, res) => {
       last_market_data_status: runtimeState.lastMarketData
         ? {
             time: runtimeState.lastMarketData.time,
+            source: runtimeState.lastMarketData.source,
             status: runtimeState.lastMarketData.status,
             ok: runtimeState.lastMarketData.ok,
             availableCount: runtimeState.lastMarketData.normalized?.availableCount,
@@ -1594,6 +1743,7 @@ app.get("/metrics", requireSecret, async (req, res) => {
       last_market_data_status: runtimeState.lastMarketData
         ? {
             time: runtimeState.lastMarketData.time,
+            source: runtimeState.lastMarketData.source,
             status: runtimeState.lastMarketData.status,
             ok: runtimeState.lastMarketData.ok,
             availableCount: runtimeState.lastMarketData.normalized?.availableCount,
@@ -1617,6 +1767,7 @@ app.get("/market-rates", requireSecret, async (req, res) => {
       version: VERSION,
       status: rates.status,
       ok: rates.ok,
+      source: rates.source,
       raw: rates.data
     });
   } catch (error) {
@@ -1634,6 +1785,7 @@ app.get("/market-summary", requireSecret, async (req, res) => {
       version: VERSION,
       status: rates.status,
       ok: rates.ok,
+      source: rates.source,
       summary: rates.normalized
     });
   } catch (error) {
