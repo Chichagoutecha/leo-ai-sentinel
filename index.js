@@ -10,7 +10,7 @@ const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-const VERSION = "v8.2-secure-logs-autonomous";
+const VERSION = "v8.3-monitoring-safety-autonomous";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const BOT_SECRET = process.env.BOT_SECRET || "";
@@ -18,7 +18,13 @@ const BOT_SECRET = process.env.BOT_SECRET || "";
 const MAX_ORDER_USD = 10;
 const MAX_OPEN_POSITIONS = 10;
 const BUY_COOLDOWN_HOURS = 6;
-const MAX_LOGS = 50;
+const MAX_LOGS = 80;
+
+const MAX_EXECUTED_ORDERS_24H = 3;
+const MAX_BUYS_24H = 2;
+const MAX_SELLS_24H = 2;
+const MIN_HOURS_BETWEEN_EXECUTIONS = 4;
+const PENDING_ORDER_WARNING_HOURS = 6;
 
 const WATCHLIST = {
   NVDA: 8760,
@@ -63,11 +69,12 @@ const runtimeState = {
   scanRunning: false,
   cooldownMemory: {},
   logs: [],
-  lastDecision: null
+  lastDecision: null,
+  executionHistory: []
 };
 
 const PROMPT = `
-Tu es LEO-AI SENTINEL v8.2.
+Tu es LEO-AI SENTINEL v8.3.
 
 MISSION :
 Gérer un petit portefeuille eToro de manière autonome.
@@ -102,6 +109,7 @@ PHILOSOPHIE :
 Le bot ne doit pas être trop bridé.
 Il doit pouvoir acheter les actifs solides avec un niveau de confiance raisonnable.
 Il doit rester plus strict sur les actifs spéculatifs.
+Il doit éviter de multiplier les ordres trop vite.
 
 ACTIFS SOLIDES :
 MSFT, GOOG, AMZN, NVDA, AMD, ORCL.
@@ -154,6 +162,16 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function hoursSince(dateLike) {
+  if (!dateLike) return null;
+
+  const time = new Date(dateLike).getTime();
+
+  if (!Number.isFinite(time)) return null;
+
+  return (Date.now() - time) / (1000 * 60 * 60);
+}
+
 function addLog(entry) {
   const log = {
     time: nowIso(),
@@ -168,6 +186,39 @@ function addLog(entry) {
   }
 
   runtimeState.lastDecision = log;
+}
+
+function addExecutionHistory(entry) {
+  runtimeState.executionHistory.unshift({
+    time: nowIso(),
+    ...entry
+  });
+
+  runtimeState.executionHistory = runtimeState.executionHistory.filter((e) => {
+    const age = hoursSince(e.time);
+    return age !== null && age <= 24;
+  });
+}
+
+function getExecutionStats24h() {
+  runtimeState.executionHistory = runtimeState.executionHistory.filter((e) => {
+    const age = hoursSince(e.time);
+    return age !== null && age <= 24;
+  });
+
+  const total = runtimeState.executionHistory.length;
+  const buys = runtimeState.executionHistory.filter((e) => e.type === "BUY").length;
+  const sells = runtimeState.executionHistory.filter((e) => e.type === "SELL").length;
+  const lastExecution = runtimeState.executionHistory[0] || null;
+  const hoursSinceLastExecution = lastExecution ? hoursSince(lastExecution.time) : null;
+
+  return {
+    total,
+    buys,
+    sells,
+    lastExecution,
+    hoursSinceLastExecution
+  };
 }
 
 function requireSecret(req, res, next) {
@@ -235,6 +286,15 @@ function getInstrumentIdFromPosition(position) {
   );
 }
 
+function getInstrumentIdFromOrder(order) {
+  return Number(
+    order.instrumentID ??
+    order.instrumentId ??
+    order.InstrumentID ??
+    order.InstrumentId
+  );
+}
+
 function getPositionId(position) {
   const value =
     position.positionID ??
@@ -276,6 +336,34 @@ function getClientPortfolio(portfolioResponse) {
   return portfolioResponse?.data?.clientPortfolio || {};
 }
 
+function getOrderOpenDate(order) {
+  return (
+    order.openDateTime ??
+    order.openDatetime ??
+    order.createDateTime ??
+    order.createdDateTime ??
+    order.lastUpdate ??
+    null
+  );
+}
+
+function extractOrderSummary(order) {
+  const instrumentId = getInstrumentIdFromOrder(order);
+  const ageHours = hoursSince(getOrderOpenDate(order));
+
+  return {
+    asset: assetFromInstrumentId(instrumentId),
+    instrumentId,
+    orderId: order.orderID ?? order.orderId ?? null,
+    amount: order.amount ?? null,
+    isBuy: order.isBuy ?? null,
+    leverage: order.leverage ?? null,
+    statusID: order.statusID ?? order.statusId ?? null,
+    openDateTime: getOrderOpenDate(order),
+    ageHours: ageHours === null ? null : Math.round(ageHours * 100) / 100
+  };
+}
+
 function extractPortfolioSummary(portfolioResponse) {
   const clientPortfolio = getClientPortfolio(portfolioResponse);
 
@@ -296,6 +384,9 @@ function extractPortfolioSummary(portfolioResponse) {
     };
   });
 
+  const openOrders = ordersForOpen.map(extractOrderSummary);
+  const closeOrders = ordersForClose.map(extractOrderSummary);
+
   const openAssets = openPositions
     .map((p) => p.asset)
     .filter((asset) => asset !== "UNKNOWN");
@@ -307,14 +398,30 @@ function extractPortfolioSummary(portfolioResponse) {
     categoryCounts[category] = (categoryCounts[category] || 0) + 1;
   }
 
+  const pendingWarnings = [];
+
+  for (const order of [...openOrders, ...closeOrders]) {
+    if (order.ageHours !== null && order.ageHours >= PENDING_ORDER_WARNING_HOURS) {
+      pendingWarnings.push({
+        type: "PENDING_ORDER_TOO_OLD",
+        asset: order.asset,
+        orderId: order.orderId,
+        ageHours: order.ageHours
+      });
+    }
+  }
+
   return {
     positionsCount: positions.length,
     ordersForOpenCount: ordersForOpen.length,
     ordersForCloseCount: ordersForClose.length,
     openPositions,
+    openOrders,
+    closeOrders,
     openAssets,
     categoryCounts,
-    possibleCashOrCredit: clientPortfolio.credit ?? null
+    possibleCashOrCredit: clientPortfolio.credit ?? null,
+    pendingWarnings
   };
 }
 
@@ -339,16 +446,7 @@ function hasOpenOrder(portfolioResponse, asset) {
   const ordersForOpen = clientPortfolio.ordersForOpen || [];
   const wantedId = WATCHLIST[asset];
 
-  return ordersForOpen.some((o) => {
-    const instrumentId = Number(
-      o.instrumentID ??
-      o.instrumentId ??
-      o.InstrumentID ??
-      o.InstrumentId
-    );
-
-    return instrumentId === wantedId;
-  });
+  return ordersForOpen.some((o) => getInstrumentIdFromOrder(o) === wantedId);
 }
 
 function hasCloseOrder(portfolioResponse, asset) {
@@ -356,16 +454,7 @@ function hasCloseOrder(portfolioResponse, asset) {
   const ordersForClose = clientPortfolio.ordersForClose || [];
   const wantedId = WATCHLIST[asset];
 
-  return ordersForClose.some((o) => {
-    const instrumentId = Number(
-      o.instrumentID ??
-      o.instrumentId ??
-      o.InstrumentID ??
-      o.InstrumentId
-    );
-
-    return instrumentId === wantedId;
-  });
+  return ordersForClose.some((o) => getInstrumentIdFromOrder(o) === wantedId);
 }
 
 function isInCooldown(asset) {
@@ -426,6 +515,7 @@ function sanitizeDecision(decision) {
 function riskController(decision, portfolioResponse) {
   const d = sanitizeDecision(decision);
   const summary = extractPortfolioSummary(portfolioResponse);
+  const executionStats = getExecutionStats24h();
 
   if (d.decision === "HOLD") {
     return {
@@ -469,9 +559,51 @@ function riskController(decision, portfolioResponse) {
     };
   }
 
+  if (executionStats.total >= MAX_EXECUTED_ORDERS_24H) {
+    return {
+      approved: false,
+      finalDecision: {
+        ...d,
+        decision: "HOLD",
+        asset: "NONE",
+        amount_usd: 0
+      },
+      reason: `Limite d'ordres exécutés sur 24h atteinte (${executionStats.total}/${MAX_EXECUTED_ORDERS_24H})`
+    };
+  }
+
+  if (
+    executionStats.hoursSinceLastExecution !== null &&
+    executionStats.hoursSinceLastExecution < MIN_HOURS_BETWEEN_EXECUTIONS
+  ) {
+    return {
+      approved: false,
+      finalDecision: {
+        ...d,
+        decision: "HOLD",
+        asset: "NONE",
+        amount_usd: 0
+      },
+      reason: `Dernier ordre trop récent (${executionStats.hoursSinceLastExecution.toFixed(2)}h < ${MIN_HOURS_BETWEEN_EXECUTIONS}h)`
+    };
+  }
+
   const rules = ASSET_RULES[d.asset];
 
   if (d.decision === "BUY") {
+    if (executionStats.buys >= MAX_BUYS_24H) {
+      return {
+        approved: false,
+        finalDecision: {
+          ...d,
+          decision: "HOLD",
+          asset: "NONE",
+          amount_usd: 0
+        },
+        reason: `Limite BUY 24h atteinte (${executionStats.buys}/${MAX_BUYS_24H})`
+      };
+    }
+
     if (d.confidence < rules.buyThreshold) {
       return {
         approved: false,
@@ -558,6 +690,19 @@ function riskController(decision, portfolioResponse) {
   }
 
   if (d.decision === "SELL") {
+    if (executionStats.sells >= MAX_SELLS_24H) {
+      return {
+        approved: false,
+        finalDecision: {
+          ...d,
+          decision: "HOLD",
+          asset: "NONE",
+          amount_usd: 0
+        },
+        reason: `Limite SELL 24h atteinte (${executionStats.sells}/${MAX_SELLS_24H})`
+      };
+    }
+
     if (d.confidence < rules.sellThreshold) {
       return {
         approved: false,
@@ -675,6 +820,12 @@ async function executeBuy(asset, amount) {
 
   if (response.ok) {
     setCooldown(asset);
+    addExecutionHistory({
+      type: "BUY",
+      asset,
+      amount: safeAmount,
+      instrumentId
+    });
   }
 
   return {
@@ -717,7 +868,40 @@ async function executeSell(asset) {
     };
   }
 
-  const response = await fetch(
+  const primaryResponse = await fetch(
+    "https://public-api.etoro.com/api/v1/trading/execution/market-close-orders",
+    {
+      method: "POST",
+      headers: etoroHeaders(),
+      body: JSON.stringify({
+        positionId
+      })
+    }
+  );
+
+  const primaryData = await readJsonResponse(primaryResponse);
+
+  if (primaryResponse.ok) {
+    addExecutionHistory({
+      type: "SELL",
+      asset,
+      instrumentId,
+      positionId
+    });
+
+    return {
+      status: primaryResponse.status,
+      ok: primaryResponse.ok,
+      type: "SELL",
+      route: "primary",
+      asset,
+      instrumentId,
+      positionId,
+      data: primaryData
+    };
+  }
+
+  const fallbackResponse = await fetch(
     `https://public-api.etoro.com/api/v1/trading/execution/market-close-orders/positions/${positionId}`,
     {
       method: "POST",
@@ -729,16 +913,30 @@ async function executeSell(asset) {
     }
   );
 
-  const data = await readJsonResponse(response);
+  const fallbackData = await readJsonResponse(fallbackResponse);
+
+  if (fallbackResponse.ok) {
+    addExecutionHistory({
+      type: "SELL",
+      asset,
+      instrumentId,
+      positionId
+    });
+  }
 
   return {
-    status: response.status,
-    ok: response.ok,
+    status: fallbackResponse.status,
+    ok: fallbackResponse.ok,
     type: "SELL",
+    route: "fallback",
     asset,
     instrumentId,
     positionId,
-    data
+    primaryError: {
+      status: primaryResponse.status,
+      data: primaryData
+    },
+    data: fallbackData
   };
 }
 
@@ -760,9 +958,16 @@ async function askDecisionAgent(portfolioSummary, source) {
           auto_trade_enabled: AUTO_TRADE,
           max_order_usd: MAX_ORDER_USD,
           max_open_positions: MAX_OPEN_POSITIONS,
+          execution_limits: {
+            max_executed_orders_24h: MAX_EXECUTED_ORDERS_24H,
+            max_buys_24h: MAX_BUYS_24H,
+            max_sells_24h: MAX_SELLS_24H,
+            min_hours_between_executions: MIN_HOURS_BETWEEN_EXECUTIONS
+          },
           watchlist: WATCHLIST,
           asset_rules: ASSET_RULES,
           portfolio_summary: portfolioSummary,
+          execution_stats_24h: getExecutionStats24h(),
           instruction:
             "Analyse le portefeuille et décide BUY, SELL ou HOLD. Tu peux être actif mais pas imprudent. Une seule décision."
         })
@@ -837,6 +1042,7 @@ async function scanMarket(source = "manual-scan") {
       portfolio_status: portfolio.status,
       agents: {
         portfolioSummary,
+        executionStats24h: getExecutionStats24h(),
         decisionAgentRaw: decisionRaw,
         riskController: control
       },
@@ -850,12 +1056,16 @@ async function scanMarket(source = "manual-scan") {
       decision: control.finalDecision,
       risk_reason: control.reason,
       execution,
+      executionStats24h: getExecutionStats24h(),
       portfolio: {
         positionsCount: portfolioSummary.positionsCount,
         ordersForOpenCount: portfolioSummary.ordersForOpenCount,
         ordersForCloseCount: portfolioSummary.ordersForCloseCount,
         openAssets: portfolioSummary.openAssets,
-        categoryCounts: portfolioSummary.categoryCounts
+        openOrders: portfolioSummary.openOrders,
+        closeOrders: portfolioSummary.closeOrders,
+        categoryCounts: portfolioSummary.categoryCounts,
+        pendingWarnings: portfolioSummary.pendingWarnings
       }
     });
 
@@ -863,6 +1073,135 @@ async function scanMarket(source = "manual-scan") {
   } finally {
     runtimeState.scanRunning = false;
   }
+}
+
+function htmlEscape(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function renderDashboard({ summary, metrics, secret }) {
+  const last = runtimeState.lastDecision;
+  const openAssets = summary.openAssets.join(", ") || "Aucun";
+  const pendingWarnings = summary.pendingWarnings.length
+    ? summary.pendingWarnings.map((w) => `${w.asset} ordre ${w.orderId} depuis ${w.ageHours}h`).join(" | ")
+    : "Aucune";
+
+  const lastDecisionText = last
+    ? `${last.time} — ${last.decision?.decision || "?"} ${last.decision?.asset || ""} — ${last.risk_reason || ""}`
+    : "Aucune décision enregistrée depuis le dernier redémarrage.";
+
+  const rows = runtimeState.logs
+    .slice(0, 20)
+    .map((log) => {
+      return `
+        <tr>
+          <td>${htmlEscape(log.time)}</td>
+          <td>${htmlEscape(log.source)}</td>
+          <td>${htmlEscape(log.decision?.decision || "")}</td>
+          <td>${htmlEscape(log.decision?.asset || "")}</td>
+          <td>${htmlEscape(log.decision?.confidence || "")}</td>
+          <td>${htmlEscape(log.risk_reason || "")}</td>
+          <td>${htmlEscape(log.execution?.type || (log.execution?.skipped ? "SKIPPED" : ""))}</td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  return `
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>LEO-AI SENTINEL Dashboard</title>
+<style>
+  body { font-family: Arial, sans-serif; background:#111827; color:#f9fafb; padding:24px; }
+  h1 { margin-bottom:4px; }
+  .muted { color:#9ca3af; }
+  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:16px; margin:20px 0; }
+  .card { background:#1f2937; padding:16px; border-radius:12px; border:1px solid #374151; }
+  .big { font-size:28px; font-weight:bold; }
+  .ok { color:#34d399; }
+  .warn { color:#fbbf24; }
+  .bad { color:#f87171; }
+  a { color:#60a5fa; }
+  table { width:100%; border-collapse:collapse; margin-top:20px; background:#1f2937; }
+  th, td { border:1px solid #374151; padding:8px; text-align:left; font-size:13px; }
+  th { background:#374151; }
+  code { background:#374151; padding:2px 5px; border-radius:4px; }
+</style>
+</head>
+<body>
+  <h1>LEO-AI SENTINEL</h1>
+  <div class="muted">${htmlEscape(VERSION)} — ${htmlEscape(nowIso())}</div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="muted">Auto trade</div>
+      <div class="big ${AUTO_TRADE ? "ok" : "bad"}">${AUTO_TRADE ? "ACTIF" : "OFF"}</div>
+    </div>
+    <div class="card">
+      <div class="muted">Positions ouvertes</div>
+      <div class="big">${summary.positionsCount}</div>
+    </div>
+    <div class="card">
+      <div class="muted">Ordres achat en attente</div>
+      <div class="big ${summary.ordersForOpenCount > 0 ? "warn" : "ok"}">${summary.ordersForOpenCount}</div>
+    </div>
+    <div class="card">
+      <div class="muted">Ordres vente en attente</div>
+      <div class="big ${summary.ordersForCloseCount > 0 ? "warn" : "ok"}">${summary.ordersForCloseCount}</div>
+    </div>
+    <div class="card">
+      <div class="muted">Ordres exécutés 24h</div>
+      <div class="big">${metrics.executionStats24h.total}/${MAX_EXECUTED_ORDERS_24H}</div>
+    </div>
+    <div class="card">
+      <div class="muted">Dernier ordre</div>
+      <div class="big">${metrics.executionStats24h.hoursSinceLastExecution === null ? "Aucun" : metrics.executionStats24h.hoursSinceLastExecution.toFixed(1) + "h"}</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Portefeuille</h2>
+    <p><strong>Actifs ouverts :</strong> ${htmlEscape(openAssets)}</p>
+    <p><strong>Catégories :</strong> <code>${htmlEscape(JSON.stringify(summary.categoryCounts))}</code></p>
+    <p><strong>Alertes ordres en attente :</strong> ${htmlEscape(pendingWarnings)}</p>
+  </div>
+
+  <div class="card">
+    <h2>Dernière décision</h2>
+    <p>${htmlEscape(lastDecisionText)}</p>
+    <p>
+      <a href="/status?secret=${encodeURIComponent(secret)}">Status JSON</a> —
+      <a href="/logs?secret=${encodeURIComponent(secret)}">Logs JSON</a> —
+      <a href="/last-decision?secret=${encodeURIComponent(secret)}">Dernière décision JSON</a>
+    </p>
+  </div>
+
+  <h2>Derniers logs</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Heure</th>
+        <th>Source</th>
+        <th>Décision</th>
+        <th>Actif</th>
+        <th>Confiance</th>
+        <th>Raison RiskController</th>
+        <th>Exécution</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${rows || "<tr><td colspan='7'>Aucun log</td></tr>"}
+    </tbody>
+  </table>
+</body>
+</html>
+`;
 }
 
 app.get("/", (req, res) => {
@@ -894,7 +1233,11 @@ app.get("/status", requireSecret, async (req, res) => {
       orders_for_open_count: summary.ordersForOpenCount,
       orders_for_close_count: summary.ordersForCloseCount,
       open_assets: summary.openAssets,
+      open_orders: summary.openOrders,
+      close_orders: summary.closeOrders,
       category_counts: summary.categoryCounts,
+      pending_warnings: summary.pendingWarnings,
+      execution_stats_24h: getExecutionStats24h(),
       cooldown_memory: runtimeState.cooldownMemory,
       last_decision: runtimeState.lastDecision
     });
@@ -903,6 +1246,55 @@ app.get("/status", requireSecret, async (req, res) => {
       version: VERSION,
       error: error.message
     });
+  }
+});
+
+app.get("/metrics", requireSecret, async (req, res) => {
+  try {
+    const portfolio = await getPortfolio();
+    const summary = extractPortfolioSummary(portfolio);
+
+    res.json({
+      version: VERSION,
+      time: nowIso(),
+      auto_trade_enabled: AUTO_TRADE,
+      portfolio_ok: portfolio.ok,
+      portfolio_status: portfolio.status,
+      positions_count: summary.positionsCount,
+      open_assets: summary.openAssets,
+      category_counts: summary.categoryCounts,
+      open_orders_count: summary.ordersForOpenCount,
+      close_orders_count: summary.ordersForCloseCount,
+      pending_warnings: summary.pendingWarnings,
+      execution_stats_24h: getExecutionStats24h(),
+      scan_running: runtimeState.scanRunning,
+      logs_count: runtimeState.logs.length
+    });
+  } catch (error) {
+    res.json({
+      version: VERSION,
+      error: error.message
+    });
+  }
+});
+
+app.get("/dashboard", requireSecret, async (req, res) => {
+  try {
+    const portfolio = await getPortfolio();
+    const summary = extractPortfolioSummary(portfolio);
+
+    const html = renderDashboard({
+      summary,
+      metrics: {
+        executionStats24h: getExecutionStats24h()
+      },
+      secret: req.query.secret
+    });
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(html);
+  } catch (error) {
+    res.status(500).send(`Erreur dashboard : ${htmlEscape(error.message)}`);
   }
 });
 
@@ -982,7 +1374,8 @@ app.get("/buy-test", requireSecret, async (req, res) => {
       event: "MANUAL_BUY",
       asset,
       amount,
-      execution: result
+      execution: result,
+      executionStats24h: getExecutionStats24h()
     });
 
     res.json(result);
@@ -1010,7 +1403,8 @@ app.get("/sell-test", requireSecret, async (req, res) => {
       source: "manual-sell-test",
       event: "MANUAL_SELL",
       asset,
-      execution: result
+      execution: result,
+      executionStats24h: getExecutionStats24h()
     });
 
     res.json(result);
