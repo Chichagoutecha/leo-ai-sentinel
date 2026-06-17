@@ -10,7 +10,7 @@ const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-const VERSION = "v9.1-marketdata-fallback-autonomous";
+const VERSION = "v9.2-trend-memory-agent-autonomous";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const BOT_SECRET = process.env.BOT_SECRET || "";
@@ -21,7 +21,7 @@ const REQUIRE_FRESH_RATE_FOR_EXECUTION =
 const MAX_ORDER_USD = 10;
 const MAX_OPEN_POSITIONS = 10;
 const BUY_COOLDOWN_HOURS = 6;
-const MAX_LOGS = 100;
+const MAX_LOGS = 120;
 
 const MAX_EXECUTED_ORDERS_24H = 3;
 const MAX_BUYS_24H = 2;
@@ -31,6 +31,9 @@ const PENDING_ORDER_WARNING_HOURS = 6;
 
 const MAX_ACCEPTABLE_SPREAD_PCT = 2.5;
 const MAX_RATE_AGE_MINUTES = 30;
+
+const MAX_TREND_POINTS_PER_ASSET = 24;
+const MIN_MINUTES_BETWEEN_TREND_POINTS = 20;
 
 const WATCHLIST = {
   NVDA: 8760,
@@ -77,30 +80,34 @@ const runtimeState = {
   logs: [],
   lastDecision: null,
   executionHistory: [],
-  lastMarketData: null
+  lastMarketData: null,
+  trendMemory: {}
 };
 
 const PROMPT = `
-Tu es LEO-AI SENTINEL v9.1.
+Tu es LEO-AI SENTINEL v9.2.
 
 MISSION :
 Gérer un petit portefeuille eToro de manière autonome.
 Objectif : faire mieux qu'un investisseur humain prudent, sans prendre de risques absurdes.
 
-NOUVEAUTÉ v9.1 :
-Tu disposes maintenant d'un MarketDataAgent plus robuste.
-Il tente de récupérer les prix eToro :
-- en bloc pour toute la watchlist
-- puis actif par actif si la requête globale échoue
+NOUVEAUTÉ v9.2 :
+Tu disposes maintenant d'un TrendMemoryAgent.
+Il compare les prix entre plusieurs scans pour détecter :
+- hausse depuis le dernier scan
+- baisse depuis le dernier scan
+- tendance courte
+- volatilité approximative
+- accélération ou faiblesse relative
 
-Le MarketDataAgent peut fournir :
+Tu disposes aussi du MarketDataAgent :
 - bid
 - ask
 - mid
 - spread %
 - date du prix
 - âge du prix
-- état du marché par actif
+- état healthy / stale par actif
 
 STYLE :
 - Investisseur IA actif mais prudent.
@@ -128,6 +135,7 @@ RÈGLES ABSOLUES :
 - SELL possible si la thèse se casse, si le risque augmente fortement, ou si la protection du capital l'exige.
 - Ne pas acheter si le spread est anormalement élevé.
 - Ne pas acheter si les données de marché sont incohérentes.
+- Ne pas acheter par FOMO après une hausse verticale.
 - Ne pas prétendre connaître des informations non fournies.
 
 PHILOSOPHIE :
@@ -135,6 +143,13 @@ Le bot ne doit pas être trop bridé.
 Il doit pouvoir acheter les actifs solides avec un niveau de confiance raisonnable.
 Il doit rester plus strict sur les actifs spéculatifs.
 Il doit éviter de multiplier les ordres trop vite.
+
+UTILISATION DU TRENDMEMORYAGENT :
+- Si un actif solide monte doucement et régulièrement, cela peut renforcer un BUY.
+- Si un actif chute fortement depuis le dernier scan, éviter BUY sauf conviction exceptionnelle.
+- Si un actif est très volatil, augmenter la prudence.
+- Si le TrendMemoryAgent manque d'historique, ne pas inventer une tendance.
+- Le trend est un filtre, pas une certitude.
 
 ACTIFS SOLIDES :
 MSFT, GOOG, AMZN, NVDA, AMD, ORCL.
@@ -151,13 +166,6 @@ Achat possible seulement avec une confiance plus forte.
 ACTIFS TRÈS SPÉCULATIFS :
 SOL, RKLB, IONQ, ASTS.
 Achat seulement si très forte conviction.
-
-UTILISATION DU MARKETDATAAGENT :
-- Utilise le spread pour éviter les mauvais points d'entrée.
-- Si un actif a un spread trop large, évite BUY.
-- Si le marché semble incohérent ou données absentes, privilégie HOLD.
-- Les données live sont un filtre de prudence, pas une garantie.
-- Ne surpondère pas un mouvement instantané : tu n'as pas encore d'historique complet.
 
 DIVERSIFICATION :
 Si le portefeuille est trop concentré sur un seul actif, privilégier une diversification prudente vers un actif solide.
@@ -299,7 +307,6 @@ async function readJsonResponse(response) {
 
 function normalizeConfidence(value) {
   let confidence = Number(value);
-
   if (!Number.isFinite(confidence)) return 0;
 
   if (confidence > 0 && confidence <= 10) {
@@ -307,7 +314,6 @@ function normalizeConfidence(value) {
   }
 
   confidence = Math.round(confidence);
-
   if (confidence < 0) confidence = 0;
   if (confidence > 100) confidence = 100;
 
@@ -423,7 +429,7 @@ async function getMarketRates() {
     };
   }
 
-  let primary = await fetchRates(allIds);
+  const primary = await fetchRates(allIds);
 
   if (
     primary.ok &&
@@ -431,6 +437,7 @@ async function getMarketRates() {
     normalizeMarketRates(primary.data).availableCount > 0
   ) {
     const normalized = normalizeMarketRates(primary.data);
+    const trendSummary = updateTrendMemory(normalized);
 
     runtimeState.lastMarketData = {
       time: nowIso(),
@@ -438,7 +445,8 @@ async function getMarketRates() {
       status: primary.status,
       ok: primary.ok,
       data: primary.data,
-      normalized
+      normalized,
+      trendSummary
     };
 
     return {
@@ -446,7 +454,8 @@ async function getMarketRates() {
       ok: primary.ok,
       source: "bulk",
       data: primary.data,
-      normalized
+      normalized,
+      trendSummary
     };
   }
 
@@ -479,10 +488,7 @@ async function getMarketRates() {
     }
   }
 
-  const fallbackData = {
-    rates: collectedRates
-  };
-
+  const fallbackData = { rates: collectedRates };
   const normalized = normalizeMarketRates(fallbackData);
 
   for (const failure of failures) {
@@ -495,6 +501,8 @@ async function getMarketRates() {
     });
   }
 
+  const trendSummary = updateTrendMemory(normalized);
+
   runtimeState.lastMarketData = {
     time: nowIso(),
     source: "fallback-one-by-one",
@@ -504,7 +512,8 @@ async function getMarketRates() {
     primaryOk: primary.ok,
     primaryData: primary.data,
     failures,
-    normalized
+    normalized,
+    trendSummary
   };
 
   return {
@@ -518,7 +527,8 @@ async function getMarketRates() {
       collectedRatesCount: collectedRates.length,
       failures
     },
-    normalized
+    normalized,
+    trendSummary
   };
 }
 
@@ -605,10 +615,7 @@ function normalizeMarketRates(data) {
 
   for (const asset of Object.keys(WATCHLIST)) {
     if (!ratesByAsset[asset]) {
-      warnings.push({
-        type: "MISSING_RATE",
-        asset
-      });
+      warnings.push({ type: "MISSING_RATE", asset });
     }
   }
 
@@ -639,6 +646,135 @@ function normalizeMarketRates(data) {
     maxAcceptableSpreadPct: MAX_ACCEPTABLE_SPREAD_PCT,
     maxRateAgeMinutes: MAX_RATE_AGE_MINUTES
   };
+}
+
+function updateTrendMemory(marketSummary) {
+  const now = nowIso();
+
+  for (const rate of marketSummary.rates || []) {
+    if (!rate.asset || !Number.isFinite(Number(rate.mid)) || rate.mid <= 0) {
+      continue;
+    }
+
+    if (!runtimeState.trendMemory[rate.asset]) {
+      runtimeState.trendMemory[rate.asset] = [];
+    }
+
+    const history = runtimeState.trendMemory[rate.asset];
+    const last = history[history.length - 1];
+
+    const point = {
+      time: now,
+      mid: Number(rate.mid),
+      bid: rate.bid,
+      ask: rate.ask,
+      spreadPct: rate.spreadPct,
+      healthy: rate.healthy,
+      ageMinutes: rate.ageMinutes
+    };
+
+    if (!last) {
+      history.push(point);
+    } else {
+      const minutesFromLast = minutesSince(last.time);
+
+      if (
+        minutesFromLast !== null &&
+        minutesFromLast < MIN_MINUTES_BETWEEN_TREND_POINTS
+      ) {
+        history[history.length - 1] = point;
+      } else {
+        history.push(point);
+      }
+    }
+
+    runtimeState.trendMemory[rate.asset] = history.slice(
+      -MAX_TREND_POINTS_PER_ASSET
+    );
+  }
+
+  return buildTrendSummary();
+}
+
+function buildTrendSummary() {
+  const assets = {};
+
+  for (const [asset, history] of Object.entries(runtimeState.trendMemory)) {
+    if (!history || history.length === 0) continue;
+
+    const last = history[history.length - 1];
+    const previous = history.length >= 2 ? history[history.length - 2] : null;
+    const first = history[0];
+
+    const changePctSinceLast =
+      previous && previous.mid > 0
+        ? ((last.mid - previous.mid) / previous.mid) * 100
+        : null;
+
+    const changePctSinceFirst =
+      first && first.mid > 0
+        ? ((last.mid - first.mid) / first.mid) * 100
+        : null;
+
+    const diffs = [];
+
+    for (let i = 1; i < history.length; i++) {
+      const a = history[i - 1];
+      const b = history[i];
+
+      if (a.mid > 0 && b.mid > 0) {
+        diffs.push(((b.mid - a.mid) / a.mid) * 100);
+      }
+    }
+
+    const avgAbsMove =
+      diffs.length > 0
+        ? diffs.reduce((sum, v) => sum + Math.abs(v), 0) / diffs.length
+        : null;
+
+    let trendSignal = "insufficient_history";
+
+    if (changePctSinceLast !== null) {
+      if (changePctSinceLast >= 2) trendSignal = "strong_up";
+      else if (changePctSinceLast >= 0.4) trendSignal = "up";
+      else if (changePctSinceLast <= -2) trendSignal = "strong_down";
+      else if (changePctSinceLast <= -0.4) trendSignal = "down";
+      else trendSignal = "flat";
+    }
+
+    let volatilitySignal = "unknown";
+
+    if (avgAbsMove !== null) {
+      if (avgAbsMove >= 3) volatilitySignal = "high";
+      else if (avgAbsMove >= 1) volatilitySignal = "medium";
+      else volatilitySignal = "low";
+    }
+
+    assets[asset] = {
+      observations: history.length,
+      lastMid: roundNumber(last.mid, 6),
+      previousMid: previous ? roundNumber(previous.mid, 6) : null,
+      firstMid: first ? roundNumber(first.mid, 6) : null,
+      changePctSinceLast: roundNumber(changePctSinceLast, 4),
+      changePctSinceFirst: roundNumber(changePctSinceFirst, 4),
+      averageAbsMovePct: roundNumber(avgAbsMove, 4),
+      trendSignal,
+      volatilitySignal,
+      lastUpdate: last.time,
+      healthy: last.healthy
+    };
+  }
+
+  return {
+    updatedAt: nowIso(),
+    minMinutesBetweenTrendPoints: MIN_MINUTES_BETWEEN_TREND_POINTS,
+    maxPointsPerAsset: MAX_TREND_POINTS_PER_ASSET,
+    assets
+  };
+}
+
+function getTrendForAsset(trendSummary, asset) {
+  return trendSummary?.assets?.[asset] || null;
 }
 
 function getMarketRateForAsset(marketData, asset) {
@@ -807,7 +943,6 @@ function hasCloseOrder(portfolioResponse, asset) {
 
 function isInCooldown(asset) {
   const lastTime = runtimeState.cooldownMemory[asset];
-
   if (!lastTime) return false;
 
   const elapsedMs = Date.now() - lastTime;
@@ -860,7 +995,7 @@ function sanitizeDecision(decision) {
   return clean;
 }
 
-function riskController(decision, portfolioResponse, marketData) {
+function riskController(decision, portfolioResponse, marketData, trendSummary) {
   const d = sanitizeDecision(decision);
   const summary = extractPortfolioSummary(portfolioResponse);
   const executionStats = getExecutionStats24h();
@@ -919,6 +1054,44 @@ function riskController(decision, portfolioResponse, marketData) {
         amount_usd: 0
       },
       reason: `MarketDataAgent bloque : ${marketCheck.reason}`
+    };
+  }
+
+  const trend = getTrendForAsset(trendSummary, d.asset);
+
+  if (
+    d.decision === "BUY" &&
+    trend &&
+    trend.trendSignal === "strong_down" &&
+    d.confidence < 85
+  ) {
+    return {
+      approved: false,
+      finalDecision: {
+        ...d,
+        decision: "HOLD",
+        asset: "NONE",
+        amount_usd: 0
+      },
+      reason: `TrendMemoryAgent bloque : tendance forte baissière sur ${d.asset}`
+    };
+  }
+
+  if (
+    d.decision === "BUY" &&
+    trend &&
+    trend.volatilitySignal === "high" &&
+    d.confidence < 88
+  ) {
+    return {
+      approved: false,
+      finalDecision: {
+        ...d,
+        decision: "HOLD",
+        asset: "NONE",
+        amount_usd: 0
+      },
+      reason: `TrendMemoryAgent bloque : volatilité élevée sur ${d.asset}`
     };
   }
 
@@ -1141,28 +1314,19 @@ function riskController(decision, portfolioResponse, marketData) {
 
 async function executeBuy(asset, amount) {
   if (!AUTO_TRADE) {
-    return {
-      skipped: true,
-      reason: "AUTO_TRADE désactivé"
-    };
+    return { skipped: true, reason: "AUTO_TRADE désactivé" };
   }
 
   const instrumentId = WATCHLIST[asset];
 
   if (!instrumentId) {
-    return {
-      skipped: true,
-      reason: "Actif non autorisé"
-    };
+    return { skipped: true, reason: "Actif non autorisé" };
   }
 
   const safeAmount = Math.min(Number(amount || MAX_ORDER_USD), MAX_ORDER_USD);
 
   if (safeAmount <= 0) {
-    return {
-      skipped: true,
-      reason: "Montant invalide"
-    };
+    return { skipped: true, reason: "Montant invalide" };
   }
 
   const response = await fetch(
@@ -1204,10 +1368,7 @@ async function executeBuy(asset, amount) {
 
 async function executeSell(asset) {
   if (!AUTO_TRADE) {
-    return {
-      skipped: true,
-      reason: "AUTO_TRADE désactivé"
-    };
+    return { skipped: true, reason: "AUTO_TRADE désactivé" };
   }
 
   const portfolio = await getPortfolio();
@@ -1236,9 +1397,7 @@ async function executeSell(asset) {
     {
       method: "POST",
       headers: etoroHeaders(),
-      body: JSON.stringify({
-        positionId
-      })
+      body: JSON.stringify({ positionId })
     }
   );
 
@@ -1303,15 +1462,12 @@ async function executeSell(asset) {
   };
 }
 
-async function askDecisionAgent(portfolioSummary, marketSummary, source) {
+async function askDecisionAgent(portfolioSummary, marketSummary, trendSummary, source) {
   const response = await client.chat.completions.create({
     model: "gpt-4.1-mini",
     response_format: { type: "json_object" },
     messages: [
-      {
-        role: "system",
-        content: PROMPT
-      },
+      { role: "system", content: PROMPT },
       {
         role: "user",
         content: JSON.stringify({
@@ -1332,13 +1488,18 @@ async function askDecisionAgent(portfolioSummary, marketSummary, source) {
             max_rate_age_minutes: MAX_RATE_AGE_MINUTES,
             require_fresh_rate_for_execution: REQUIRE_FRESH_RATE_FOR_EXECUTION
           },
+          trend_memory_rules: {
+            min_minutes_between_points: MIN_MINUTES_BETWEEN_TREND_POINTS,
+            max_points_per_asset: MAX_TREND_POINTS_PER_ASSET
+          },
           watchlist: WATCHLIST,
           asset_rules: ASSET_RULES,
           portfolio_summary: portfolioSummary,
           market_data_summary: marketSummary,
+          trend_memory_summary: trendSummary,
           execution_stats_24h: getExecutionStats24h(),
           instruction:
-            "Analyse le portefeuille et les données de marché live. Décide BUY, SELL ou HOLD. Tu peux être actif mais pas imprudent. Une seule décision."
+            "Analyse le portefeuille, les prix live et la tendance entre scans. Décide BUY, SELL ou HOLD. Une seule décision."
         })
       }
     ]
@@ -1373,21 +1534,20 @@ async function scanMarket(source = "manual-scan") {
       marketData = {
         status: null,
         ok: false,
+        source: "error",
         error: error.message,
         normalized: {
           rates: [],
           ratesByAsset: {},
-          warnings: [
-            {
-              type: "MARKET_DATA_ERROR",
-              message: error.message
-            }
-          ],
+          warnings: [{ type: "MARKET_DATA_ERROR", message: error.message }],
           availableCount: 0,
           requestedCount: Object.keys(WATCHLIST).length
-        }
+        },
+        trendSummary: buildTrendSummary()
       };
     }
+
+    const trendSummary = marketData.trendSummary || buildTrendSummary();
 
     let decisionRaw;
 
@@ -1395,6 +1555,7 @@ async function scanMarket(source = "manual-scan") {
       decisionRaw = await askDecisionAgent(
         portfolioSummary,
         marketData.normalized,
+        trendSummary,
         source
       );
     } catch (error) {
@@ -1416,7 +1577,7 @@ async function scanMarket(source = "manual-scan") {
       return failed;
     }
 
-    const control = riskController(decisionRaw, portfolio, marketData);
+    const control = riskController(decisionRaw, portfolio, marketData, trendSummary);
 
     let execution = {
       skipped: true,
@@ -1445,6 +1606,7 @@ async function scanMarket(source = "manual-scan") {
       agents: {
         portfolioSummary,
         marketDataAgent: marketData.normalized,
+        trendMemoryAgent: trendSummary,
         executionStats24h: getExecutionStats24h(),
         decisionAgentRaw: decisionRaw,
         riskController: control
@@ -1468,6 +1630,7 @@ async function scanMarket(source = "manual-scan") {
         requestedCount: marketData.normalized?.requestedCount,
         warnings: marketData.normalized?.warnings || []
       },
+      trend: trendSummary,
       portfolio: {
         positionsCount: portfolioSummary.positionsCount,
         ordersForOpenCount: portfolioSummary.ordersForOpenCount,
@@ -1494,9 +1657,10 @@ function htmlEscape(value) {
     .replaceAll('"', "&quot;");
 }
 
-function renderDashboard({ summary, metrics, market, secret }) {
+function renderDashboard({ summary, metrics, market, trend, secret }) {
   const last = runtimeState.lastDecision;
   const openAssets = summary.openAssets.join(", ") || "Aucun";
+
   const pendingWarnings = summary.pendingWarnings.length
     ? summary.pendingWarnings
         .map((w) => `${w.asset} ordre ${w.orderId} depuis ${w.ageHours}h`)
@@ -1522,6 +1686,22 @@ function renderDashboard({ summary, metrics, market, secret }) {
           <td>${htmlEscape(rate.spreadPct)}</td>
           <td>${htmlEscape(rate.ageMinutes)}</td>
           <td>${rate.healthy ? "✅" : "⚠️"}</td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  const trendRows = Object.entries(trend?.assets || {})
+    .map(([asset, item]) => {
+      return `
+        <tr>
+          <td>${htmlEscape(asset)}</td>
+          <td>${htmlEscape(item.observations)}</td>
+          <td>${htmlEscape(item.lastMid)}</td>
+          <td>${htmlEscape(item.changePctSinceLast)}</td>
+          <td>${htmlEscape(item.changePctSinceFirst)}</td>
+          <td>${htmlEscape(item.trendSignal)}</td>
+          <td>${htmlEscape(item.volatilitySignal)}</td>
         </tr>
       `;
     })
@@ -1581,16 +1761,16 @@ function renderDashboard({ summary, metrics, market, secret }) {
       <div class="big ${market?.availableCount > 0 ? "ok" : "warn"}">${market?.availableCount || 0}/${market?.requestedCount || 0}</div>
     </div>
     <div class="card">
+      <div class="muted">TrendMemoryAgent</div>
+      <div class="big">${Object.keys(trend?.assets || {}).length}</div>
+    </div>
+    <div class="card">
       <div class="muted">Positions ouvertes</div>
       <div class="big">${summary.positionsCount}</div>
     </div>
     <div class="card">
       <div class="muted">Ordres achat en attente</div>
       <div class="big ${summary.ordersForOpenCount > 0 ? "warn" : "ok"}">${summary.ordersForOpenCount}</div>
-    </div>
-    <div class="card">
-      <div class="muted">Ordres vente en attente</div>
-      <div class="big ${summary.ordersForCloseCount > 0 ? "warn" : "ok"}">${summary.ordersForCloseCount}</div>
     </div>
     <div class="card">
       <div class="muted">Ordres exécutés 24h</div>
@@ -1608,8 +1788,6 @@ function renderDashboard({ summary, metrics, market, secret }) {
   <div class="card">
     <h2>MarketDataAgent</h2>
     <p><strong>Warnings :</strong> ${htmlEscape(marketWarnings)}</p>
-    <p><strong>Spread max accepté :</strong> ${MAX_ACCEPTABLE_SPREAD_PCT}%</p>
-    <p><strong>Âge prix max :</strong> ${MAX_RATE_AGE_MINUTES} min</p>
     <table>
       <thead>
         <tr>
@@ -1629,14 +1807,34 @@ function renderDashboard({ summary, metrics, market, secret }) {
   </div>
 
   <div class="card">
+    <h2>TrendMemoryAgent</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Actif</th>
+          <th>Obs.</th>
+          <th>Dernier mid</th>
+          <th>Depuis dernier scan %</th>
+          <th>Depuis début mémoire %</th>
+          <th>Tendance</th>
+          <th>Volatilité</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${trendRows || "<tr><td colspan='7'>Pas encore assez d'historique</td></tr>"}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
     <h2>Dernière décision</h2>
     <p>${htmlEscape(lastDecisionText)}</p>
     <p>
       <a href="/status?secret=${encodeURIComponent(secret)}">Status JSON</a> —
       <a href="/metrics?secret=${encodeURIComponent(secret)}">Metrics JSON</a> —
       <a href="/market-summary?secret=${encodeURIComponent(secret)}">Market JSON</a> —
-      <a href="/logs?secret=${encodeURIComponent(secret)}">Logs JSON</a> —
-      <a href="/last-decision?secret=${encodeURIComponent(secret)}">Dernière décision JSON</a>
+      <a href="/trend-summary?secret=${encodeURIComponent(secret)}">Trend JSON</a> —
+      <a href="/logs?secret=${encodeURIComponent(secret)}">Logs JSON</a>
     </p>
   </div>
 
@@ -1699,6 +1897,7 @@ app.get("/status", requireSecret, async (req, res) => {
       pending_warnings: summary.pendingWarnings,
       execution_stats_24h: getExecutionStats24h(),
       cooldown_memory: runtimeState.cooldownMemory,
+      trend_memory_summary: buildTrendSummary(),
       last_market_data_status: runtimeState.lastMarketData
         ? {
             time: runtimeState.lastMarketData.time,
@@ -1713,10 +1912,7 @@ app.get("/status", requireSecret, async (req, res) => {
       last_decision: runtimeState.lastDecision
     });
   } catch (error) {
-    res.json({
-      version: VERSION,
-      error: error.message
-    });
+    res.json({ version: VERSION, error: error.message });
   }
 });
 
@@ -1740,6 +1936,7 @@ app.get("/metrics", requireSecret, async (req, res) => {
       execution_stats_24h: getExecutionStats24h(),
       scan_running: runtimeState.scanRunning,
       logs_count: runtimeState.logs.length,
+      trend_assets_count: Object.keys(runtimeState.trendMemory).length,
       last_market_data_status: runtimeState.lastMarketData
         ? {
             time: runtimeState.lastMarketData.time,
@@ -1753,28 +1950,7 @@ app.get("/metrics", requireSecret, async (req, res) => {
         : null
     });
   } catch (error) {
-    res.json({
-      version: VERSION,
-      error: error.message
-    });
-  }
-});
-
-app.get("/market-rates", requireSecret, async (req, res) => {
-  try {
-    const rates = await getMarketRates();
-    res.json({
-      version: VERSION,
-      status: rates.status,
-      ok: rates.ok,
-      source: rates.source,
-      raw: rates.data
-    });
-  } catch (error) {
-    res.json({
-      version: VERSION,
-      error: error.message
-    });
+    res.json({ version: VERSION, error: error.message });
   }
 });
 
@@ -1786,14 +1962,19 @@ app.get("/market-summary", requireSecret, async (req, res) => {
       status: rates.status,
       ok: rates.ok,
       source: rates.source,
-      summary: rates.normalized
+      summary: rates.normalized,
+      trendSummary: rates.trendSummary
     });
   } catch (error) {
-    res.json({
-      version: VERSION,
-      error: error.message
-    });
+    res.json({ version: VERSION, error: error.message });
   }
+});
+
+app.get("/trend-summary", requireSecret, (req, res) => {
+  res.json({
+    version: VERSION,
+    trendMemoryAgent: buildTrendSummary()
+  });
 });
 
 app.get("/dashboard", requireSecret, async (req, res) => {
@@ -1813,13 +1994,15 @@ app.get("/dashboard", requireSecret, async (req, res) => {
           warnings: [{ type: "MARKET_DATA_ERROR" }],
           availableCount: 0,
           requestedCount: Object.keys(WATCHLIST).length
-        }
+        },
+        trendSummary: buildTrendSummary()
       };
     }
 
     const html = renderDashboard({
       summary,
       market: marketData.normalized,
+      trend: marketData.trendSummary || buildTrendSummary(),
       metrics: {
         executionStats24h: getExecutionStats24h()
       },
@@ -1862,9 +2045,7 @@ app.get("/portfolio", requireSecret, async (req, res) => {
     const portfolio = await getPortfolio();
     res.json(portfolio);
   } catch (error) {
-    res.json({
-      error: error.message
-    });
+    res.json({ error: error.message });
   }
 });
 
@@ -1926,9 +2107,7 @@ app.get("/buy-test", requireSecret, async (req, res) => {
 
     res.json(result);
   } catch (error) {
-    res.json({
-      error: error.message
-    });
+    res.json({ error: error.message });
   }
 });
 
@@ -1955,9 +2134,7 @@ app.get("/sell-test", requireSecret, async (req, res) => {
 
     res.json(result);
   } catch (error) {
-    res.json({
-      error: error.message
-    });
+    res.json({ error: error.message });
   }
 });
 
@@ -1966,9 +2143,7 @@ app.get("/resolve-symbol", requireSecret, async (req, res) => {
     const symbol = req.query.symbol;
 
     if (!symbol) {
-      return res.json({
-        error: "Ajoute ?symbol=NVDA par exemple"
-      });
+      return res.json({ error: "Ajoute ?symbol=NVDA par exemple" });
     }
 
     const response = await fetch(
@@ -1988,9 +2163,7 @@ app.get("/resolve-symbol", requireSecret, async (req, res) => {
       data
     });
   } catch (error) {
-    res.json({
-      error: error.message
-    });
+    res.json({ error: error.message });
   }
 });
 
