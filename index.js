@@ -10,7 +10,7 @@ const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-const VERSION = "v9.2-trend-memory-agent-autonomous";
+const VERSION = "v10.0-realtime-watcher-starter-portfolio";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const BOT_SECRET = process.env.BOT_SECRET || "";
@@ -20,20 +20,25 @@ const REQUIRE_FRESH_RATE_FOR_EXECUTION =
 
 const MAX_ORDER_USD = 10;
 const MAX_OPEN_POSITIONS = 10;
-const BUY_COOLDOWN_HOURS = 6;
-const MAX_LOGS = 120;
+const TARGET_STARTER_POSITIONS = 6;
 
-const MAX_EXECUTED_ORDERS_24H = 3;
-const MAX_BUYS_24H = 2;
+const BUY_COOLDOWN_HOURS = 3;
+const MAX_LOGS = 150;
+
+const MAX_EXECUTED_ORDERS_24H = 4;
+const MAX_BUYS_24H = 3;
 const MAX_SELLS_24H = 2;
-const MIN_HOURS_BETWEEN_EXECUTIONS = 4;
+const MIN_HOURS_BETWEEN_EXECUTIONS = 2;
 const PENDING_ORDER_WARNING_HOURS = 6;
 
 const MAX_ACCEPTABLE_SPREAD_PCT = 2.5;
 const MAX_RATE_AGE_MINUTES = 30;
 
-const MAX_TREND_POINTS_PER_ASSET = 24;
-const MIN_MINUTES_BETWEEN_TREND_POINTS = 20;
+const MAX_TREND_POINTS_PER_ASSET = 48;
+const MIN_MINUTES_BETWEEN_TREND_POINTS = 10;
+
+const WATCH_CRON_SCHEDULE = "*/15 * * * *";
+const TRADE_CRON_SCHEDULE = "0 */2 * * *";
 
 const WATCHLIST = {
   NVDA: 8760,
@@ -54,53 +59,66 @@ const WATCHLIST = {
 };
 
 const ASSET_RULES = {
-  NVDA: { category: "AI_BIG_TECH", buyThreshold: 70, sellThreshold: 72 },
-  AMD: { category: "AI_BIG_TECH", buyThreshold: 70, sellThreshold: 72 },
-  ORCL: { category: "AI_BIG_TECH", buyThreshold: 70, sellThreshold: 72 },
-  MSFT: { category: "AI_BIG_TECH", buyThreshold: 70, sellThreshold: 72 },
-  GOOG: { category: "AI_BIG_TECH", buyThreshold: 70, sellThreshold: 72 },
-  AMZN: { category: "AI_BIG_TECH", buyThreshold: 70, sellThreshold: 72 },
+  NVDA: { category: "AI_BIG_TECH", buyThreshold: 68, sellThreshold: 72 },
+  AMD: { category: "AI_BIG_TECH", buyThreshold: 68, sellThreshold: 72 },
+  ORCL: { category: "AI_BIG_TECH", buyThreshold: 68, sellThreshold: 72 },
+  MSFT: { category: "AI_BIG_TECH", buyThreshold: 68, sellThreshold: 72 },
+  GOOG: { category: "AI_BIG_TECH", buyThreshold: 68, sellThreshold: 72 },
+  AMZN: { category: "AI_BIG_TECH", buyThreshold: 68, sellThreshold: 72 },
 
-  BTC: { category: "CRYPTO_MAJOR", buyThreshold: 72, sellThreshold: 72 },
-  ETH: { category: "CRYPTO_MAJOR", buyThreshold: 72, sellThreshold: 72 },
+  BTC: { category: "CRYPTO_MAJOR", buyThreshold: 70, sellThreshold: 72 },
+  ETH: { category: "CRYPTO_MAJOR", buyThreshold: 70, sellThreshold: 72 },
 
-  BABA: { category: "CHINA_TECH", buyThreshold: 76, sellThreshold: 74 },
-  COIN: { category: "CRYPTO_EQUITY", buyThreshold: 76, sellThreshold: 74 },
-  PLTR: { category: "AI_SPEC_GROWTH", buyThreshold: 76, sellThreshold: 74 },
+  BABA: { category: "CHINA_TECH", buyThreshold: 74, sellThreshold: 74 },
+  COIN: { category: "CRYPTO_EQUITY", buyThreshold: 74, sellThreshold: 74 },
+  PLTR: { category: "AI_SPEC_GROWTH", buyThreshold: 74, sellThreshold: 74 },
 
-  SOL: { category: "SPECULATIVE_CRYPTO", buyThreshold: 82, sellThreshold: 76 },
+  SOL: { category: "SPECULATIVE_CRYPTO", buyThreshold: 80, sellThreshold: 76 },
   RKLB: { category: "SPACE", buyThreshold: 82, sellThreshold: 76 },
   IONQ: { category: "QUANTUM", buyThreshold: 82, sellThreshold: 76 },
   ASTS: { category: "SPACE_SPECULATIVE", buyThreshold: 82, sellThreshold: 76 }
 };
 
+const STARTER_PRIORITY = [
+  "ORCL",
+  "GOOG",
+  "AMZN",
+  "BTC",
+  "ETH",
+  "PLTR",
+  "BABA",
+  "COIN",
+  "SOL",
+  "RKLB",
+  "IONQ",
+  "ASTS"
+];
+
 const runtimeState = {
   scanRunning: false,
+  watchRunning: false,
   cooldownMemory: {},
   logs: [],
   lastDecision: null,
+  lastWatch: null,
   executionHistory: [],
   lastMarketData: null,
   trendMemory: {}
 };
 
 const PROMPT = `
-Tu es LEO-AI SENTINEL v9.2.
+Tu es LEO-AI SENTINEL v10.0.
 
 MISSION :
 Gérer un petit portefeuille eToro de manière autonome.
-Objectif : faire mieux qu'un investisseur humain prudent, sans prendre de risques absurdes.
+Objectif : construire progressivement un portefeuille diversifié tout en évitant les risques absurdes.
 
-NOUVEAUTÉ v9.2 :
-Tu disposes maintenant d'un TrendMemoryAgent.
-Il compare les prix entre plusieurs scans pour détecter :
-- hausse depuis le dernier scan
-- baisse depuis le dernier scan
-- tendance courte
-- volatilité approximative
-- accélération ou faiblesse relative
+NOUVEAUTÉ v10 :
+Tu disposes maintenant de deux rythmes :
+1. Realtime Watcher : observe le marché fréquemment.
+2. Trade Decision Scan : décide BUY, SELL ou HOLD de manière contrôlée.
 
-Tu disposes aussi du MarketDataAgent :
+Tu disposes du MarketDataAgent :
 - bid
 - ask
 - mid
@@ -108,6 +126,17 @@ Tu disposes aussi du MarketDataAgent :
 - date du prix
 - âge du prix
 - état healthy / stale par actif
+
+Tu disposes du TrendMemoryAgent :
+- hausse depuis le dernier scan
+- baisse depuis le dernier scan
+- tendance courte
+- volatilité approximative
+- accélération ou faiblesse relative
+
+Tu disposes aussi d'un Starter Portfolio Mode :
+Tant que le portefeuille contient moins de 6 positions, tu dois aider à construire progressivement le portefeuille.
+Le bot ne doit pas rester bloqué en HOLD permanent si un actif solide, non déjà détenu, avec prix sain, est disponible.
 
 STYLE :
 - Investisseur IA actif mais prudent.
@@ -130,7 +159,8 @@ RÈGLES ABSOLUES :
 - Maximum 1 ordre par scan.
 - Maximum 10 dollars par ordre.
 - Ne jamais choisir un actif hors watchlist.
-- HOLD si le signal est faible.
+- Ne jamais acheter un actif déjà présent dans le portefeuille.
+- HOLD si le signal est vraiment faible.
 - BUY possible si le signal est bon.
 - SELL possible si la thèse se casse, si le risque augmente fortement, ou si la protection du capital l'exige.
 - Ne pas acheter si le spread est anormalement élevé.
@@ -138,11 +168,19 @@ RÈGLES ABSOLUES :
 - Ne pas acheter par FOMO après une hausse verticale.
 - Ne pas prétendre connaître des informations non fournies.
 
-PHILOSOPHIE :
-Le bot ne doit pas être trop bridé.
-Il doit pouvoir acheter les actifs solides avec un niveau de confiance raisonnable.
-Il doit rester plus strict sur les actifs spéculatifs.
-Il doit éviter de multiplier les ordres trop vite.
+STARTER PORTFOLIO MODE :
+Si positions_count < 6 :
+- Ne sois pas trop passif.
+- Cherche activement un actif non possédé pour diversifier.
+- Priorité : ORCL, GOOG, AMZN, BTC, ETH, PLTR.
+- Si un actif prioritaire est healthy, non détenu, sans spread élevé, et sans tendance fortement baissière, BUY est acceptable avec confiance 68-74 selon l'actif.
+- Si plusieurs actifs sont possibles, privilégie l'actif solide le plus diversifiant.
+- HOLD seulement si aucun actif sain et non possédé n'est raisonnable.
+
+APRÈS 6 POSITIONS :
+- Deviens plus sélectif.
+- BUY seulement si signal fort.
+- SELL seulement si risque clair.
 
 UTILISATION DU TRENDMEMORYAGENT :
 - Si un actif solide monte doucement et régulièrement, cela peut renforcer un BUY.
@@ -153,11 +191,11 @@ UTILISATION DU TRENDMEMORYAGENT :
 
 ACTIFS SOLIDES :
 MSFT, GOOG, AMZN, NVDA, AMD, ORCL.
-Ces actifs peuvent être achetés avec une confiance autour de 70/100 si le signal est bon.
+Ces actifs peuvent être achetés avec une confiance autour de 68/100 si le signal est bon.
 
 CRYPTO MAJEURES :
 BTC, ETH.
-Achat possible avec une confiance autour de 72/100.
+Achat possible avec une confiance autour de 70/100 si le prix est sain.
 
 ACTIFS PLUS RISQUÉS :
 BABA, COIN, PLTR.
@@ -165,23 +203,23 @@ Achat possible seulement avec une confiance plus forte.
 
 ACTIFS TRÈS SPÉCULATIFS :
 SOL, RKLB, IONQ, ASTS.
-Achat seulement si très forte conviction.
+Achat seulement si conviction forte.
 
 DIVERSIFICATION :
-Si le portefeuille est trop concentré sur un seul actif, privilégier une diversification prudente vers un actif solide.
+Si le portefeuille est trop concentré sur AI_BIG_TECH, privilégier BTC, ETH, PLTR, BABA, COIN ou SOL selon les données de marché.
 Éviter d'empiler plusieurs achats sur le même actif.
 
 VENTE :
 Vendre seulement si :
 - risque élevé,
 - momentum cassé,
-- mauvaise nouvelle majeure,
 - thèse d'investissement cassée,
 - besoin clair de protéger le capital.
 
 FORMAT OBLIGATOIRE :
 Répondre uniquement en JSON strict.
 Pas de texte hors JSON.
+Les valeurs de decision doivent être exactement BUY, SELL ou HOLD.
 
 {
   "decision": "BUY|SELL|HOLD",
@@ -231,6 +269,22 @@ function addLog(entry) {
   }
 
   runtimeState.lastDecision = log;
+}
+
+function addWatchLog(entry) {
+  const log = {
+    time: nowIso(),
+    version: VERSION,
+    ...entry
+  };
+
+  runtimeState.logs.unshift(log);
+
+  if (runtimeState.logs.length > MAX_LOGS) {
+    runtimeState.logs = runtimeState.logs.slice(0, MAX_LOGS);
+  }
+
+  runtimeState.lastWatch = log;
 }
 
 function addExecutionHistory(entry) {
@@ -875,6 +929,8 @@ function extractPortfolioSummary(portfolioResponse) {
     .map((p) => p.asset)
     .filter((asset) => asset !== "UNKNOWN");
 
+  const uniqueOpenAssets = [...new Set(openAssets)];
+
   const categoryCounts = {};
 
   for (const asset of openAssets) {
@@ -897,16 +953,40 @@ function extractPortfolioSummary(portfolioResponse) {
 
   return {
     positionsCount: positions.length,
+    uniquePositionsCount: uniqueOpenAssets.length,
+    starterMode: positions.length < TARGET_STARTER_POSITIONS,
+    targetStarterPositions: TARGET_STARTER_POSITIONS,
+    missingStarterPositions: Math.max(0, TARGET_STARTER_POSITIONS - positions.length),
     ordersForOpenCount: ordersForOpen.length,
     ordersForCloseCount: ordersForClose.length,
     openPositions,
     openOrders,
     closeOrders,
     openAssets,
+    uniqueOpenAssets,
     categoryCounts,
     possibleCashOrCredit: clientPortfolio.credit ?? null,
     pendingWarnings
   };
+}
+
+function getPreferredNextAssets(portfolioSummary, marketSummary) {
+  const alreadyOpen = new Set(portfolioSummary.openAssets || []);
+
+  return STARTER_PRIORITY.map((asset) => {
+    const rate = marketSummary?.ratesByAsset?.[asset] || null;
+    const rules = ASSET_RULES[asset];
+
+    return {
+      asset,
+      category: rules?.category || "UNKNOWN",
+      alreadyOpen: alreadyOpen.has(asset),
+      healthy: rate ? Boolean(rate.healthy) : false,
+      spreadPct: rate?.spreadPct ?? null,
+      ageMinutes: rate?.ageMinutes ?? null,
+      mid: rate?.mid ?? null
+    };
+  }).filter((item) => !item.alreadyOpen);
 }
 
 function hasOpenPosition(portfolioResponse, asset) {
@@ -956,18 +1036,31 @@ function setCooldown(asset) {
 }
 
 function sanitizeDecision(decision) {
+  let rawDecision = String(decision?.decision || "HOLD").toUpperCase();
+
+  const decisionMap = {
+    BUY: "BUY",
+    ACHAT: "BUY",
+    ACHETER: "BUY",
+    SELL: "SELL",
+    VENTE: "SELL",
+    VENDRE: "SELL",
+    HOLD: "HOLD",
+    CONSERVER: "HOLD",
+    GARDER: "HOLD",
+    ATTENDRE: "HOLD"
+  };
+
+  rawDecision = decisionMap[rawDecision] || "HOLD";
+
   const clean = {
-    decision: String(decision?.decision || "HOLD").toUpperCase(),
+    decision: rawDecision,
     asset: String(decision?.asset || "NONE").toUpperCase(),
     amount_usd: Number(decision?.amount_usd || 0),
     confidence: normalizeConfidence(decision?.confidence),
-    reason: String(decision?.reason || "Aucune raison fournie").slice(0, 300),
+    reason: String(decision?.reason || "Aucune raison fournie").slice(0, 500),
     risk_check: String(decision?.risk_check || "failed").toLowerCase()
   };
-
-  if (!["BUY", "SELL", "HOLD"].includes(clean.decision)) {
-    clean.decision = "HOLD";
-  }
 
   if (clean.asset !== "NONE" && !WATCHLIST[clean.asset]) {
     clean.asset = "NONE";
@@ -1140,7 +1233,17 @@ function riskController(decision, portfolioResponse, marketData, trendSummary) {
       };
     }
 
-    if (d.confidence < rules.buyThreshold) {
+    let buyThreshold = rules.buyThreshold;
+
+    if (
+      summary.starterMode &&
+      STARTER_PRIORITY.includes(d.asset) &&
+      summary.positionsCount < TARGET_STARTER_POSITIONS
+    ) {
+      buyThreshold = Math.max(65, buyThreshold - 3);
+    }
+
+    if (d.confidence < buyThreshold) {
       return {
         approved: false,
         finalDecision: {
@@ -1149,7 +1252,7 @@ function riskController(decision, portfolioResponse, marketData, trendSummary) {
           asset: "NONE",
           amount_usd: 0
         },
-        reason: `Confiance BUY trop faible (${d.confidence} < ${rules.buyThreshold})`
+        reason: `Confiance BUY trop faible (${d.confidence} < ${buyThreshold})`
       };
     }
 
@@ -1463,6 +1566,8 @@ async function executeSell(asset) {
 }
 
 async function askDecisionAgent(portfolioSummary, marketSummary, trendSummary, source) {
+  const preferredNextAssets = getPreferredNextAssets(portfolioSummary, marketSummary);
+
   const response = await client.chat.completions.create({
     model: "gpt-4.1-mini",
     response_format: { type: "json_object" },
@@ -1477,6 +1582,9 @@ async function askDecisionAgent(portfolioSummary, marketSummary, trendSummary, s
           auto_trade_enabled: AUTO_TRADE,
           max_order_usd: MAX_ORDER_USD,
           max_open_positions: MAX_OPEN_POSITIONS,
+          target_starter_positions: TARGET_STARTER_POSITIONS,
+          starter_portfolio_mode: portfolioSummary.starterMode,
+          preferred_next_assets: preferredNextAssets,
           execution_limits: {
             max_executed_orders_24h: MAX_EXECUTED_ORDERS_24H,
             max_buys_24h: MAX_BUYS_24H,
@@ -1499,7 +1607,7 @@ async function askDecisionAgent(portfolioSummary, marketSummary, trendSummary, s
           trend_memory_summary: trendSummary,
           execution_stats_24h: getExecutionStats24h(),
           instruction:
-            "Analyse le portefeuille, les prix live et la tendance entre scans. Décide BUY, SELL ou HOLD. Une seule décision."
+            "Analyse le portefeuille, les prix live, les actifs déjà détenus et la tendance entre scans. En Starter Portfolio Mode, construis progressivement le portefeuille si un actif sain et non détenu est disponible. Décide BUY, SELL ou HOLD. Une seule décision."
         })
       }
     ]
@@ -1509,6 +1617,106 @@ async function askDecisionAgent(portfolioSummary, marketSummary, trendSummary, s
   console.log("DECISION RAW:", raw);
 
   return JSON.parse(raw);
+}
+
+async function watchMarket(source = "manual-watch") {
+  if (runtimeState.watchRunning) {
+    return {
+      version: VERSION,
+      skipped: true,
+      reason: "Un watch est déjà en cours"
+    };
+  }
+
+  runtimeState.watchRunning = true;
+
+  try {
+    const portfolio = await getPortfolio();
+    const portfolioSummary = extractPortfolioSummary(portfolio);
+
+    let marketData;
+
+    try {
+      marketData = await getMarketRates();
+    } catch (error) {
+      marketData = {
+        status: null,
+        ok: false,
+        source: "error",
+        error: error.message,
+        normalized: {
+          rates: [],
+          ratesByAsset: {},
+          warnings: [{ type: "MARKET_DATA_ERROR", message: error.message }],
+          availableCount: 0,
+          requestedCount: Object.keys(WATCHLIST).length
+        },
+        trendSummary: buildTrendSummary()
+      };
+    }
+
+    const trendSummary = marketData.trendSummary || buildTrendSummary();
+    const preferredNextAssets = getPreferredNextAssets(
+      portfolioSummary,
+      marketData.normalized
+    );
+
+    const result = {
+      version: VERSION,
+      source,
+      mode: "WATCH_ONLY_NO_TRADE",
+      auto_trade_enabled: AUTO_TRADE,
+      portfolio_status: portfolio.status,
+      market_data_status: marketData.status,
+      market_data_ok: marketData.ok,
+      market_data_source: marketData.source || "unknown",
+      portfolioSummary,
+      marketDataAgent: marketData.normalized,
+      trendMemoryAgent: trendSummary,
+      preferredNextAssets,
+      executionStats24h: getExecutionStats24h()
+    };
+
+    addWatchLog({
+      source,
+      event: "WATCH_COMPLETED",
+      decision: {
+        decision: "WATCH",
+        asset: "NONE",
+        amount_usd: 0,
+        confidence: 0,
+        reason: "Surveillance marché uniquement, aucun achat/vente sur /watch",
+        risk_check: "passed"
+      },
+      risk_reason: "WATCH_ONLY_NO_TRADE",
+      execution: {
+        skipped: true,
+        reason: "Watch-only : aucune exécution possible"
+      },
+      market: {
+        status: marketData.status,
+        ok: marketData.ok,
+        source: marketData.source || "unknown",
+        availableCount: marketData.normalized?.availableCount,
+        requestedCount: marketData.normalized?.requestedCount,
+        warnings: marketData.normalized?.warnings || []
+      },
+      trend: trendSummary,
+      portfolio: {
+        positionsCount: portfolioSummary.positionsCount,
+        ordersForOpenCount: portfolioSummary.ordersForOpenCount,
+        ordersForCloseCount: portfolioSummary.ordersForCloseCount,
+        openAssets: portfolioSummary.openAssets,
+        categoryCounts: portfolioSummary.categoryCounts,
+        starterMode: portfolioSummary.starterMode,
+        preferredNextAssets
+      }
+    });
+
+    return result;
+  } finally {
+    runtimeState.watchRunning = false;
+  }
 }
 
 async function scanMarket(source = "manual-scan") {
@@ -1598,6 +1806,7 @@ async function scanMarket(source = "manual-scan") {
     const result = {
       version: VERSION,
       source,
+      mode: "TRADE_DECISION_SCAN",
       auto_trade_enabled: AUTO_TRADE,
       portfolio_status: portfolio.status,
       market_data_status: marketData.status,
@@ -1607,6 +1816,10 @@ async function scanMarket(source = "manual-scan") {
         portfolioSummary,
         marketDataAgent: marketData.normalized,
         trendMemoryAgent: trendSummary,
+        preferredNextAssets: getPreferredNextAssets(
+          portfolioSummary,
+          marketData.normalized
+        ),
         executionStats24h: getExecutionStats24h(),
         decisionAgentRaw: decisionRaw,
         riskController: control
@@ -1633,6 +1846,8 @@ async function scanMarket(source = "manual-scan") {
       trend: trendSummary,
       portfolio: {
         positionsCount: portfolioSummary.positionsCount,
+        uniquePositionsCount: portfolioSummary.uniquePositionsCount,
+        starterMode: portfolioSummary.starterMode,
         ordersForOpenCount: portfolioSummary.ordersForOpenCount,
         ordersForCloseCount: portfolioSummary.ordersForCloseCount,
         openAssets: portfolioSummary.openAssets,
@@ -1657,8 +1872,9 @@ function htmlEscape(value) {
     .replaceAll('"', "&quot;");
 }
 
-function renderDashboard({ summary, metrics, market, trend, secret }) {
+function renderDashboard({ summary, metrics, market, trend, preferredNextAssets, secret }) {
   const last = runtimeState.lastDecision;
+  const lastWatch = runtimeState.lastWatch;
   const openAssets = summary.openAssets.join(", ") || "Aucun";
 
   const pendingWarnings = summary.pendingWarnings.length
@@ -1673,7 +1889,11 @@ function renderDashboard({ summary, metrics, market, trend, secret }) {
 
   const lastDecisionText = last
     ? `${last.time} — ${last.decision?.decision || "?"} ${last.decision?.asset || ""} — ${last.risk_reason || ""}`
-    : "Aucune décision enregistrée depuis le dernier redémarrage.";
+    : "Aucune décision de trading enregistrée depuis le dernier redémarrage.";
+
+  const lastWatchText = lastWatch
+    ? `${lastWatch.time} — ${lastWatch.source} — ${lastWatch.market?.availableCount || 0}/${lastWatch.market?.requestedCount || 0}`
+    : "Aucune surveillance enregistrée depuis le dernier redémarrage.";
 
   const rateRows = (market?.rates || [])
     .map((rate) => {
@@ -1707,13 +1927,29 @@ function renderDashboard({ summary, metrics, market, trend, secret }) {
     })
     .join("");
 
+  const preferredRows = (preferredNextAssets || [])
+    .map((item) => {
+      return `
+        <tr>
+          <td>${htmlEscape(item.asset)}</td>
+          <td>${htmlEscape(item.category)}</td>
+          <td>${item.healthy ? "✅" : "⚠️"}</td>
+          <td>${htmlEscape(item.spreadPct)}</td>
+          <td>${htmlEscape(item.ageMinutes)}</td>
+          <td>${htmlEscape(item.mid)}</td>
+        </tr>
+      `;
+    })
+    .join("");
+
   const rows = runtimeState.logs
-    .slice(0, 20)
+    .slice(0, 25)
     .map((log) => {
       return `
         <tr>
           <td>${htmlEscape(log.time)}</td>
           <td>${htmlEscape(log.source)}</td>
+          <td>${htmlEscape(log.event || "")}</td>
           <td>${htmlEscape(log.decision?.decision || "")}</td>
           <td>${htmlEscape(log.decision?.asset || "")}</td>
           <td>${htmlEscape(log.decision?.confidence || "")}</td>
@@ -1757,16 +1993,16 @@ function renderDashboard({ summary, metrics, market, trend, secret }) {
       <div class="big ${AUTO_TRADE ? "ok" : "bad"}">${AUTO_TRADE ? "ACTIF" : "OFF"}</div>
     </div>
     <div class="card">
+      <div class="muted">Starter Portfolio Mode</div>
+      <div class="big ${summary.starterMode ? "warn" : "ok"}">${summary.positionsCount}/${TARGET_STARTER_POSITIONS}</div>
+    </div>
+    <div class="card">
       <div class="muted">MarketDataAgent</div>
       <div class="big ${market?.availableCount > 0 ? "ok" : "warn"}">${market?.availableCount || 0}/${market?.requestedCount || 0}</div>
     </div>
     <div class="card">
       <div class="muted">TrendMemoryAgent</div>
       <div class="big">${Object.keys(trend?.assets || {}).length}</div>
-    </div>
-    <div class="card">
-      <div class="muted">Positions ouvertes</div>
-      <div class="big">${summary.positionsCount}</div>
     </div>
     <div class="card">
       <div class="muted">Ordres achat en attente</div>
@@ -1783,6 +2019,25 @@ function renderDashboard({ summary, metrics, market, trend, secret }) {
     <p><strong>Actifs ouverts :</strong> ${htmlEscape(openAssets)}</p>
     <p><strong>Catégories :</strong> <code>${htmlEscape(JSON.stringify(summary.categoryCounts))}</code></p>
     <p><strong>Alertes ordres en attente :</strong> ${htmlEscape(pendingWarnings)}</p>
+  </div>
+
+  <div class="card">
+    <h2>Prochains actifs préférés</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Actif</th>
+          <th>Catégorie</th>
+          <th>Prix sain</th>
+          <th>Spread %</th>
+          <th>Âge min</th>
+          <th>Mid</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${preferredRows || "<tr><td colspan='6'>Aucun actif préféré disponible</td></tr>"}
+      </tbody>
+    </table>
   </div>
 
   <div class="card">
@@ -1827,13 +2082,16 @@ function renderDashboard({ summary, metrics, market, trend, secret }) {
   </div>
 
   <div class="card">
-    <h2>Dernière décision</h2>
+    <h2>Dernière décision trading</h2>
     <p>${htmlEscape(lastDecisionText)}</p>
+    <h2>Dernier watch</h2>
+    <p>${htmlEscape(lastWatchText)}</p>
     <p>
       <a href="/status?secret=${encodeURIComponent(secret)}">Status JSON</a> —
       <a href="/metrics?secret=${encodeURIComponent(secret)}">Metrics JSON</a> —
       <a href="/market-summary?secret=${encodeURIComponent(secret)}">Market JSON</a> —
       <a href="/trend-summary?secret=${encodeURIComponent(secret)}">Trend JSON</a> —
+      <a href="/diagnostic?secret=${encodeURIComponent(secret)}">Diagnostic JSON</a> —
       <a href="/logs?secret=${encodeURIComponent(secret)}">Logs JSON</a>
     </p>
   </div>
@@ -1844,6 +2102,7 @@ function renderDashboard({ summary, metrics, market, trend, secret }) {
       <tr>
         <th>Heure</th>
         <th>Source</th>
+        <th>Event</th>
         <th>Décision</th>
         <th>Actif</th>
         <th>Confiance</th>
@@ -1852,7 +2111,7 @@ function renderDashboard({ summary, metrics, market, trend, secret }) {
       </tr>
     </thead>
     <tbody>
-      ${rows || "<tr><td colspan='7'>Aucun log</td></tr>"}
+      ${rows || "<tr><td colspan='8'>Aucun log</td></tr>"}
     </tbody>
   </table>
 </body>
@@ -1871,6 +2130,8 @@ app.get("/health", (req, res) => {
     auto_trade_enabled: AUTO_TRADE,
     bot_secret_configured: Boolean(BOT_SECRET),
     require_fresh_rate_for_execution: REQUIRE_FRESH_RATE_FOR_EXECUTION,
+    watch_cron_schedule: WATCH_CRON_SCHEDULE,
+    trade_cron_schedule: TRADE_CRON_SCHEDULE,
     time: nowIso()
   });
 });
@@ -1888,6 +2149,9 @@ app.get("/status", requireSecret, async (req, res) => {
       portfolio_status: portfolio.status,
       portfolio_ok: portfolio.ok,
       positions_count: summary.positionsCount,
+      unique_positions_count: summary.uniquePositionsCount,
+      starter_mode: summary.starterMode,
+      target_starter_positions: TARGET_STARTER_POSITIONS,
       orders_for_open_count: summary.ordersForOpenCount,
       orders_for_close_count: summary.ordersForCloseCount,
       open_assets: summary.openAssets,
@@ -1909,6 +2173,7 @@ app.get("/status", requireSecret, async (req, res) => {
             warnings: runtimeState.lastMarketData.normalized?.warnings || []
           }
         : null,
+      last_watch: runtimeState.lastWatch,
       last_decision: runtimeState.lastDecision
     });
   } catch (error) {
@@ -1928,6 +2193,8 @@ app.get("/metrics", requireSecret, async (req, res) => {
       portfolio_ok: portfolio.ok,
       portfolio_status: portfolio.status,
       positions_count: summary.positionsCount,
+      unique_positions_count: summary.uniquePositionsCount,
+      starter_mode: summary.starterMode,
       open_assets: summary.openAssets,
       category_counts: summary.categoryCounts,
       open_orders_count: summary.ordersForOpenCount,
@@ -1935,8 +2202,11 @@ app.get("/metrics", requireSecret, async (req, res) => {
       pending_warnings: summary.pendingWarnings,
       execution_stats_24h: getExecutionStats24h(),
       scan_running: runtimeState.scanRunning,
+      watch_running: runtimeState.watchRunning,
       logs_count: runtimeState.logs.length,
       trend_assets_count: Object.keys(runtimeState.trendMemory).length,
+      last_watch_time: runtimeState.lastWatch?.time || null,
+      last_decision_time: runtimeState.lastDecision?.time || null,
       last_market_data_status: runtimeState.lastMarketData
         ? {
             time: runtimeState.lastMarketData.time,
@@ -1977,6 +2247,78 @@ app.get("/trend-summary", requireSecret, (req, res) => {
   });
 });
 
+app.get("/diagnostic", requireSecret, async (req, res) => {
+  try {
+    const portfolio = await getPortfolio();
+    const portfolioSummary = extractPortfolioSummary(portfolio);
+    const marketData = await getMarketRates();
+    const trendSummary = marketData.trendSummary || buildTrendSummary();
+
+    res.json({
+      version: VERSION,
+      time: nowIso(),
+      message: "Diagnostic : vérifier pourquoi le bot achète ou n'achète pas.",
+      portfolioSummary,
+      starterMode: {
+        active: portfolioSummary.starterMode,
+        positionsCount: portfolioSummary.positionsCount,
+        targetStarterPositions: TARGET_STARTER_POSITIONS,
+        preferredNextAssets: getPreferredNextAssets(
+          portfolioSummary,
+          marketData.normalized
+        )
+      },
+      executionStats24h: getExecutionStats24h(),
+      marketDataStatus: {
+        status: marketData.status,
+        ok: marketData.ok,
+        source: marketData.source,
+        availableCount: marketData.normalized?.availableCount,
+        requestedCount: marketData.normalized?.requestedCount,
+        warnings: marketData.normalized?.warnings || []
+      },
+      trendSummary,
+      likelyBlocks: {
+        hasOpenBuyOrder: portfolioSummary.ordersForOpenCount > 0,
+        hasOpenSellOrder: portfolioSummary.ordersForCloseCount > 0,
+        recentExecutionBlock:
+          getExecutionStats24h().hoursSinceLastExecution !== null &&
+          getExecutionStats24h().hoursSinceLastExecution < MIN_HOURS_BETWEEN_EXECUTIONS,
+        maxOrders24hReached:
+          getExecutionStats24h().total >= MAX_EXECUTED_ORDERS_24H,
+        maxBuys24hReached:
+          getExecutionStats24h().buys >= MAX_BUYS_24H,
+        portfolioFull:
+          portfolioSummary.positionsCount >= MAX_OPEN_POSITIONS
+      },
+      lastWatch: runtimeState.lastWatch,
+      lastDecision: runtimeState.lastDecision
+    });
+  } catch (error) {
+    res.json({
+      version: VERSION,
+      error: error.message
+    });
+  }
+});
+
+app.get("/watch", requireSecret, async (req, res) => {
+  try {
+    const source = req.query.source
+      ? String(req.query.source).slice(0, 50)
+      : "manual-watch";
+
+    const result = await watchMarket(source);
+    res.json(result);
+  } catch (error) {
+    res.json({
+      version: VERSION,
+      error: "Erreur watch",
+      details: error.message
+    });
+  }
+});
+
 app.get("/dashboard", requireSecret, async (req, res) => {
   try {
     const portfolio = await getPortfolio();
@@ -2003,6 +2345,7 @@ app.get("/dashboard", requireSecret, async (req, res) => {
       summary,
       market: marketData.normalized,
       trend: marketData.trendSummary || buildTrendSummary(),
+      preferredNextAssets: getPreferredNextAssets(summary, marketData.normalized),
       metrics: {
         executionStats24h: getExecutionStats24h()
       },
@@ -2017,7 +2360,7 @@ app.get("/dashboard", requireSecret, async (req, res) => {
 });
 
 app.get("/logs", requireSecret, (req, res) => {
-  const limit = Math.min(Number(req.query.limit || 20), MAX_LOGS);
+  const limit = Math.min(Number(req.query.limit || 30), MAX_LOGS);
 
   res.json({
     version: VERSION,
@@ -2036,7 +2379,8 @@ app.get("/watchlist", requireSecret, (req, res) => {
   res.json({
     version: VERSION,
     watchlist: WATCHLIST,
-    asset_rules: ASSET_RULES
+    asset_rules: ASSET_RULES,
+    starter_priority: STARTER_PRIORITY
   });
 });
 
@@ -2051,7 +2395,11 @@ app.get("/portfolio", requireSecret, async (req, res) => {
 
 app.get("/scan", requireSecret, async (req, res) => {
   try {
-    const result = await scanMarket("manual-scan");
+    const source = req.query.source
+      ? String(req.query.source).slice(0, 50)
+      : "manual-scan";
+
+    const result = await scanMarket(source);
     res.json(result);
   } catch (error) {
     res.json({
@@ -2167,11 +2515,27 @@ app.get("/resolve-symbol", requireSecret, async (req, res) => {
   }
 });
 
-cron.schedule("0 */2 * * *", async () => {
-  console.log(`[${nowIso()}] Scan automatique toutes les 2h lancé`);
+cron.schedule(WATCH_CRON_SCHEDULE, async () => {
+  console.log(`[${nowIso()}] Watch automatique toutes les 15 min lancé`);
 
   try {
-    const result = await scanMarket("auto-cron");
+    const result = await watchMarket("auto-watch");
+    console.log("WATCH AUTO RESULT:", JSON.stringify({
+      version: result.version,
+      source: result.source,
+      market_data_ok: result.market_data_ok,
+      market_data_source: result.market_data_source
+    }));
+  } catch (error) {
+    console.error("Erreur watch automatique:", error.message);
+  }
+});
+
+cron.schedule(TRADE_CRON_SCHEDULE, async () => {
+  console.log(`[${nowIso()}] Scan trading automatique toutes les 2h lancé`);
+
+  try {
+    const result = await scanMarket("auto-trade-cron");
     console.log("SCAN AUTO RESULT:", JSON.stringify(result));
   } catch (error) {
     console.error("Erreur scan automatique:", error.message);
