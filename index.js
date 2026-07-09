@@ -6,9 +6,9 @@ const { randomUUID } = require("crypto");
 const app = express();
 app.use(express.json());
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
+const client = process.env.OPENAI_API_KEY
+  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  : null;
 
 const VERSION = "v10.1-diversification-basket";
 
@@ -1627,4 +1627,631 @@ function riskController(decision, portfolioResponse, marketData, trendSummary) {
 
 async function executeBuy(asset, amount) {
   if (!AUTO_TRADE) {
-    return { skipped: true, reason: "AUTO_TRADE dés
+    return { skipped: true, reason: "AUTO_TRADE disabled. No real order executed." };
+  }
+
+  if (!process.env.ETORO_API_KEY || !process.env.ETORO_USER_KEY) {
+    return { skipped: true, reason: "Missing ETORO_API_KEY or ETORO_USER_KEY. No real order executed." };
+  }
+
+  const executionUrl = process.env.ETORO_BUY_URL || "";
+
+  if (!executionUrl) {
+    return {
+      skipped: true,
+      reason: "ETORO_BUY_URL missing. Execution is locked to avoid sending an order to a wrong endpoint."
+    };
+  }
+
+  const instrumentId = WATCHLIST[asset];
+
+  const payload = {
+    instrumentID: instrumentId,
+    instrumentId,
+    isBuy: true,
+    amount: Number(amount),
+    leverage: 1
+  };
+
+  const response = await fetch(executionUrl, {
+    method: "POST",
+    headers: etoroHeaders(),
+    body: JSON.stringify(payload)
+  });
+
+  const data = await readJsonResponse(response);
+
+  return {
+    skipped: false,
+    ok: response.ok,
+    status: response.status,
+    asset,
+    amount,
+    payload,
+    data
+  };
+}
+
+async function executeSell(asset, portfolioResponse) {
+  if (!AUTO_TRADE) {
+    return { skipped: true, reason: "AUTO_TRADE disabled. No real order executed." };
+  }
+
+  if (!process.env.ETORO_API_KEY || !process.env.ETORO_USER_KEY) {
+    return { skipped: true, reason: "Missing ETORO_API_KEY or ETORO_USER_KEY. No real order executed." };
+  }
+
+  const executionUrl = process.env.ETORO_SELL_URL || "";
+
+  if (!executionUrl) {
+    return {
+      skipped: true,
+      reason: "ETORO_SELL_URL missing. Execution is locked to avoid sending an order to a wrong endpoint."
+    };
+  }
+
+  const position = findOpenPosition(portfolioResponse, asset);
+  const positionId = position ? getPositionId(position) : null;
+
+  if (!positionId) {
+    return {
+      skipped: true,
+      reason: `No valid open position id found for ${asset}.`
+    };
+  }
+
+  const instrumentId = WATCHLIST[asset];
+
+  const payload = {
+    positionID: positionId,
+    positionId,
+    instrumentID: instrumentId,
+    instrumentId
+  };
+
+  const response = await fetch(executionUrl, {
+    method: "POST",
+    headers: etoroHeaders(),
+    body: JSON.stringify(payload)
+  });
+
+  const data = await readJsonResponse(response);
+
+  return {
+    skipped: false,
+    ok: response.ok,
+    status: response.status,
+    asset,
+    positionId,
+    payload,
+    data
+  };
+}
+
+function hasEtoroConfig() {
+  return Boolean(process.env.ETORO_API_KEY && process.env.ETORO_USER_KEY);
+}
+
+function buildMockPortfolioResponse() {
+  return {
+    status: 200,
+    ok: !AUTO_TRADE,
+    source: "mock-no-etoro-config",
+    data: {
+      clientPortfolio: {
+        positions: [],
+        ordersForOpen: [],
+        ordersForClose: [],
+        credit: null
+      }
+    }
+  };
+}
+
+async function getSafePortfolio() {
+  if (!hasEtoroConfig()) {
+    return buildMockPortfolioResponse();
+  }
+
+  try {
+    return await getPortfolio();
+  } catch (error) {
+    return {
+      status: 0,
+      ok: false,
+      source: "portfolio-fetch-error",
+      error: error.message,
+      data: {
+        clientPortfolio: {
+          positions: [],
+          ordersForOpen: [],
+          ordersForClose: [],
+          credit: null
+        }
+      }
+    };
+  }
+}
+
+function buildMockMarketData() {
+  const now = nowIso();
+
+  const rates = Object.entries(WATCHLIST).map(([asset, instrumentId], index) => {
+    const mid = 100 + index * 3;
+
+    return {
+      instrumentID: instrumentId,
+      bid: roundNumber(mid * 0.999, 6),
+      ask: roundNumber(mid * 1.001, 6),
+      date: now
+    };
+  });
+
+  const normalized = normalizeMarketRates({ rates });
+  const trendSummary = updateTrendMemory(normalized);
+
+  runtimeState.lastMarketData = {
+    time: nowIso(),
+    source: "mock-no-etoro-config",
+    status: 200,
+    ok: !AUTO_TRADE,
+    data: { rates },
+    normalized,
+    trendSummary
+  };
+
+  return {
+    status: 200,
+    ok: !AUTO_TRADE,
+    source: "mock-no-etoro-config",
+    data: { rates },
+    normalized,
+    trendSummary
+  };
+}
+
+async function getSafeMarketData() {
+  if (!hasEtoroConfig()) {
+    return buildMockMarketData();
+  }
+
+  try {
+    return await getMarketRates();
+  } catch (error) {
+    const mock = buildMockMarketData();
+
+    return {
+      ...mock,
+      ok: false,
+      source: "market-fetch-error-with-mock-fallback",
+      error: error.message
+    };
+  }
+}
+
+function buildHoldDecision(reason, confidence = 0) {
+  return {
+    decision: "HOLD",
+    asset: "NONE",
+    amount_usd: 0,
+    confidence,
+    reason,
+    risk_check: "passed"
+  };
+}
+
+function parseAiJson(content) {
+  if (!content || typeof content !== "string") {
+    return buildHoldDecision("Empty AI response");
+  }
+
+  try {
+    return JSON.parse(content);
+  } catch {
+    const start = content.indexOf("{");
+    const end = content.lastIndexOf("}");
+
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(content.slice(start, end + 1));
+      } catch {
+        return buildHoldDecision("AI response was not valid JSON");
+      }
+    }
+
+    return buildHoldDecision("AI response was not valid JSON");
+  }
+}
+
+async function getAiDecision(context) {
+  if (!client || !process.env.OPENAI_API_KEY) {
+    return buildHoldDecision("OPENAI_API_KEY missing. AI decision disabled.");
+  }
+
+  try {
+    const completion = await client.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: PROMPT },
+        {
+          role: "user",
+          content:
+            "Use this JSON context and answer with strict JSON only.\n" +
+            JSON.stringify(context)
+        }
+      ]
+    });
+
+    const content = completion.choices?.[0]?.message?.content || "";
+    return parseAiJson(content);
+  } catch (error) {
+    return buildHoldDecision(`OpenAI decision error: ${error.message}`);
+  }
+}
+
+function compactMarketData(marketData) {
+  return {
+    source: marketData?.source || null,
+    status: marketData?.status ?? null,
+    ok: Boolean(marketData?.ok),
+    availableCount: marketData?.normalized?.availableCount ?? 0,
+    requestedCount: marketData?.normalized?.requestedCount ?? Object.keys(WATCHLIST).length,
+    warnings: (marketData?.normalized?.warnings || []).slice(0, 20)
+  };
+}
+
+async function runWatcher(trigger = "manual") {
+  if (runtimeState.watchRunning) {
+    return {
+      status: "skipped",
+      reason: "Watcher already running",
+      time: nowIso()
+    };
+  }
+
+  runtimeState.watchRunning = true;
+
+  try {
+    const marketData = await getSafeMarketData();
+
+    const result = {
+      status: "ok",
+      type: "watch",
+      trigger,
+      version: VERSION,
+      time: nowIso(),
+      marketData: compactMarketData(marketData),
+      trendSummary: marketData.trendSummary || buildTrendSummary()
+    };
+
+    addWatchLog(result);
+    return result;
+  } catch (error) {
+    const result = {
+      status: "error",
+      type: "watch",
+      trigger,
+      version: VERSION,
+      time: nowIso(),
+      error: error.message
+    };
+
+    addWatchLog(result);
+    return result;
+  } finally {
+    runtimeState.watchRunning = false;
+  }
+}
+
+async function runDecisionScan(trigger = "manual") {
+  if (runtimeState.scanRunning) {
+    return {
+      status: "skipped",
+      reason: "Scan already running",
+      time: nowIso()
+    };
+  }
+
+  runtimeState.scanRunning = true;
+
+  try {
+    const portfolioResponse = await getSafePortfolio();
+    const marketData = await getSafeMarketData();
+    const trendSummary = marketData.trendSummary || buildTrendSummary();
+
+    const portfolioSummary = extractPortfolioSummary(portfolioResponse);
+
+    const preferredNextAssets = getPreferredNextAssets(
+      portfolioSummary,
+      marketData.normalized
+    ).slice(0, 15);
+
+    if (AUTO_TRADE && !portfolioResponse.ok) {
+      const forcedHold = buildHoldDecision(
+        "Portfolio unavailable while AUTO_TRADE is true. Execution blocked."
+      );
+
+      const result = {
+        status: "ok",
+        type: "scan",
+        trigger,
+        version: VERSION,
+        time: nowIso(),
+        autoTrade: AUTO_TRADE,
+        portfolioOk: portfolioResponse.ok,
+        portfolioStatus: portfolioResponse.status,
+        marketData: compactMarketData(marketData),
+        portfolioSummary,
+        preferredNextAssets,
+        aiDecision: forcedHold,
+        risk: {
+          approved: false,
+          finalDecision: forcedHold,
+          reason: forcedHold.reason
+        },
+        execution: {
+          skipped: true,
+          reason: forcedHold.reason
+        }
+      };
+
+      addLog(result);
+      return result;
+    }
+
+    const aiContext = {
+      version: VERSION,
+      time: nowIso(),
+      autoTrade: AUTO_TRADE,
+      requireFreshRateForExecution: REQUIRE_FRESH_RATE_FOR_EXECUTION,
+      limits: {
+        maxOrderUsd: MAX_ORDER_USD,
+        maxOpenPositions: MAX_OPEN_POSITIONS,
+        maxExecutedOrders24h: MAX_EXECUTED_ORDERS_24H,
+        maxBuys24h: MAX_BUYS_24H,
+        maxSells24h: MAX_SELLS_24H,
+        minHoursBetweenExecutions: MIN_HOURS_BETWEEN_EXECUTIONS
+      },
+      portfolioSummary,
+      marketData: {
+        summary: compactMarketData(marketData),
+        rates: marketData?.normalized?.rates || []
+      },
+      trendSummary,
+      preferredNextAssets,
+      executionStats24h: getExecutionStats24h()
+    };
+
+    const aiDecisionRaw = await getAiDecision(aiContext);
+    const aiDecision = sanitizeDecision(aiDecisionRaw);
+
+    const risk = riskController(
+      aiDecision,
+      portfolioResponse,
+      marketData,
+      trendSummary
+    );
+
+    let execution = {
+      skipped: true,
+      reason: risk.approved ? "Execution not started" : risk.reason
+    };
+
+    if (risk.approved && risk.finalDecision.decision === "BUY") {
+      execution = await executeBuy(
+        risk.finalDecision.asset,
+        risk.finalDecision.amount_usd
+      );
+
+      if (!execution.skipped && execution.ok) {
+        setCooldown(risk.finalDecision.asset);
+
+        addExecutionHistory({
+          type: "BUY",
+          asset: risk.finalDecision.asset,
+          amount_usd: risk.finalDecision.amount_usd,
+          executionStatus: execution.status
+        });
+      }
+    }
+
+    if (risk.approved && risk.finalDecision.decision === "SELL") {
+      execution = await executeSell(risk.finalDecision.asset, portfolioResponse);
+
+      if (!execution.skipped && execution.ok) {
+        addExecutionHistory({
+          type: "SELL",
+          asset: risk.finalDecision.asset,
+          amount_usd: 0,
+          executionStatus: execution.status
+        });
+      }
+    }
+
+    const result = {
+      status: "ok",
+      type: "scan",
+      trigger,
+      version: VERSION,
+      time: nowIso(),
+      autoTrade: AUTO_TRADE,
+      portfolioOk: portfolioResponse.ok,
+      portfolioStatus: portfolioResponse.status,
+      marketData: compactMarketData(marketData),
+      portfolioSummary,
+      preferredNextAssets,
+      aiDecision,
+      risk,
+      execution,
+      executionStats24h: getExecutionStats24h()
+    };
+
+    addLog(result);
+    return result;
+  } catch (error) {
+    const result = {
+      status: "error",
+      type: "scan",
+      trigger,
+      version: VERSION,
+      time: nowIso(),
+      error: error.message,
+      stack: process.env.NODE_ENV === "production" ? undefined : error.stack
+    };
+
+    addLog(result);
+    return result;
+  } finally {
+    runtimeState.scanRunning = false;
+  }
+}
+
+app.get("/", (req, res) => {
+  res.json({
+    status: "ok",
+    app: "LEO-AI SENTINEL",
+    version: VERSION,
+    autoTrade: AUTO_TRADE,
+    message: "Backend is running"
+  });
+});
+
+app.get("/health", (req, res) => {
+  res.json({
+    status: "healthy",
+    version: VERSION,
+    time: nowIso(),
+    node: process.version,
+    autoTrade: AUTO_TRADE,
+    hasOpenAiKey: Boolean(process.env.OPENAI_API_KEY),
+    hasEtoroConfig: hasEtoroConfig()
+  });
+});
+
+app.get("/test-instruments", (req, res) => {
+  res.json({
+    status: "ok",
+    version: VERSION,
+    count: Object.keys(WATCHLIST).length,
+    instruments: Object.entries(WATCHLIST).map(([asset, instrumentId]) => ({
+      asset,
+      instrumentId,
+      category: ASSET_RULES[asset]?.category || "UNKNOWN"
+    }))
+  });
+});
+
+app.get("/watch", requireSecret, async (req, res) => {
+  const result = await runWatcher("manual-http");
+  res.status(result.status === "error" ? 500 : 200).json(result);
+});
+
+app.get("/scan", requireSecret, async (req, res) => {
+  const result = await runDecisionScan("manual-http-get");
+  res.status(result.status === "error" ? 500 : 200).json(result);
+});
+
+app.post("/scan", requireSecret, async (req, res) => {
+  const result = await runDecisionScan("manual-http-post");
+  res.status(result.status === "error" ? 500 : 200).json(result);
+});
+
+app.get("/state", requireSecret, (req, res) => {
+  res.json({
+    status: "ok",
+    version: VERSION,
+    time: nowIso(),
+    autoTrade: AUTO_TRADE,
+    requireFreshRateForExecution: REQUIRE_FRESH_RATE_FOR_EXECUTION,
+    executionStats24h: getExecutionStats24h(),
+    lastDecision: runtimeState.lastDecision,
+    lastWatch: runtimeState.lastWatch,
+    lastMarketData: runtimeState.lastMarketData
+      ? {
+          time: runtimeState.lastMarketData.time,
+          source: runtimeState.lastMarketData.source,
+          status: runtimeState.lastMarketData.status,
+          ok: runtimeState.lastMarketData.ok,
+          normalized: runtimeState.lastMarketData.normalized,
+          trendSummary: runtimeState.lastMarketData.trendSummary
+        }
+      : null
+  });
+});
+
+app.get("/logs", requireSecret, (req, res) => {
+  const limit = Math.min(Number(req.query.limit || 50), MAX_LOGS);
+
+  res.json({
+    status: "ok",
+    count: Math.min(limit, runtimeState.logs.length),
+    logs: runtimeState.logs.slice(0, limit)
+  });
+});
+
+app.get("/portfolio", requireSecret, async (req, res) => {
+  const portfolioResponse = await getSafePortfolio();
+
+  res.status(portfolioResponse.ok ? 200 : 502).json({
+    status: portfolioResponse.ok ? "ok" : "error",
+    portfolioResponse,
+    portfolioSummary: extractPortfolioSummary(portfolioResponse)
+  });
+});
+
+app.get("/market", requireSecret, async (req, res) => {
+  const marketData = await getSafeMarketData();
+
+  res.status(marketData.ok ? 200 : 502).json({
+    status: marketData.ok ? "ok" : "error",
+    marketData: compactMarketData(marketData),
+    normalized: marketData.normalized,
+    trendSummary: marketData.trendSummary
+  });
+});
+
+app.use((req, res) => {
+  res.status(404).json({
+    status: "error",
+    message: "Route not found"
+  });
+});
+
+app.use((err, req, res, next) => {
+  console.error("Server error:", err);
+
+  res.status(500).json({
+    status: "error",
+    message: "Internal server error"
+  });
+});
+
+cron.schedule(WATCH_CRON_SCHEDULE, () => {
+  runWatcher("cron").catch((error) => {
+    addWatchLog({
+      status: "error",
+      type: "watch-cron",
+      error: error.message
+    });
+  });
+});
+
+cron.schedule(TRADE_CRON_SCHEDULE, () => {
+  runDecisionScan("cron").catch((error) => {
+    addLog({
+      status: "error",
+      type: "scan-cron",
+      error: error.message
+    });
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log(`${VERSION} running on port ${PORT}`);
+  console.log(`AUTO_TRADE=${AUTO_TRADE}`);
+  console.log(`REQUIRE_FRESH_RATE_FOR_EXECUTION=${REQUIRE_FRESH_RATE_FOR_EXECUTION}`);
+});
