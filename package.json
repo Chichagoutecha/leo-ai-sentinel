@@ -1,13 +1,19 @@
 {
   "name": "leo-ai-sentinel",
-  "version": "1.0.0",
+  "version": "10.10.0",
+  "description": "LEO-AI SENTINEL v10.10 controlled auto-improvement and self-owned point-in-time archive",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "check": "node --check index.js",
+    "test": "node --test test-v10.10.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "openai": "^4.0.0",
-    "node-cron": "^3.0.3"
+    "node-cron": "^4.6.0",
+    "openai": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
