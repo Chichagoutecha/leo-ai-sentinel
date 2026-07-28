@@ -1,5 +1,5 @@
 /**
- * LEO-AI SENTINEL v10.10
+ * LEO-AI SENTINEL v10.10.1 — correctif de sécurité
  * - Prix explicitement issus de l'API publique eToro
  * - Gestion week-end / horaires réguliers du marché US
  * - Cryptomonnaies analysables 24/7
@@ -54,7 +54,7 @@ function getOpenAIClient() {
   return openAIClient;
 }
 
-const VERSION = "v10.10-controlled-auto-improvement-point-in-time";
+const VERSION = "v10.10.2-safety-hotfix-no-sol-priority";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
@@ -69,6 +69,26 @@ const TRADING_MODE = ["OBSERVE", "PAPER", "LIVE"].includes(MODE_FROM_ENV)
 const LIVE_TRADING_ENABLED = TRADING_MODE === "LIVE";
 const PAPER_TRADING_ENABLED = TRADING_MODE === "PAPER";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+
+// v10.10.1 — L'environnement du portefeuille est explicite.
+// En LIVE, le bot force toujours le portefeuille REAL et exige un armement séparé.
+const ETORO_ENV_FROM_ENV = String(process.env.ETORO_ACCOUNT_ENV || "REAL")
+  .trim()
+  .toUpperCase();
+const ETORO_ACCOUNT_ENV = LIVE_TRADING_ENABLED
+  ? "REAL"
+  : (["REAL", "DEMO"].includes(ETORO_ENV_FROM_ENV) ? ETORO_ENV_FROM_ENV : "REAL");
+const LIVE_EXECUTION_ARMED = process.env.LIVE_EXECUTION_ARMED === "true";
+const LIVE_PORTFOLIO_PREFLIGHT_ENABLED =
+  process.env.LIVE_PORTFOLIO_PREFLIGHT_ENABLED !== "false";
+const LIVE_PORTFOLIO_MAX_AGE_SECONDS = Math.max(
+  5,
+  Math.min(300, Number(process.env.LIVE_PORTFOLIO_MAX_AGE_SECONDS || 45))
+);
+const LIVE_POST_TRADE_VERIFY_DELAY_MS = Math.max(
+  0,
+  Math.min(10000, Number(process.env.LIVE_POST_TRADE_VERIFY_DELAY_MS || 1500))
+);
 
 const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY || "";
 const SECONDARY_DATA_ENABLED =
@@ -274,6 +294,14 @@ const COUNCIL_BUY_THRESHOLD_PCT = Number(
 const COUNCIL_SELL_THRESHOLD_PCT = Number(
   process.env.COUNCIL_SELL_THRESHOLD_PCT || 62
 );
+const COUNCIL_MIN_BUY_AGENTS = Math.max(
+  1,
+  Math.min(8, Number(process.env.COUNCIL_MIN_BUY_AGENTS || 2))
+);
+const COUNCIL_MIN_SELL_AGENTS = Math.max(
+  1,
+  Math.min(8, Number(process.env.COUNCIL_MIN_SELL_AGENTS || 2))
+);
 const COUNCIL_MAX_DISAGREEMENT_PCT = Number(
   process.env.COUNCIL_MAX_DISAGREEMENT_PCT || 70
 );
@@ -475,6 +503,28 @@ const STATE_FILE = process.env.STATE_FILE || path.join(
   "leo-ai-sentinel-state.json"
 );
 
+// v10.10.1 — Upstash ne reçoit plus les caches reconstructibles ni les réponses complètes.
+const UPSTASH_MAX_STATE_BYTES = Math.max(
+  150000,
+  Math.min(5000000, Number(process.env.UPSTASH_MAX_STATE_BYTES || 900000))
+);
+const UPSTASH_PERSISTED_LOG_LIMIT = Math.max(
+  5,
+  Math.min(100, Number(process.env.UPSTASH_PERSISTED_LOG_LIMIT || 25))
+);
+const UPSTASH_PERSISTED_AUDIT_LIMIT = Math.max(
+  10,
+  Math.min(250, Number(process.env.UPSTASH_PERSISTED_AUDIT_LIMIT || 80))
+);
+const UPSTASH_PERSISTED_ARCHIVE_LIMIT = Math.max(
+  25,
+  Math.min(500, Number(process.env.UPSTASH_PERSISTED_ARCHIVE_LIMIT || 150))
+);
+const UPSTASH_PERSISTED_PAPER_SNAPSHOTS = Math.max(
+  25,
+  Math.min(750, Number(process.env.UPSTASH_PERSISTED_PAPER_SNAPSHOTS || 250))
+);
+
 const REQUIRE_FRESH_RATE_FOR_EXECUTION =
   process.env.REQUIRE_FRESH_RATE_FOR_EXECUTION !== "false";
 
@@ -503,6 +553,8 @@ const TRADE_CRON_SCHEDULE = "0 */2 * * *";
 let memoryBackend = "memory-only";
 let lastMemoryLoad = null;
 let lastMemorySave = null;
+let lastMemorySaveBytes = null;
+let lastMemoryCompaction = null;
 let lastMemoryError = null;
 let saveTimer = null;
 
@@ -753,7 +805,7 @@ const runtimeState = {
 };
 
 const PROMPT = `
-Tu es LEO-AI SENTINEL v10.10, le StrategyCoordinator d'un conseil multi-agents quantitatif, fondamental, informationnel, multi-source et explicable.
+Tu es LEO-AI SENTINEL v10.10.1, le StrategyCoordinator d'un conseil multi-agents quantitatif, fondamental, informationnel, multi-source et explicable.
 
 MISSION :
 Construire et gérer progressivement un portefeuille diversifié, en protégeant le capital.
@@ -811,6 +863,9 @@ RÈGLES ABSOLUES :
 - Ne pas inventer d'actualité, de fondamentaux ou de données absentes.
 - Si l'AlternativeDataCoordinator est absent en mode advisory, continue prudemment; en mode required, HOLD.
 - Lis obligatoirement agent_council avant toute décision.
+- Dans le conseil, PASS signifie qu'un contrôle de sécurité est réussi sans opinion directionnelle; ABSTAIN signifie que l'agent ne dispose pas de données suffisantes.
+- Un PASS compte dans la participation mais ne doit ni soutenir ni pénaliser artificiellement BUY/SELL.
+- RISK_OFF seul n'est pas un hard veto automatique : il impose un signal renforcé et une taille réduite. HIGH_VOLATILITY et CRYPTO_RISK_OFF restent plus stricts.
 - Un hard veto du MultiAgentCouncil ne peut jamais être annulé par le StrategyCoordinator.
 - En mode council required, BUY/SELL doit correspondre exactement à une recommandation APPROVED_BUY/APPROVED_SELL.
 - En cas de désaccord élevé, réduis la confiance et préfère HOLD.
@@ -1040,60 +1095,285 @@ async function upstashCommand(command) {
   return data?.result;
 }
 
-function buildPersistentState() {
+function compactExecutionForPersistence(execution) {
+  if (!execution || typeof execution !== "object") return null;
+  return {
+    status: execution.status ?? null,
+    ok: execution.ok ?? null,
+    skipped: Boolean(execution.skipped),
+    uncertain: Boolean(execution.uncertain),
+    simulated: Boolean(execution.simulated),
+    mode: execution.mode || null,
+    type: execution.type || null,
+    asset: execution.asset || null,
+    amount: execution.amount ?? execution.proceeds ?? null,
+    reason: execution.reason || null,
+    error: execution.error || null,
+    intentId: execution.intentId || null,
+    orderId: execution.orderId || null
+  };
+}
+
+function compactLogForPersistence(log) {
+  if (!log || typeof log !== "object") return null;
+  return {
+    time: log.time || null,
+    version: log.version || VERSION,
+    source: log.source || null,
+    event: log.event || null,
+    tradingMode: log.tradingMode || null,
+    decision: log.decision ? sanitizeDecision(log.decision) : null,
+    decision_raw: log.decision_raw ? sanitizeDecision(log.decision_raw) : null,
+    risk_reason: String(log.risk_reason || "").slice(0, 800),
+    execution: compactExecutionForPersistence(log.execution),
+    error: log.error || null
+  };
+}
+
+function compactAuditForPersistence(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  return {
+    id: entry.id || null,
+    time: entry.time || null,
+    version: entry.version || VERSION,
+    event: entry.event || null,
+    source: entry.source || null,
+    tradingMode: entry.tradingMode || null,
+    asset: entry.asset || entry.decision?.asset || null,
+    decision: entry.decision ? sanitizeDecision(entry.decision) : null,
+    approved: entry.approved ?? null,
+    execution: compactExecutionForPersistence(entry.execution),
+    error: entry.error || null
+  };
+}
+
+function compactPaperPortfolioForPersistence(paper) {
+  if (!paper || typeof paper !== "object") return null;
+  return {
+    ...paper,
+    orders: (paper.orders || []).slice(0, 250),
+    closedTrades: (paper.closedTrades || []).slice(0, 250),
+    snapshots: (paper.snapshots || []).slice(-UPSTASH_PERSISTED_PAPER_SNAPSHOTS)
+  };
+}
+
+function compactLastMarketDataForPersistence(lastMarketData) {
+  if (!lastMarketData || typeof lastMarketData !== "object") return null;
+  const normalized = lastMarketData.normalized || {};
+  return {
+    time: lastMarketData.time || null,
+    provider: lastMarketData.provider || null,
+    endpoint: lastMarketData.endpoint || null,
+    source: lastMarketData.source || null,
+    status: lastMarketData.status ?? null,
+    ok: lastMarketData.ok ?? null,
+    normalized: {
+      provider: normalized.provider || "eToro",
+      fetchedAt: normalized.fetchedAt || lastMarketData.time || null,
+      overallStatus: normalized.overallStatus || null,
+      availableCount: normalized.availableCount || 0,
+      freshCount: normalized.freshCount || 0,
+      tradableCount: normalized.tradableCount || 0,
+      closedCount: normalized.closedCount || 0,
+      staleCount: normalized.staleCount || 0,
+      eligibleAssets: normalized.eligibleAssets || [],
+      ratesByAsset: Object.fromEntries(
+        Object.entries(normalized.ratesByAsset || {}).map(([asset, rate]) => [asset, {
+          asset,
+          instrumentId: rate.instrumentId,
+          mid: rate.mid,
+          bid: rate.bid,
+          ask: rate.ask,
+          spreadPct: rate.spreadPct,
+          date: rate.date,
+          ageMinutes: rate.ageMinutes,
+          priceStatus: rate.priceStatus,
+          eligibleForTrade: Boolean(rate.eligibleForTrade),
+          marketState: rate.marketState,
+          provider: rate.provider || "eToro"
+        }])
+      )
+    }
+  };
+}
+
+function serializedByteLength(value) {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
+  if (!compact) {
+    return {
+      savedAt: nowIso(),
+      version: VERSION,
+      persistenceMode: "FULL_LOCAL_STATE",
+      cooldownMemory: runtimeState.cooldownMemory || {},
+      logs: (runtimeState.logs || []).slice(0, MAX_LOGS),
+      lastDecision: runtimeState.lastDecision || null,
+      lastWatch: runtimeState.lastWatch || null,
+      executionHistory: runtimeState.executionHistory || [],
+      trendMemory: runtimeState.trendMemory || {},
+      equityHistory: (runtimeState.equityHistory || []).slice(-1500),
+      auditTrail: (runtimeState.auditTrail || []).slice(0, 500),
+      orderIntents: runtimeState.orderIntents || {},
+      paperPortfolio: runtimeState.paperPortfolio || null,
+      systemHealth: runtimeState.systemHealth || {},
+      secondaryCache: runtimeState.secondaryCache || {},
+      marketConsensusCache: runtimeState.marketConsensusCache || {},
+      historicalCache: runtimeState.historicalCache || {},
+      providerHealth: runtimeState.providerHealth || {},
+      lastMarketDataFusion: runtimeState.lastMarketDataFusion || null,
+      technicalCache: runtimeState.technicalCache || {},
+      lastTechnicalAnalysis: runtimeState.lastTechnicalAnalysis || null,
+      intelligenceCache: runtimeState.intelligenceCache || {},
+      lastIntelligenceAnalysis: runtimeState.lastIntelligenceAnalysis || null,
+      marketRegimeHistory: (runtimeState.marketRegimeHistory || []).slice(-500),
+      lastFoundationAgents: runtimeState.lastFoundationAgents || null,
+      lastAgentCouncil: runtimeState.lastAgentCouncil || null,
+      agentCouncilHistory: (runtimeState.agentCouncilHistory || []).slice(0, COUNCIL_HISTORY_LIMIT),
+      backtestCache: runtimeState.backtestCache || {},
+      backtestHistory: (runtimeState.backtestHistory || []).slice(0, BACKTEST_HISTORY_LIMIT),
+      lastBacktest: runtimeState.lastBacktest || null,
+      paperPerformanceHistory: (runtimeState.paperPerformanceHistory || []).slice(-PAPER_SNAPSHOT_LIMIT),
+      lastStrategyValidation: runtimeState.lastStrategyValidation || null,
+      pointInTimeArchive: (runtimeState.pointInTimeArchive || []).slice(-POINT_IN_TIME_ARCHIVE_MAX_RECORDS),
+      pointInTimeIndex: runtimeState.pointInTimeIndex || {},
+      archiveCoverage: runtimeState.archiveCoverage || {},
+      lastArchiveCollection: runtimeState.lastArchiveCollection || null,
+      archiveCursor: Number(runtimeState.archiveCursor || 0),
+      strategyRegistry: runtimeState.strategyRegistry || null,
+      strategyCandidates: (runtimeState.strategyCandidates || []).slice(0, STRATEGY_CANDIDATE_HISTORY_LIMIT),
+      improvementHistory: (runtimeState.improvementHistory || []).slice(0, STRATEGY_CANDIDATE_HISTORY_LIMIT),
+      lastImprovementRun: runtimeState.lastImprovementRun || null,
+      lastMarketData: runtimeState.lastMarketData || null
+    };
+  }
+
+  const compactTrendMemory = Object.fromEntries(
+    Object.entries(runtimeState.trendMemory || {}).map(([asset, points]) => [
+      asset,
+      (Array.isArray(points) ? points : []).slice(-Math.min(24, MAX_TREND_POINTS_PER_ASSET))
+    ])
+  );
+
   return {
     savedAt: nowIso(),
     version: VERSION,
+    persistenceMode: "UPSTASH_COMPACT_V1",
     cooldownMemory: runtimeState.cooldownMemory || {},
-    logs: (runtimeState.logs || []).slice(0, MAX_LOGS),
-    lastDecision: runtimeState.lastDecision || null,
-    lastWatch: runtimeState.lastWatch || null,
-    executionHistory: runtimeState.executionHistory || [],
-    trendMemory: runtimeState.trendMemory || {},
-    equityHistory: (runtimeState.equityHistory || []).slice(-1500),
-    auditTrail: (runtimeState.auditTrail || []).slice(0, 500),
+    logs: (runtimeState.logs || [])
+      .slice(0, UPSTASH_PERSISTED_LOG_LIMIT)
+      .map(compactLogForPersistence)
+      .filter(Boolean),
+    lastDecision: compactLogForPersistence(runtimeState.lastDecision),
+    lastWatch: compactLogForPersistence(runtimeState.lastWatch),
+    executionHistory: (runtimeState.executionHistory || []).slice(0, 50),
+    trendMemory: compactTrendMemory,
+    equityHistory: (runtimeState.equityHistory || []).slice(-500),
+    auditTrail: (runtimeState.auditTrail || [])
+      .slice(0, UPSTASH_PERSISTED_AUDIT_LIMIT)
+      .map(compactAuditForPersistence)
+      .filter(Boolean),
     orderIntents: runtimeState.orderIntents || {},
-    paperPortfolio: runtimeState.paperPortfolio || null,
+    paperPortfolio: compactPaperPortfolioForPersistence(runtimeState.paperPortfolio),
     systemHealth: runtimeState.systemHealth || {},
-    secondaryCache: runtimeState.secondaryCache || {},
-    marketConsensusCache: runtimeState.marketConsensusCache || {},
-    historicalCache: runtimeState.historicalCache || {},
     providerHealth: runtimeState.providerHealth || {},
-    lastMarketDataFusion: runtimeState.lastMarketDataFusion || null,
-    technicalCache: runtimeState.technicalCache || {},
-    lastTechnicalAnalysis: runtimeState.lastTechnicalAnalysis || null,
-    intelligenceCache: runtimeState.intelligenceCache || {},
-    lastIntelligenceAnalysis: runtimeState.lastIntelligenceAnalysis || null,
-    marketRegimeHistory: (runtimeState.marketRegimeHistory || []).slice(-500),
-    lastFoundationAgents: runtimeState.lastFoundationAgents || null,
-    lastAgentCouncil: runtimeState.lastAgentCouncil || null,
-    agentCouncilHistory: (runtimeState.agentCouncilHistory || []).slice(0, COUNCIL_HISTORY_LIMIT),
-    backtestCache: runtimeState.backtestCache || {},
-    backtestHistory: (runtimeState.backtestHistory || []).slice(0, BACKTEST_HISTORY_LIMIT),
-    lastBacktest: runtimeState.lastBacktest || null,
-    paperPerformanceHistory: (runtimeState.paperPerformanceHistory || []).slice(-PAPER_SNAPSHOT_LIMIT),
-    lastStrategyValidation: runtimeState.lastStrategyValidation || null,
-    pointInTimeArchive: (runtimeState.pointInTimeArchive || []).slice(-POINT_IN_TIME_ARCHIVE_MAX_RECORDS),
-    pointInTimeIndex: runtimeState.pointInTimeIndex || {},
-    archiveCoverage: runtimeState.archiveCoverage || {},
+    marketRegimeHistory: (runtimeState.marketRegimeHistory || []).slice(-120),
+    agentCouncilHistory: (runtimeState.agentCouncilHistory || []).slice(0, Math.min(80, COUNCIL_HISTORY_LIMIT)),
+    backtestHistory: (runtimeState.backtestHistory || []).slice(0, 30),
+    lastBacktest: compactBacktestResult(runtimeState.lastBacktest),
+    paperPerformanceHistory: (runtimeState.paperPerformanceHistory || []).slice(-UPSTASH_PERSISTED_PAPER_SNAPSHOTS),
+    lastStrategyValidation: runtimeState.lastStrategyValidation ? {
+      generatedAt: runtimeState.lastStrategyValidation.generatedAt || null,
+      status: runtimeState.lastStrategyValidation.status || null,
+      blockBuy: Boolean(runtimeState.lastStrategyValidation.blockBuy),
+      reason: runtimeState.lastStrategyValidation.reason || null,
+      mode: runtimeState.lastStrategyValidation.mode || null,
+      lastBacktest: runtimeState.lastStrategyValidation.lastBacktest || null
+    } : null,
+    pointInTimeArchive: (runtimeState.pointInTimeArchive || []).slice(-UPSTASH_PERSISTED_ARCHIVE_LIMIT),
     lastArchiveCollection: runtimeState.lastArchiveCollection || null,
     archiveCursor: Number(runtimeState.archiveCursor || 0),
     strategyRegistry: runtimeState.strategyRegistry || null,
-    strategyCandidates: (runtimeState.strategyCandidates || []).slice(0, STRATEGY_CANDIDATE_HISTORY_LIMIT),
-    improvementHistory: (runtimeState.improvementHistory || []).slice(0, STRATEGY_CANDIDATE_HISTORY_LIMIT),
-    lastImprovementRun: runtimeState.lastImprovementRun || null,
-    lastMarketData: runtimeState.lastMarketData
-      ? {
-          time: runtimeState.lastMarketData.time,
-          provider: runtimeState.lastMarketData.provider,
-          endpoint: runtimeState.lastMarketData.endpoint,
-          source: runtimeState.lastMarketData.source,
-          status: runtimeState.lastMarketData.status,
-          ok: runtimeState.lastMarketData.ok,
-          normalized: runtimeState.lastMarketData.normalized || null,
-          trendSummary: runtimeState.lastMarketData.trendSummary || null
-        }
-      : null
+    strategyCandidates: (runtimeState.strategyCandidates || []).slice(0, 30),
+    improvementHistory: (runtimeState.improvementHistory || []).slice(0, 30),
+    lastMarketData: compactLastMarketDataForPersistence(runtimeState.lastMarketData)
+  };
+}
+
+function fitPersistentStateToBudget(state, maxBytes = UPSTASH_MAX_STATE_BYTES) {
+  const working = JSON.parse(JSON.stringify(state));
+  const initialBytes = serializedByteLength(working);
+  const reductions = [];
+
+  const reduceArray = (key, minimum) => {
+    if (!Array.isArray(working[key]) || working[key].length <= minimum) return false;
+    const nextLength = Math.max(minimum, Math.ceil(working[key].length / 2));
+    working[key] = key === "equityHistory" || key === "paperPerformanceHistory" || key === "pointInTimeArchive"
+      ? working[key].slice(-nextLength)
+      : working[key].slice(0, nextLength);
+    reductions.push(`${key}:${nextLength}`);
+    return true;
+  };
+
+  let guard = 0;
+  while (serializedByteLength(working) > maxBytes && guard < 20) {
+    guard += 1;
+    let changed = false;
+    changed = reduceArray("pointInTimeArchive", 10) || changed;
+    changed = reduceArray("paperPerformanceHistory", 25) || changed;
+    changed = reduceArray("logs", 5) || changed;
+    changed = reduceArray("auditTrail", 10) || changed;
+    changed = reduceArray("agentCouncilHistory", 10) || changed;
+    changed = reduceArray("equityHistory", 50) || changed;
+    changed = reduceArray("backtestHistory", 5) || changed;
+    changed = reduceArray("strategyCandidates", 5) || changed;
+    changed = reduceArray("improvementHistory", 5) || changed;
+    if (working.paperPortfolio?.snapshots?.length > 25) {
+      working.paperPortfolio.snapshots = working.paperPortfolio.snapshots.slice(-Math.max(25, Math.ceil(working.paperPortfolio.snapshots.length / 2)));
+      reductions.push(`paperPortfolio.snapshots:${working.paperPortfolio.snapshots.length}`);
+      changed = true;
+    }
+    if (!changed) break;
+  }
+
+  if (serializedByteLength(working) > maxBytes) {
+    reductions.push("critical-fallback");
+    const critical = {
+      savedAt: working.savedAt,
+      version: working.version,
+      persistenceMode: "UPSTASH_CRITICAL_MINIMAL_V1",
+      cooldownMemory: working.cooldownMemory || {},
+      lastDecision: working.lastDecision || null,
+      lastWatch: working.lastWatch || null,
+      executionHistory: (working.executionHistory || []).slice(0, 20),
+      trendMemory: working.trendMemory || {},
+      equityHistory: (working.equityHistory || []).slice(-100),
+      orderIntents: working.orderIntents || {},
+      paperPortfolio: working.paperPortfolio ? {
+        ...working.paperPortfolio,
+        orders: (working.paperPortfolio.orders || []).slice(0, 50),
+        closedTrades: (working.paperPortfolio.closedTrades || []).slice(0, 50),
+        snapshots: (working.paperPortfolio.snapshots || []).slice(-50)
+      } : null,
+      systemHealth: working.systemHealth || {},
+      providerHealth: working.providerHealth || {},
+      strategyRegistry: working.strategyRegistry || null,
+      archiveCursor: Number(working.archiveCursor || 0)
+    };
+    return {
+      state: critical,
+      initialBytes,
+      finalBytes: serializedByteLength(critical),
+      reductions
+    };
+  }
+
+  return {
+    state: working,
+    initialBytes,
+    finalBytes: serializedByteLength(working),
+    reductions
   };
 }
 
@@ -1246,10 +1526,36 @@ async function loadPersistentState() {
 
 async function savePersistentState() {
   try {
-    const payload = JSON.stringify(buildPersistentState());
+    let state = buildPersistentState({ compact: hasUpstashMemory() });
+
+    if (hasUpstashMemory()) {
+      const fitted = fitPersistentStateToBudget(state, UPSTASH_MAX_STATE_BYTES);
+      state = fitted.state;
+      lastMemoryCompaction = {
+        mode: state.persistenceMode || "UPSTASH_COMPACT_V1",
+        initialBytes: fitted.initialBytes,
+        finalBytes: fitted.finalBytes,
+        maxBytes: UPSTASH_MAX_STATE_BYTES,
+        reductions: fitted.reductions
+      };
+    } else {
+      lastMemoryCompaction = {
+        mode: state.persistenceMode || "FULL_LOCAL_STATE",
+        initialBytes: serializedByteLength(state),
+        finalBytes: serializedByteLength(state),
+        maxBytes: null,
+        reductions: []
+      };
+    }
+
+    const payload = JSON.stringify(state);
+    lastMemorySaveBytes = Buffer.byteLength(payload, "utf8");
 
     if (hasUpstashMemory()) {
       memoryBackend = "upstash-redis";
+      if (lastMemorySaveBytes > UPSTASH_MAX_STATE_BYTES) {
+        throw new Error(`État Upstash encore trop volumineux (${lastMemorySaveBytes} > ${UPSTASH_MAX_STATE_BYTES} octets)`);
+      }
       await upstashCommand(["SET", STATE_KEY, payload]);
     } else {
       memoryBackend = "local-json-fallback";
@@ -1294,6 +1600,9 @@ function memoryStatus() {
     state_file: STATE_FILE,
     last_load: lastMemoryLoad,
     last_save: lastMemorySave,
+    last_save_bytes: lastMemorySaveBytes,
+    upstash_max_state_bytes: hasUpstashMemory() ? UPSTASH_MAX_STATE_BYTES : null,
+    compaction: lastMemoryCompaction,
     last_error: lastMemoryError,
     logs_count: runtimeState.logs.length,
     audit_count: runtimeState.auditTrail.length,
@@ -1512,18 +1821,176 @@ function assetFromInstrumentId(instrumentId) {
   return found ? found[0] : "UNKNOWN";
 }
 
-async function getPortfolio() {
+function getEtoroPortfolioEndpoint(environment = ETORO_ACCOUNT_ENV) {
+  const normalized = String(environment || "REAL").toUpperCase();
+  if (!['REAL', 'DEMO'].includes(normalized)) {
+    throw new Error(`Environnement eToro invalide: ${environment}`);
+  }
+  return `https://public-api.etoro.com/api/v1/trading/info/${normalized.toLowerCase()}/pnl`;
+}
+
+function validatePortfolioResponse(portfolioResponse, { requireReal = false } = {}) {
+  const errors = [];
+  const environment = String(portfolioResponse?.accountEnvironment || "UNKNOWN").toUpperCase();
+  const clientPortfolio = portfolioResponse?.data?.clientPortfolio;
+  const fetchedAt = portfolioResponse?.fetchedAt || null;
+  const ageSeconds = fetchedAt
+    ? (Date.now() - new Date(fetchedAt).getTime()) / 1000
+    : null;
+
+  if (!portfolioResponse?.ok) errors.push(`HTTP_${portfolioResponse?.status ?? "UNKNOWN"}`);
+  if (!clientPortfolio || typeof clientPortfolio !== "object") errors.push("CLIENT_PORTFOLIO_MISSING");
+  if (requireReal && environment !== "REAL") errors.push(`EXPECTED_REAL_GOT_${environment}`);
+  if (requireReal && clientPortfolio?.paperMode) errors.push("PAPER_PORTFOLIO_NOT_ALLOWED_IN_LIVE");
+  if (ageSeconds === null || !Number.isFinite(ageSeconds)) errors.push("PORTFOLIO_TIMESTAMP_MISSING");
+  if (Number.isFinite(ageSeconds) && ageSeconds > LIVE_PORTFOLIO_MAX_AGE_SECONDS) errors.push("PORTFOLIO_SNAPSHOT_TOO_OLD");
+
+  const availableCash = clientPortfolio && typeof clientPortfolio === "object"
+    ? calculateAvailableCash(clientPortfolio)
+    : null;
+  if (clientPortfolio && !Number.isFinite(Number(clientPortfolio.credit))) {
+    errors.push("PORTFOLIO_CREDIT_MISSING");
+  }
+  if (clientPortfolio && !Number.isFinite(Number(availableCash))) {
+    errors.push("AVAILABLE_CASH_UNVERIFIABLE");
+  }
+
+  return {
+    ok: errors.length === 0,
+    errors,
+    environment,
+    endpoint: portfolioResponse?.endpoint || null,
+    fetchedAt,
+    ageSeconds: Number.isFinite(ageSeconds) ? roundNumber(ageSeconds, 3) : null,
+    availableCash: Number.isFinite(Number(availableCash)) ? Number(availableCash) : null,
+    positionsCount: Array.isArray(clientPortfolio?.positions) ? clientPortfolio.positions.length : 0,
+    ordersForOpenCount: Array.isArray(clientPortfolio?.ordersForOpen) ? clientPortfolio.ordersForOpen.length : 0,
+    ordersForCloseCount: Array.isArray(clientPortfolio?.ordersForClose) ? clientPortfolio.ordersForClose.length : 0,
+    verifiedRealEndpoint: environment === "REAL" && String(portfolioResponse?.endpoint || "").includes("/real/pnl")
+  };
+}
+
+async function getPortfolio(options = {}) {
+  const requestedEnvironment = String(options.environment || ETORO_ACCOUNT_ENV).toUpperCase();
+  const environment = LIVE_TRADING_ENABLED ? "REAL" : requestedEnvironment;
+  const endpoint = getEtoroPortfolioEndpoint(environment);
+  const headers = etoroHeaders();
+  const fetchedAt = nowIso();
+
   try {
     const { response, data, attempts } = await fetchJsonWithRetry(
-      "https://public-api.etoro.com/api/v1/trading/info/portfolio",
-      { method: "GET", headers: etoroHeaders() },
-      { label: "eToro portfolio", retries: ETORO_GET_RETRIES }
+      endpoint,
+      { method: "GET", headers },
+      { label: `eToro ${environment} portfolio`, retries: ETORO_GET_RETRIES }
     );
-    noteServiceResult("portfolio", response.ok, response.ok ? null : { status: response.status, data });
-    return { status: response.status, ok: response.ok, attempts, data };
+    const structurallyValid = Boolean(response.ok && data?.clientPortfolio && typeof data.clientPortfolio === "object");
+    noteServiceResult(
+      "portfolio",
+      structurallyValid,
+      structurallyValid ? null : { status: response.status, endpoint, environment, data }
+    );
+    return {
+      status: response.status,
+      httpOk: response.ok,
+      ok: structurallyValid,
+      attempts,
+      data,
+      endpoint,
+      accountEnvironment: environment,
+      fetchedAt,
+      requestId: headers["x-request-id"]
+    };
   } catch (error) {
-    noteServiceResult("portfolio", false, error.message);
+    noteServiceResult("portfolio", false, { environment, endpoint, error: error.message });
     throw error;
+  }
+}
+
+async function verifyRealPortfolioBeforeExecution({ asset, side, amount = 0 } = {}) {
+  if (!LIVE_TRADING_ENABLED) {
+    return { ok: false, reason: "Préflight réel demandé hors mode LIVE" };
+  }
+  if (!LIVE_EXECUTION_ARMED) {
+    return {
+      ok: false,
+      reason: "LIVE_EXECUTION_ARMED n'est pas égal à true",
+      action: "Garder le bot en OBSERVE/PAPER tant que les contrôles ne sont pas validés."
+    };
+  }
+
+  const portfolio = await getPortfolio({ environment: "REAL" });
+  const validation = validatePortfolioResponse(portfolio, { requireReal: true });
+  if (!validation.ok) {
+    return { ok: false, reason: `Portefeuille REAL non vérifié: ${validation.errors.join(", ")}`, validation };
+  }
+
+  const normalizedSide = String(side || "BUY").toUpperCase();
+  const safeAsset = String(asset || "").toUpperCase();
+  const safeAmount = Number(amount || 0);
+  if (!WATCHLIST[safeAsset]) {
+    return { ok: false, reason: `Actif invalide pour le préflight: ${safeAsset}`, validation };
+  }
+
+  if (normalizedSide === "BUY") {
+    if (hasOpenPosition(portfolio, safeAsset)) {
+      return { ok: false, reason: `Le portefeuille REAL détient déjà ${safeAsset}`, validation };
+    }
+    if (hasOpenOrder(portfolio, safeAsset)) {
+      return { ok: false, reason: `Le portefeuille REAL possède déjà un ordre d'achat sur ${safeAsset}`, validation };
+    }
+    if (!Number.isFinite(safeAmount) || safeAmount < MIN_ORDER_USD) {
+      return { ok: false, reason: `Montant LIVE invalide: ${safeAmount}`, validation };
+    }
+    if (Number(validation.availableCash) < safeAmount) {
+      return { ok: false, reason: `Cash REAL insuffisant (${validation.availableCash} USD < ${safeAmount} USD)`, validation };
+    }
+  }
+
+  if (normalizedSide === "SELL") {
+    if (!hasOpenPosition(portfolio, safeAsset)) {
+      return { ok: false, reason: `Aucune position REAL ouverte sur ${safeAsset}`, validation };
+    }
+    if (hasCloseOrder(portfolio, safeAsset)) {
+      return { ok: false, reason: `Un ordre de clôture REAL existe déjà sur ${safeAsset}`, validation };
+    }
+  }
+
+  const summary = extractPortfolioSummary(portfolio);
+  return {
+    ok: true,
+    reason: `Portefeuille ${validation.environment} vérifié via ${validation.endpoint}`,
+    validation,
+    portfolio,
+    summary
+  };
+}
+
+async function verifyPortfolioAfterExecution({ asset, side } = {}) {
+  if (!LIVE_TRADING_ENABLED) return { checked: false, reason: "Hors LIVE" };
+  if (LIVE_POST_TRADE_VERIFY_DELAY_MS > 0) await sleep(LIVE_POST_TRADE_VERIFY_DELAY_MS);
+  try {
+    const portfolio = await getPortfolio({ environment: "REAL" });
+    const validation = validatePortfolioResponse(portfolio, { requireReal: true });
+    const normalizedSide = String(side || "BUY").toUpperCase();
+    const observed = normalizedSide === "BUY"
+      ? hasOpenPosition(portfolio, asset) || hasOpenOrder(portfolio, asset)
+      : !hasOpenPosition(portfolio, asset) || hasCloseOrder(portfolio, asset);
+    return {
+      checked: true,
+      observed,
+      validation,
+      summary: validation.ok ? extractPortfolioSummary(portfolio) : null,
+      note: observed
+        ? "Modification visible dans le portefeuille REAL"
+        : "Réponse d'ordre acceptée mais modification pas encore visible; ne pas répéter automatiquement."
+    };
+  } catch (error) {
+    return {
+      checked: true,
+      observed: false,
+      error: error.message,
+      note: "Impossible de relire le portefeuille après l'ordre; ne pas répéter automatiquement."
+    };
   }
 }
 
@@ -2338,6 +2805,11 @@ function envConfiguration() {
     tradingMode: TRADING_MODE,
     liveTradingEnabled: LIVE_TRADING_ENABLED,
     paperTradingEnabled: PAPER_TRADING_ENABLED,
+    liveExecutionArmed: LIVE_EXECUTION_ARMED,
+    etoroAccountEnvironment: ETORO_ACCOUNT_ENV,
+    etoroPortfolioEndpoint: getEtoroPortfolioEndpoint(ETORO_ACCOUNT_ENV),
+    livePortfolioPreflightEnabled: LIVE_PORTFOLIO_PREFLIGHT_ENABLED,
+    livePortfolioMaxAgeSeconds: LIVE_PORTFOLIO_MAX_AGE_SECONDS,
     legacyAutoTradeDetected: AUTO_TRADE,
     legacyAutoTradeAllowed: ALLOW_LEGACY_AUTO_TRADE,
     explicitLiveRequired: true,
@@ -2392,6 +2864,8 @@ function envConfiguration() {
       minimumParticipation: COUNCIL_MIN_PARTICIPATION,
       buyThresholdPct: COUNCIL_BUY_THRESHOLD_PCT,
       sellThresholdPct: COUNCIL_SELL_THRESHOLD_PCT,
+      minimumBuyAgents: COUNCIL_MIN_BUY_AGENTS,
+      minimumSellAgents: COUNCIL_MIN_SELL_AGENTS,
       maxDisagreementPct: COUNCIL_MAX_DISAGREEMENT_PCT,
       requireNoHardVeto: COUNCIL_REQUIRE_NO_HARD_VETO,
       weights: AGENT_COUNCIL_WEIGHTS
@@ -4665,11 +5139,26 @@ async function mapWithConcurrency(items, limit, mapper) {
 
 function chooseTechnicalAssets(portfolioSummary, marketSummary, preferredNextAssets = []) {
   const held = portfolioSummary?.uniqueOpenAssets || [];
-  const tradablePriority = preferredNextAssets
-    .filter((item) => item.eligibleForTrade)
+  const heldSet = new Set(held);
+  const tradableUnheld = preferredNextAssets
+    .filter((item) => item.eligibleForTrade && !heldSet.has(item.asset))
     .map((item) => item.asset);
+  const tradableHeld = held.filter((asset) => marketSummary?.ratesByAsset?.[asset]?.eligibleForTrade);
+  const openCrypto = [...CRYPTO_ASSETS].filter(
+    (asset) => marketSummary?.ratesByAsset?.[asset]?.eligibleForTrade
+  );
   const allPriority = preferredNextAssets.map((item) => item.asset);
-  const ordered = ["SPY", "QQQ", "BTC", ...held, ...tradablePriority, ...allPriority, "ETH", "GLD"];
+  const regimeBenchmarks = ["SPY", "QQQ", "BTC"];
+  const ordered = [
+    ...openCrypto,
+    ...tradableUnheld,
+    ...regimeBenchmarks,
+    ...tradableHeld,
+    ...held,
+    ...allPriority,
+    "ETH",
+    "GLD"
+  ];
   return [...new Set(ordered)]
     .filter((asset) => WATCHLIST[asset])
     .slice(0, TECHNICAL_MAX_ASSETS_PER_SCAN);
@@ -4721,11 +5210,13 @@ function buildMarketRegimeAgent(technicalAssets) {
     riskMultiplier: roundNumber(clampNumber(riskMultiplier, 0.2, 1), 3),
     benchmark: broad?.asset || (btc ? "BTC" : null),
     reasons,
-    policy: regime === "RISK_OFF" || regime === "HIGH_VOLATILITY"
-      ? "Réduire la taille des achats, éviter le spéculatif et privilégier la défense."
-      : (regime === "RISK_ON" || regime === "BULL_TREND"
-        ? "Achats possibles si le signal propre à l'actif et le risque portefeuille sont validés."
-        : "Rester sélectif et exiger un meilleur rapport rendement/risque.")
+    policy: regime === "RISK_OFF"
+      ? "Réduire fortement la taille; le spéculatif reste possible seulement avec un signal technique fort, une confiance élevée et aucun veto de sécurité."
+      : (regime === "HIGH_VOLATILITY" || regime === "CRYPTO_RISK_OFF"
+        ? "Prudence maximale; le spéculatif peut être bloqué si la volatilité ou la tendance propre à l'actif est défavorable."
+        : (regime === "RISK_ON" || regime === "BULL_TREND"
+          ? "Achats possibles si le signal propre à l'actif et le risque portefeuille sont validés."
+          : "Rester sélectif et exiger un meilleur rapport rendement/risque."))
   };
   const previous = runtimeState.marketRegimeHistory[runtimeState.marketRegimeHistory.length - 1];
   if (!previous || previous.regime !== agent.regime || minutesSince(previous.time) >= 60) {
@@ -4834,8 +5325,34 @@ function technicalCheckForAsset(agent, marketRegimeAgent, asset, decision = "BUY
       return { ok: false, reason: `Score technique trop faible sur ${asset} (${snapshot.technicalScore} < ${technicalBuyScoreMin})` };
     }
     const category = ASSET_RULES[asset]?.category || "UNKNOWN";
-    if (["RISK_OFF", "HIGH_VOLATILITY", "CRYPTO_RISK_OFF"].includes(marketRegimeAgent?.regime) && SPECULATIVE_CATEGORIES.has(category) && confidence < 90) {
-      return { ok: false, reason: `MarketRegimeAgent bloque le spéculatif en régime ${marketRegimeAgent.regime}` };
+    const regime = marketRegimeAgent?.regime || "UNKNOWN";
+    const speculative = SPECULATIVE_CATEGORIES.has(category);
+    const cryptoSpeculative = category === "SPECULATIVE_CRYPTO";
+    const strongTechnicalMinimum = Math.max(
+      TECHNICAL_STRONG_BUY_SCORE,
+      technicalBuyScoreMin + 8
+    );
+
+    // RISK_OFF n'est plus un veto automatique. Il exige un meilleur signal et réduit ensuite la taille.
+    if (
+      regime === "RISK_OFF" &&
+      speculative &&
+      (Number(snapshot.technicalScore) < strongTechnicalMinimum || confidence < 84)
+    ) {
+      return {
+        ok: false,
+        reason: `RISK_OFF: ${asset} doit atteindre score technique ${strongTechnicalMinimum} et confiance 84 (actuel ${snapshot.technicalScore}/${confidence})`
+      };
+    }
+    if (regime === "HIGH_VOLATILITY" && speculative && confidence < 92) {
+      return { ok: false, reason: `HIGH_VOLATILITY: confiance 92 requise pour ${asset}` };
+    }
+    if (
+      regime === "CRYPTO_RISK_OFF" &&
+      cryptoSpeculative &&
+      (!snapshot.multiTimeframeBullish || Number(snapshot.technicalScore) < strongTechnicalMinimum || confidence < 92)
+    ) {
+      return { ok: false, reason: `CRYPTO_RISK_OFF: signal multi-horizons fort et confiance 92 requis pour ${asset}` };
     }
     if (snapshot.highVolatility && confidence < 88) {
       return { ok: false, reason: `ATR trop élevé sur ${asset}; confiance ${confidence} insuffisante` };
@@ -4866,6 +5383,12 @@ function technicalSizingMultiplier(technicalAgent, marketRegimeAgent, asset) {
   }
   if (["RISK_OFF", "HIGH_VOLATILITY"].includes(marketRegimeAgent?.regime) && DEFENSIVE_CATEGORIES.has(category)) {
     multiplier = Math.max(multiplier, 0.65);
+  }
+  if (marketRegimeAgent?.regime === "RISK_OFF" && SPECULATIVE_CATEGORIES.has(category)) {
+    multiplier *= 0.65;
+  }
+  if (["HIGH_VOLATILITY", "CRYPTO_RISK_OFF"].includes(marketRegimeAgent?.regime) && SPECULATIVE_CATEGORIES.has(category)) {
+    multiplier *= 0.5;
   }
   return roundNumber(clampNumber(multiplier, 0.2, 1), 3);
 }
@@ -6217,9 +6740,25 @@ async function buildIntelligenceSnapshot(asset, force = false) {
 
 function chooseIntelligenceAssets(portfolioSummary, marketSummary, preferredNextAssets = []) {
   const held = portfolioSummary?.uniqueOpenAssets || [];
-  const priority = preferredNextAssets.filter((item) => item.eligibleForTrade).map((item) => item.asset);
-  const ordered = [...held, ...priority, "SPY", "BTC", "QQQ", "ETH"];
-  return [...new Set(ordered)].filter((asset) => WATCHLIST[asset]).slice(0, INTELLIGENCE_MAX_ASSETS_PER_SCAN);
+  const heldSet = new Set(held);
+  const tradableUnheld = preferredNextAssets
+    .filter((item) => item.eligibleForTrade && !heldSet.has(item.asset))
+    .map((item) => item.asset);
+  const openCrypto = [...CRYPTO_ASSETS].filter(
+    (asset) => marketSummary?.ratesByAsset?.[asset]?.eligibleForTrade
+  );
+  const ordered = [
+    ...openCrypto,
+    ...tradableUnheld,
+    ...held,
+    "SPY",
+    "BTC",
+    "QQQ",
+    "ETH"
+  ];
+  return [...new Set(ordered)]
+    .filter((asset) => WATCHLIST[asset])
+    .slice(0, INTELLIGENCE_MAX_ASSETS_PER_SCAN);
 }
 
 async function buildIntelligenceAnalysisReport({ portfolioSummary, marketSummary, preferredNextAssets = [], assetsOverride = null, force = false }) {
@@ -6305,7 +6844,7 @@ function intelligenceSizingMultiplier(agent, asset) {
 
 function normalizeCouncilAction(action) {
   const value = String(action || "ABSTAIN").toUpperCase();
-  return ["BUY", "SELL", "HOLD", "VETO", "ABSTAIN"].includes(value)
+  return ["BUY", "SELL", "HOLD", "VETO", "PASS", "ABSTAIN"].includes(value)
     ? value
     : "ABSTAIN";
 }
@@ -6352,11 +6891,13 @@ function chooseCouncilAssets({
     if (WATCHLIST[clean] && !ordered.includes(clean)) ordered.push(clean);
   };
   (assetsOverride || []).forEach(push);
+  (preferredNextAssets || [])
+    .filter((item) => item?.eligibleForTrade && !(portfolioSummary?.uniqueOpenAssets || []).includes(item?.asset))
+    .forEach((item) => push(item?.asset));
+  (marketSummary?.eligibleAssets || []).forEach(push);
   (portfolioSummary?.uniqueOpenAssets || []).forEach(push);
-  (preferredNextAssets || []).forEach((item) => push(item?.asset));
   (technicalAnalysisAgent?.ranking || []).forEach((item) => push(item?.asset));
   (intelligenceAnalysisAgent?.ranking || []).forEach((item) => push(item?.asset));
-  (marketSummary?.eligibleAssets || []).forEach(push);
   ["SPY", "BTC", "GLD", "ETH", "SHY"].forEach(push);
   return ordered.slice(0, COUNCIL_MAX_ASSETS);
 }
@@ -6405,7 +6946,7 @@ function buildVotesForAsset({
     }));
   } else {
     votes.push(createCouncilVote({
-      agent: "MarketDataAgent", asset, action: "HOLD", confidence: 92,
+      agent: "MarketDataAgent", asset, action: "PASS", confidence: 92,
       rationale: `Prix eToro frais, spread ${rate.spreadPct ?? "?"}% et marché ${rate.marketState}`,
       metadata: { mid: rate.mid, spreadPct: rate.spreadPct, ageMinutes: rate.ageMinutes }
     }));
@@ -6430,7 +6971,7 @@ function buildVotesForAsset({
     const providers = Number(comparison.providerCount || 1);
     votes.push(createCouncilVote({
       agent: "MarketDataFusionAgent", asset,
-      action: "HOLD",
+      action: "PASS",
       confidence: providers >= 2 ? 78 : 56,
       rationale: `${comparison.status}; ${providers} fournisseur(s); eToro reste la référence d'exécution`,
       metadata: { status: comparison.status, providerCount: providers, consensusPrice: comparison.consensusPrice }
@@ -6495,19 +7036,46 @@ function buildVotesForAsset({
 
   // MarketRegimeAgent
   const regime = marketRegimeAgent?.regime || "UNKNOWN";
-  if (["RISK_OFF", "HIGH_VOLATILITY", "CRYPTO_RISK_OFF"].includes(regime)) {
-    const speculative = SPECULATIVE_CATEGORIES.has(category);
+  const speculativeByRegime = SPECULATIVE_CATEGORIES.has(category);
+  if (regime === "RISK_OFF") {
     votes.push(createCouncilVote({
-      agent: "MarketRegimeAgent", asset,
-      action: speculative && !held ? "VETO" : (held && speculative ? "SELL" : "HOLD"),
-      confidence: speculative ? 86 : 72,
-      hardVeto: speculative && !held,
-      rationale: `Régime ${regime}; multiplicateur risque ${marketRegimeAgent?.riskMultiplier ?? "?"}`
+      agent: "MarketRegimeAgent",
+      asset,
+      action: DEFENSIVE_CATEGORIES.has(category) && !held ? "BUY" : "PASS",
+      confidence: speculativeByRegime ? 76 : 68,
+      hardVeto: false,
+      rationale: speculativeByRegime
+        ? `RISK_OFF assoupli: taille réduite et seuil technique renforcé; multiplicateur ${marketRegimeAgent?.riskMultiplier ?? "?"}`
+        : `RISK_OFF: préférence défensive; multiplicateur ${marketRegimeAgent?.riskMultiplier ?? "?"}`
     }));
-  } else if (["RISK_ON", "BULL_TREND"].includes(regime) && rate?.eligibleForTrade) {
-    votes.push(createCouncilVote({ agent: "MarketRegimeAgent", asset, action: held ? "HOLD" : "BUY", confidence: 68, rationale: `Régime constructif ${regime}` }));
+  } else if (regime === "HIGH_VOLATILITY") {
+    const hardBlock = speculativeByRegime && !held && Boolean(technical?.highVolatility);
+    votes.push(createCouncilVote({
+      agent: "MarketRegimeAgent",
+      asset,
+      action: hardBlock ? "VETO" : "PASS",
+      confidence: hardBlock ? 92 : 78,
+      hardVeto: hardBlock,
+      rationale: hardBlock
+        ? `HIGH_VOLATILITY et ATR propre à ${asset} élevé`
+        : `HIGH_VOLATILITY: exposition fortement réduite; multiplicateur ${marketRegimeAgent?.riskMultiplier ?? "?"}`
+    }));
+  } else if (regime === "CRYPTO_RISK_OFF") {
+    const cryptoHardBlock = category === "SPECULATIVE_CRYPTO" && !held && !technical?.multiTimeframeBullish;
+    votes.push(createCouncilVote({
+      agent: "MarketRegimeAgent",
+      asset,
+      action: cryptoHardBlock ? "VETO" : "PASS",
+      confidence: cryptoHardBlock ? 92 : 76,
+      hardVeto: cryptoHardBlock,
+      rationale: cryptoHardBlock
+        ? `CRYPTO_RISK_OFF sans confirmation multi-horizons sur ${asset}`
+        : `CRYPTO_RISK_OFF: achat possible uniquement avec confirmation forte et taille réduite`
+    }));
+  } else if (["RISK_ON", "BULL_TREND", "CRYPTO_RISK_ON"].includes(regime) && rate?.eligibleForTrade) {
+    votes.push(createCouncilVote({ agent: "MarketRegimeAgent", asset, action: held ? "PASS" : "BUY", confidence: 68, rationale: `Régime constructif ${regime}` }));
   } else {
-    votes.push(createCouncilVote({ agent: "MarketRegimeAgent", asset, action: "HOLD", confidence: 55, rationale: `Régime ${regime}` }));
+    votes.push(createCouncilVote({ agent: "MarketRegimeAgent", asset, action: "PASS", confidence: 55, rationale: `Régime ${regime}; aucun veto` }));
   }
 
   // NewsAgent
@@ -6603,14 +7171,14 @@ function buildVotesForAsset({
   } else if (!held) {
     const room = dynamicBuyAmount({ asset, amount_usd: MAX_ORDER_USD }, portfolioSummary);
     votes.push(createCouncilVote({
-      agent: "RiskBudgetAgent", asset, action: room >= MIN_ORDER_USD ? "HOLD" : "VETO",
+      agent: "RiskBudgetAgent", asset, action: room >= MIN_ORDER_USD ? "PASS" : "VETO",
       confidence: room >= MIN_ORDER_USD ? 84 : 96,
       hardVeto: room < MIN_ORDER_USD,
       rationale: room >= MIN_ORDER_USD ? `Budget disponible jusqu'à ${room} USD` : `Budget insuffisant: ${room} USD`,
       metadata: { dynamicRoomUsd: room, availableCash: portfolioSummary?.availableCash }
     }));
   } else {
-    votes.push(createCouncilVote({ agent: "RiskBudgetAgent", asset, action: "HOLD", confidence: 78, rationale: "Position existante; aucune nouvelle exposition demandée" }));
+    votes.push(createCouncilVote({ agent: "RiskBudgetAgent", asset, action: "PASS", confidence: 78, rationale: "Position existante; aucune nouvelle exposition demandée" }));
   }
 
   // BacktestValidationAgent
@@ -6623,7 +7191,7 @@ function buildVotesForAsset({
   } else {
     const metrics = lastBacktest?.metrics || {};
     const positive = Number(metrics.totalReturnPct || 0) > 0 && Number(metrics.maxDrawdownPct || 0) <= BACKTEST_MAX_VALIDATION_DRAWDOWN_PCT;
-    votes.push(createCouncilVote({ agent: "BacktestValidationAgent", asset, action: !held && positive ? "BUY" : "HOLD", confidence: positive ? 64 : 52, rationale: `Backtest ${strategyValidationAgent.status}; rendement ${metrics.totalReturnPct ?? "?"}%; drawdown ${metrics.maxDrawdownPct ?? "?"}%`, metadata: metrics }));
+    votes.push(createCouncilVote({ agent: "BacktestValidationAgent", asset, action: !held && positive ? "BUY" : "PASS", confidence: positive ? 64 : 52, rationale: `Backtest ${strategyValidationAgent.status}; rendement ${metrics.totalReturnPct ?? "?"}%; drawdown ${metrics.maxDrawdownPct ?? "?"}%`, metadata: metrics }));
   }
 
   // PaperPerformanceAgent
@@ -6632,14 +7200,14 @@ function buildVotesForAsset({
   } else if (paperPerformanceAgent.blockBuy) {
     votes.push(createCouncilVote({ agent: "PaperPerformanceAgent", asset, action: held ? "HOLD" : "VETO", confidence: 95, hardVeto: PAPER_PERFORMANCE_MODE === "required" && !held, rationale: `Performance PAPER sous limite: rendement ${paperPerformanceAgent.totalReturnPct ?? "?"}%, drawdown ${paperPerformanceAgent.maxDrawdownPct ?? "?"}%` }));
   } else {
-    votes.push(createCouncilVote({ agent: "PaperPerformanceAgent", asset, action: "HOLD", confidence: paperPerformanceAgent.closedTrades >= BACKTEST_MIN_TRADES_FOR_VALIDATION ? 70 : 45, rationale: `PAPER ${paperPerformanceAgent.status}; ${paperPerformanceAgent.closedTrades || 0} trades clôturés; Sharpe ${paperPerformanceAgent.sharpe ?? "?"}` }));
+    votes.push(createCouncilVote({ agent: "PaperPerformanceAgent", asset, action: "PASS", confidence: paperPerformanceAgent.closedTrades >= BACKTEST_MIN_TRADES_FOR_VALIDATION ? 70 : 45, rationale: `PAPER ${paperPerformanceAgent.status}; ${paperPerformanceAgent.closedTrades || 0} trades clôturés; Sharpe ${paperPerformanceAgent.sharpe ?? "?"}` }));
   }
 
   // HealthAgent
   if (healthAgent?.circuitBreakerOpen) {
     votes.push(createCouncilVote({ agent: "HealthAgent", asset, action: "VETO", confidence: 100, hardVeto: true, rationale: `Circuit breaker ouvert: ${(healthAgent.reasons || []).join(", ")}` }));
   } else {
-    votes.push(createCouncilVote({ agent: "HealthAgent", asset, action: "HOLD", confidence: 90, rationale: "Système sain; aucun veto opérationnel" }));
+    votes.push(createCouncilVote({ agent: "HealthAgent", asset, action: "PASS", confidence: 90, rationale: "Système sain; aucun veto opérationnel" }));
   }
 
   // ExecutionReadinessAgent
@@ -6656,7 +7224,7 @@ function buildVotesForAsset({
   if (executionBlock) {
     votes.push(createCouncilVote({ agent: "ExecutionReadinessAgent", asset, action: "VETO", confidence: 100, hardVeto: true, rationale: executionBlock }));
   } else {
-    votes.push(createCouncilVote({ agent: "ExecutionReadinessAgent", asset, action: "HOLD", confidence: 86, rationale: "Pipeline d'exécution disponible et aucune duplication détectée" }));
+    votes.push(createCouncilVote({ agent: "ExecutionReadinessAgent", asset, action: "PASS", confidence: 86, rationale: "Pipeline d'exécution disponible et aucune duplication détectée" }));
   }
 
   // AuditAgent
@@ -6667,31 +7235,64 @@ function buildVotesForAsset({
   } else if (!memory.persistent && TRADING_MODE === "LIVE") {
     votes.push(createCouncilVote({ agent: "AuditAgent", asset, action: "VETO", confidence: 90, hardVeto: true, rationale: "Mémoire non persistante en mode LIVE" }));
   } else {
-    votes.push(createCouncilVote({ agent: "AuditAgent", asset, action: "HOLD", confidence: 75, rationale: memory.persistent ? "Audit et mémoire persistante disponibles" : "Audit disponible; mémoire locale temporaire acceptable hors LIVE" }));
+    votes.push(createCouncilVote({ agent: "AuditAgent", asset, action: "PASS", confidence: 75, rationale: memory.persistent ? "Audit et mémoire persistante disponibles" : "Audit disponible; mémoire locale temporaire acceptable hors LIVE" }));
   }
 
   return votes;
 }
 
 function aggregateCouncilVotes(asset, votes, held = false) {
-  const activeVotes = (votes || []).filter((vote) => vote.action !== "ABSTAIN" && vote.effectiveInfluence > 0);
-  const totals = { BUY: 0, SELL: 0, HOLD: 0, VETO: 0 };
-  for (const vote of activeVotes) totals[vote.action] += Number(vote.effectiveInfluence || 0);
-  const totalInfluence = Object.values(totals).reduce((sum, value) => sum + value, 0);
+  const activeVotes = (votes || []).filter(
+    (vote) => vote.action !== "ABSTAIN" && Number(vote.effectiveInfluence) > 0
+  );
+  const directionalVotes = activeVotes.filter((vote) => vote.action !== "PASS");
+  const totals = { BUY: 0, SELL: 0, HOLD: 0, VETO: 0, PASS: 0 };
+  for (const vote of activeVotes) {
+    if (Object.prototype.hasOwnProperty.call(totals, vote.action)) {
+      totals[vote.action] += Number(vote.effectiveInfluence || 0);
+    }
+  }
+
+  const totalDirectionalInfluence = totals.BUY + totals.SELL + totals.HOLD + totals.VETO;
   const decisionDenominator = totals.BUY + totals.SELL + totals.VETO + totals.HOLD * 0.35;
-  const pct = (value, denominator = decisionDenominator) => denominator > 0 ? roundNumber(value / denominator * 100, 2) : 0;
-  const fullPct = (value) => totalInfluence > 0 ? roundNumber(value / totalInfluence * 100, 2) : 0;
-  const hardVetoes = activeVotes.filter((vote) => vote.hardVeto || vote.action === "VETO" && vote.confidence >= 95);
+  const pct = (value, denominator = decisionDenominator) =>
+    denominator > 0 ? roundNumber(value / denominator * 100, 2) : 0;
+  const fullPct = (value) =>
+    totalDirectionalInfluence > 0 ? roundNumber(value / totalDirectionalInfluence * 100, 2) : 0;
+
+  const hardVetoes = activeVotes.filter(
+    (vote) => vote.action === "VETO" && (vote.hardVeto || vote.confidence >= 95)
+  );
   const buySupportPct = pct(totals.BUY);
   const sellSupportPct = pct(totals.SELL);
   const vetoSupportPct = pct(totals.VETO);
   const holdSharePct = fullPct(totals.HOLD);
-  const dominantShare = Math.max(fullPct(totals.BUY), fullPct(totals.SELL), fullPct(totals.HOLD + totals.VETO));
+  const passInfluence = roundNumber(totals.PASS, 4);
+  const dominantShare = totalDirectionalInfluence > 0
+    ? Math.max(
+        fullPct(totals.BUY),
+        fullPct(totals.SELL),
+        fullPct(totals.HOLD + totals.VETO)
+      )
+    : 100;
   const disagreementPct = roundNumber(Math.max(0, 100 - dominantShare), 2);
   const participationCount = activeVotes.length;
+  const directionalParticipationCount = directionalVotes.length;
+  const buyAgentCount = activeVotes.filter((vote) => vote.action === "BUY").length;
+  const sellAgentCount = activeVotes.filter((vote) => vote.action === "SELL").length;
+  const passCount = activeVotes.filter((vote) => vote.action === "PASS").length;
+  const abstainCount = (votes || []).filter((vote) => vote.action === "ABSTAIN").length;
   const participatingAgents = activeVotes.map((vote) => vote.agent);
-  const supportingAgents = activeVotes.filter((vote) => vote.action === (held ? "SELL" : "BUY")).map((vote) => vote.agent);
-  const opposingAgents = activeVotes.filter((vote) => ["SELL", "VETO"].includes(vote.action) && !held || vote.action === "BUY" && held).map((vote) => vote.agent);
+  const passingAgents = activeVotes.filter((vote) => vote.action === "PASS").map((vote) => vote.agent);
+  const supportingAgents = activeVotes
+    .filter((vote) => vote.action === (held ? "SELL" : "BUY"))
+    .map((vote) => vote.agent);
+  const opposingAgents = activeVotes
+    .filter((vote) => (
+      (!held && ["SELL", "VETO"].includes(vote.action)) ||
+      (held && vote.action === "BUY")
+    ))
+    .map((vote) => vote.agent);
 
   let status = "HOLD";
   let recommendation = "HOLD";
@@ -6708,19 +7309,38 @@ function aggregateCouncilVotes(asset, votes, held = false) {
   } else if (disagreementPct > COUNCIL_MAX_DISAGREEMENT_PCT) {
     status = "HIGH_DISAGREEMENT";
     reasons.push(`Désaccord ${disagreementPct}%`);
-  } else if (!held && buySupportPct >= COUNCIL_BUY_THRESHOLD_PCT && totals.BUY > totals.SELL + totals.VETO) {
+  } else if (
+    !held &&
+    buyAgentCount >= COUNCIL_MIN_BUY_AGENTS &&
+    buySupportPct >= COUNCIL_BUY_THRESHOLD_PCT &&
+    totals.BUY > totals.SELL + totals.VETO
+  ) {
     status = "APPROVED_BUY";
     recommendation = "BUY";
-    reasons.push(`Soutien BUY ${buySupportPct}%`);
-  } else if (held && sellSupportPct >= COUNCIL_SELL_THRESHOLD_PCT && totals.SELL > totals.BUY) {
+    reasons.push(`Soutien BUY ${buySupportPct}% par ${buyAgentCount} agent(s)`);
+  } else if (
+    held &&
+    sellAgentCount >= COUNCIL_MIN_SELL_AGENTS &&
+    sellSupportPct >= COUNCIL_SELL_THRESHOLD_PCT &&
+    totals.SELL > totals.BUY
+  ) {
     status = "APPROVED_SELL";
     recommendation = "SELL";
-    reasons.push(`Soutien SELL ${sellSupportPct}%`);
+    reasons.push(`Soutien SELL ${sellSupportPct}% par ${sellAgentCount} agent(s)`);
   } else {
-    reasons.push(held ? `Soutien SELL insuffisant ${sellSupportPct}%` : `Soutien BUY insuffisant ${buySupportPct}%`);
+    reasons.push(
+      held
+        ? `Soutien SELL insuffisant ${sellSupportPct}% / ${sellAgentCount} agent(s)`
+        : `Soutien BUY insuffisant ${buySupportPct}% / ${buyAgentCount} agent(s)`
+    );
   }
 
-  const winningSupport = recommendation === "BUY" ? buySupportPct : recommendation === "SELL" ? sellSupportPct : Math.max(holdSharePct, 50 - disagreementPct / 2);
+  if (passCount > 0) reasons.push(`${passCount} contrôle(s) PASS`);
+  const winningSupport = recommendation === "BUY"
+    ? buySupportPct
+    : recommendation === "SELL"
+      ? sellSupportPct
+      : Math.max(holdSharePct, 50 - disagreementPct / 2);
   const confidence = Math.round(clampNumber(
     winningSupport + Math.min(10, participationCount) - disagreementPct * 0.2 - hardVetoes.length * 20,
     0,
@@ -6734,12 +7354,19 @@ function aggregateCouncilVotes(asset, votes, held = false) {
     recommendation,
     confidence,
     participationCount,
+    directionalParticipationCount,
+    buyAgentCount,
+    sellAgentCount,
+    passCount,
+    abstainCount,
     participatingAgents,
+    passingAgents,
     support: {
       buyPct: buySupportPct,
       sellPct: sellSupportPct,
       vetoPct: vetoSupportPct,
       holdSharePct,
+      passInfluence,
       netSupport
     },
     disagreementPct,
@@ -6747,7 +7374,9 @@ function aggregateCouncilVotes(asset, votes, held = false) {
     supportingAgents,
     opposingAgents,
     reasons,
-    voteTotals: Object.fromEntries(Object.entries(totals).map(([key, value]) => [key, roundNumber(value, 4)])),
+    voteTotals: Object.fromEntries(
+      Object.entries(totals).map(([key, value]) => [key, roundNumber(value, 4)])
+    ),
     votes
   };
 }
@@ -6864,6 +7493,8 @@ function buildAgentCouncil({
       minimumParticipation: COUNCIL_MIN_PARTICIPATION,
       buyPct: COUNCIL_BUY_THRESHOLD_PCT,
       sellPct: COUNCIL_SELL_THRESHOLD_PCT,
+      minimumBuyAgents: COUNCIL_MIN_BUY_AGENTS,
+      minimumSellAgents: COUNCIL_MIN_SELL_AGENTS,
       maxDisagreementPct: COUNCIL_MAX_DISAGREEMENT_PCT,
       requireNoHardVeto: COUNCIL_REQUIRE_NO_HARD_VETO
     },
@@ -7297,30 +7928,87 @@ async function executeBuy(asset, amount, marketData = null) {
   if (TRADING_MODE === "OBSERVE") return { skipped: true, mode: "OBSERVE", reason: "Mode OBSERVE : aucune exécution" };
   if (TRADING_MODE === "PAPER") return executePaperBuy(asset, Number(amount), marketData);
   if (!LIVE_TRADING_ENABLED) return { skipped: true, reason: "Trading LIVE non activé" };
+  if (!LIVE_EXECUTION_ARMED) {
+    return { skipped: true, mode: "LIVE", reason: "LIVE non armé: ajoute LIVE_EXECUTION_ARMED=true uniquement après validation complète" };
+  }
 
   const instrumentId = WATCHLIST[asset];
   const safeAmount = Math.min(Number(amount || MAX_ORDER_USD), MAX_ORDER_USD);
   if (!instrumentId || safeAmount < MIN_ORDER_USD) return { skipped: true, reason: "Actif ou montant invalide" };
+
+  if (!LIVE_PORTFOLIO_PREFLIGHT_ENABLED) {
+    return {
+      skipped: true,
+      mode: "LIVE",
+      reason: "LIVE_PORTFOLIO_PREFLIGHT_ENABLED=false : exécution bloquée par sécurité"
+    };
+  }
+  const preflight = await verifyRealPortfolioBeforeExecution({ asset, side: "BUY", amount: safeAmount });
+  if (!preflight.ok) {
+    addAudit("LIVE_BUY_PREFLIGHT_BLOCKED", { asset, amount: safeAmount, reason: preflight.reason, validation: preflight.validation || null });
+    return { skipped: true, mode: "LIVE", reason: preflight.reason, preflight: preflight.validation || null };
+  }
+
+  // Relire aussi le prix juste avant l'ordre pour éviter d'utiliser le snapshot du scan.
+  const executionMarketData = await getMarketRates();
+  const marketCheck = isMarketRateTradable(executionMarketData, asset);
+  if (!marketCheck.ok) {
+    return { skipped: true, mode: "LIVE", reason: `Préflight prix: ${marketCheck.reason}`, marketCheck };
+  }
+
   const intentResult = createOrderIntent("BUY", asset, safeAmount);
   if (!intentResult.ok) return { skipped: true, reason: "Intent d'ordre déjà actif", existingIntent: intentResult.existing };
   const intent = intentResult.intent;
   try {
+    const headers = etoroHeaders();
     const { response, data } = await fetchJsonWithRetry(
       "https://public-api.etoro.com/api/v1/trading/execution/market-open-orders/by-amount",
       {
         method: "POST",
-        headers: etoroHeaders(),
+        headers,
         body: JSON.stringify({ InstrumentId: instrumentId, IsBuy: true, Leverage: 1, Amount: safeAmount })
       },
       { label: `eToro LIVE BUY ${asset}`, retries: 0 }
     );
-    finishOrderIntent(intent.id, response.ok ? "CONFIRMED" : "REJECTED", { httpStatus: response.status, response: data });
+    const postflight = response.ok
+      ? await verifyPortfolioAfterExecution({ asset, side: "BUY" })
+      : { checked: false, observed: false, reason: "Ordre refusé" };
+    const intentStatus = response.ok
+      ? (postflight.observed ? "CONFIRMED" : "CONFIRMED_API_PENDING_PORTFOLIO")
+      : "REJECTED";
+    finishOrderIntent(intent.id, intentStatus, {
+      httpStatus: response.status,
+      response: data,
+      requestId: headers["x-request-id"],
+      postflight
+    });
     if (response.ok) {
       setCooldown(asset);
       addExecutionHistory({ type: "BUY", asset, amount: safeAmount, instrumentId, mode: "LIVE", intentId: intent.id });
-      addAudit("LIVE_BUY_EXECUTED", { asset, amount: safeAmount, instrumentId, intentId: intent.id, status: response.status });
+      addAudit("LIVE_BUY_EXECUTED", {
+        asset,
+        amount: safeAmount,
+        instrumentId,
+        intentId: intent.id,
+        status: response.status,
+        preflight: preflight?.validation || null,
+        postflight
+      });
     }
-    return { status: response.status, ok: response.ok, type: "BUY", mode: "LIVE", asset, instrumentId, amount: safeAmount, intentId: intent.id, data };
+    return {
+      status: response.status,
+      ok: response.ok,
+      type: "BUY",
+      mode: "LIVE",
+      asset,
+      instrumentId,
+      amount: safeAmount,
+      intentId: intent.id,
+      requestId: headers["x-request-id"],
+      preflight: preflight?.validation || null,
+      postflight,
+      data
+    };
   } catch (error) {
     finishOrderIntent(intent.id, "UNKNOWN", { error: error.message });
     addAudit("LIVE_BUY_UNKNOWN", { asset, amount: safeAmount, intentId: intent.id, error: error.message });
@@ -7332,10 +8020,19 @@ async function executeSell(asset, marketData = null) {
   if (TRADING_MODE === "OBSERVE") return { skipped: true, mode: "OBSERVE", reason: "Mode OBSERVE : aucune exécution" };
   if (TRADING_MODE === "PAPER") return executePaperSell(asset, marketData);
   if (!LIVE_TRADING_ENABLED) return { skipped: true, reason: "Trading LIVE non activé" };
+  if (!LIVE_EXECUTION_ARMED) {
+    return { skipped: true, mode: "LIVE", reason: "LIVE non armé: ajoute LIVE_EXECUTION_ARMED=true uniquement après validation complète" };
+  }
 
-  const portfolio = await getPortfolio();
+  const preflight = await verifyRealPortfolioBeforeExecution({ asset, side: "SELL", amount: 0 });
+  if (!preflight.ok) {
+    addAudit("LIVE_SELL_PREFLIGHT_BLOCKED", { asset, reason: preflight.reason, validation: preflight.validation || null });
+    return { skipped: true, mode: "LIVE", reason: preflight.reason, preflight: preflight.validation || null };
+  }
+
+  const portfolio = preflight.portfolio;
   const position = findOpenPosition(portfolio, asset);
-  if (!position) return { skipped: true, reason: `Aucune position ouverte pour ${asset}` };
+  if (!position) return { skipped: true, reason: `Aucune position REAL ouverte pour ${asset}` };
   const positionId = getPositionId(position);
   const instrumentId = WATCHLIST[asset];
   if (!positionId) return { skipped: true, reason: `positionId introuvable pour ${asset}` };
@@ -7343,21 +8040,54 @@ async function executeSell(asset, marketData = null) {
   if (!intentResult.ok) return { skipped: true, reason: "Intent d'ordre déjà actif", existingIntent: intentResult.existing };
   const intent = intentResult.intent;
   try {
+    const headers = etoroHeaders();
     const { response, data } = await fetchJsonWithRetry(
       `https://public-api.etoro.com/api/v1/trading/execution/market-close-orders/positions/${positionId}`,
       {
         method: "POST",
-        headers: etoroHeaders(),
+        headers,
         body: JSON.stringify({ UnitsToDeduct: null })
       },
       { label: `eToro LIVE SELL ${asset}`, retries: 0 }
     );
-    finishOrderIntent(intent.id, response.ok ? "CONFIRMED" : "REJECTED", { httpStatus: response.status, response: data });
+    const postflight = response.ok
+      ? await verifyPortfolioAfterExecution({ asset, side: "SELL" })
+      : { checked: false, observed: false, reason: "Ordre refusé" };
+    const intentStatus = response.ok
+      ? (postflight.observed ? "CONFIRMED" : "CONFIRMED_API_PENDING_PORTFOLIO")
+      : "REJECTED";
+    finishOrderIntent(intent.id, intentStatus, {
+      httpStatus: response.status,
+      response: data,
+      requestId: headers["x-request-id"],
+      postflight
+    });
     if (response.ok) {
       addExecutionHistory({ type: "SELL", asset, instrumentId, positionId, mode: "LIVE", intentId: intent.id });
-      addAudit("LIVE_SELL_EXECUTED", { asset, instrumentId, positionId, intentId: intent.id, status: response.status });
+      addAudit("LIVE_SELL_EXECUTED", {
+        asset,
+        instrumentId,
+        positionId,
+        intentId: intent.id,
+        status: response.status,
+        preflight: preflight.validation,
+        postflight
+      });
     }
-    return { status: response.status, ok: response.ok, type: "SELL", mode: "LIVE", asset, instrumentId, positionId, intentId: intent.id, data };
+    return {
+      status: response.status,
+      ok: response.ok,
+      type: "SELL",
+      mode: "LIVE",
+      asset,
+      instrumentId,
+      positionId,
+      intentId: intent.id,
+      requestId: headers["x-request-id"],
+      preflight: preflight.validation,
+      postflight,
+      data
+    };
   } catch (error) {
     finishOrderIntent(intent.id, "UNKNOWN", { error: error.message });
     addAudit("LIVE_SELL_UNKNOWN", { asset, positionId, intentId: intent.id, error: error.message });
@@ -7435,9 +8165,12 @@ async function askDecisionAgent(portfolioSummary, marketSummary, trendSummary, s
 async function buildRuntimeContext(source) {
   let realPortfolio;
   try {
-    realPortfolio = await getPortfolio();
-    if (!realPortfolio.ok) {
-      throw new Error(`Portfolio eToro indisponible (HTTP ${realPortfolio.status})`);
+    realPortfolio = await getPortfolio({ environment: ETORO_ACCOUNT_ENV });
+    const portfolioValidation = validatePortfolioResponse(realPortfolio, {
+      requireReal: LIVE_TRADING_ENABLED
+    });
+    if (!portfolioValidation.ok) {
+      throw new Error(`Portfolio eToro non vérifié: ${portfolioValidation.errors.join(", ")}`);
     }
   } catch (error) {
     if (PAPER_TRADING_ENABLED && runtimeState.paperPortfolio) {
@@ -7657,6 +8390,8 @@ async function scanMarket(source = "manual-scan") {
         technicalAnalysisAgent: context.technicalAnalysisAgent,
         marketRegimeAgent: context.marketRegimeAgent,
         intelligenceAnalysisAgent: context.intelligenceAnalysisAgent,
+        strategyValidationAgent: context.strategyValidationAgent,
+        paperPerformanceAgent: context.paperPerformanceAgent,
         preferredNextAssets: getPreferredNextAssets(context.portfolioSummary, context.marketSummary),
         assetsOverride: [decisionAsset]
       });
@@ -7668,6 +8403,8 @@ async function scanMarket(source = "manual-scan") {
         technicalAnalysisAgent: context.technicalAnalysisAgent,
         marketRegimeAgent: context.marketRegimeAgent,
         intelligenceAnalysisAgent: context.intelligenceAnalysisAgent,
+        strategyValidationAgent: context.strategyValidationAgent,
+        paperPerformanceAgent: context.paperPerformanceAgent,
         agentCouncil: context.agentCouncil
       });
     }
@@ -7783,7 +8520,7 @@ function renderDashboard({ summary, metrics, market, trend, preferredNextAssets,
     <div class="card" style="margin-top:14px"><h3>News · Fundamentals · Social</h3><table><thead><tr><th>Actif</th><th>Global</th><th>News</th><th>Fondamental</th><th>Social</th><th>Décision</th><th>Risques</th></tr></thead><tbody>${intelligenceRows}</tbody></table></div>
     <div class="card" style="margin-top:14px"><h3>MultiAgentCouncil — votes et désaccords</h3><table><thead><tr><th>Actif</th><th>État</th><th>Recommandation</th><th>BUY</th><th>SELL</th><th>Veto</th><th>Désaccord</th><th>Agents</th><th>Hard veto</th></tr></thead><tbody>${councilRows}</tbody></table></div>
     <div class="card" style="margin-top:14px"><h3>Prochains actifs</h3><table><thead><tr><th>#</th><th>Actif</th><th>Prix</th><th>Éligible</th><th>Raison</th></tr></thead><tbody>${candidatesRows}</tbody></table></div>
-    <div class="card" style="margin-top:14px"><h3>Contrôles</h3><a href="/watch?secret=${encodeURIComponent(secret || "")}">Watch</a> · <a href="/scan?secret=${encodeURIComponent(secret || "")}">Scan</a> · <a href="/foundation-status?secret=${encodeURIComponent(secret || "")}">Foundation status</a> · <a href="/data-sources?secret=${encodeURIComponent(secret || "")}">Data sources</a> · <a href="/provider-health?secret=${encodeURIComponent(secret || "")}">Provider health</a> · <a href="/technical-summary?secret=${encodeURIComponent(secret || "")}">Technical summary</a> · <a href="/intelligence-summary?secret=${encodeURIComponent(secret || "")}">Intelligence summary</a> · <a href="/market-regime?secret=${encodeURIComponent(secret || "")}">Market regime</a> · <a href="/agent-council?secret=${encodeURIComponent(secret || "")}">Agent council</a> · <a href="/agent-history?secret=${encodeURIComponent(secret || "")}">Agent history</a> · <a href="/paper-status?secret=${encodeURIComponent(secret || "")}">Paper status</a> · <a href="/paper-performance?secret=${encodeURIComponent(secret || "")}">Paper performance</a> · <a href="/backtest-status?secret=${encodeURIComponent(secret || "")}">Backtest status</a> · <a href="/strategy-validation?secret=${encodeURIComponent(secret || "")}">Strategy validation</a> · <a href="/audit?secret=${encodeURIComponent(secret || "")}">Audit</a></div>
+    <div class="card" style="margin-top:14px"><h3>Contrôles</h3><a href="/watch?secret=${encodeURIComponent(secret || "")}">Watch</a> · <a href="/scan?secret=${encodeURIComponent(secret || "")}">Scan</a> · <a href="/foundation-status?secret=${encodeURIComponent(secret || "")}">Foundation status</a> · <a href="/data-sources?secret=${encodeURIComponent(secret || "")}">Data sources</a> · <a href="/provider-health?secret=${encodeURIComponent(secret || "")}">Provider health</a> · <a href="/technical-summary?secret=${encodeURIComponent(secret || "")}">Technical summary</a> · <a href="/intelligence-summary?secret=${encodeURIComponent(secret || "")}">Intelligence summary</a> · <a href="/market-regime?secret=${encodeURIComponent(secret || "")}">Market regime</a> · <a href="/agent-council?secret=${encodeURIComponent(secret || "")}">Agent council</a> · <a href="/agent-history?secret=${encodeURIComponent(secret || "")}">Agent history</a> · <a href="/paper-status?secret=${encodeURIComponent(secret || "")}">Paper status</a> · <a href="/paper-performance?secret=${encodeURIComponent(secret || "")}">Paper performance</a> · <a href="/backtest-status?secret=${encodeURIComponent(secret || "")}">Backtest status</a> · <a href="/strategy-validation?secret=${encodeURIComponent(secret || "")}">Strategy validation</a> · <a href="/live-preflight?secret=${encodeURIComponent(secret || "")}&asset=SPY&side=BUY&amount=10">LIVE preflight</a> · <a href="/audit?secret=${encodeURIComponent(secret || "")}">Audit</a></div>
   </div></body></html>`;
 }
 
@@ -8519,6 +9256,47 @@ app.get("/resolve-symbol", requireSecret, async (req, res) => {
 });
 
 
+app.get("/live-preflight", requireSecret, async (req, res) => {
+  try {
+    const asset = String(req.query.asset || "SPY").toUpperCase();
+    const side = String(req.query.side || "BUY").toUpperCase();
+    const amount = Number(req.query.amount || MAX_ORDER_USD);
+    if (!WATCHLIST[asset]) {
+      return res.status(400).json({ version: VERSION, error: "Actif invalide", allowedAssets: Object.keys(WATCHLIST) });
+    }
+    if (!LIVE_TRADING_ENABLED) {
+      const portfolio = await getPortfolio({ environment: "REAL" });
+      return res.json({
+        version: VERSION,
+        tradingMode: TRADING_MODE,
+        liveExecutionArmed: LIVE_EXECUTION_ARMED,
+        executionAttempted: false,
+        note: "Diagnostic uniquement: aucun ordre n'est envoyé.",
+        validation: validatePortfolioResponse(portfolio, { requireReal: true }),
+        portfolioSummary: extractPortfolioSummary(portfolio)
+      });
+    }
+    const result = await verifyRealPortfolioBeforeExecution({ asset, side, amount });
+    res.status(result.ok ? 200 : 400).json({
+      version: VERSION,
+      tradingMode: TRADING_MODE,
+      liveExecutionArmed: LIVE_EXECUTION_ARMED,
+      executionAttempted: false,
+      asset,
+      side,
+      amount,
+      result: {
+        ok: result.ok,
+        reason: result.reason,
+        validation: result.validation || null,
+        summary: result.summary || null
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ version: VERSION, error: error.message, executionAttempted: false });
+  }
+});
+
 app.get("/mode", requireSecret, (req, res) => {
   res.json({ version: VERSION, configuration: envConfiguration(), note: "Le mode se change dans Render Environment puis redéploiement." });
 });
@@ -8766,15 +9544,6 @@ app.get("/paper-status", requireSecret, async (req, res) => {
   }
 });
 
-app.get("/paper-reset", requireSecret, (req, res) => {
-  if (req.query.confirm !== "RESET") return res.status(400).json({ skipped: true, reason: "Ajoute ?secret=...&confirm=RESET" });
-  runtimeState.paperPortfolio = null;
-  runtimeState.equityHistory = [];
-  addAudit("PAPER_PORTFOLIO_RESET", {});
-  scheduleSave();
-  res.json({ version: VERSION, reset: true, message: "Le portefeuille papier sera recréé au prochain watch/scan." });
-});
-
 app.get("/audit", requireSecret, (req, res) => {
   const limit = Math.min(Number(req.query.limit || 50), 500);
   res.json({ version: VERSION, audit: runtimeState.auditTrail.slice(0, limit), orderIntents: runtimeState.orderIntents, health: buildHealthAgent(), memory: memoryStatus() });
@@ -8905,6 +9674,7 @@ module.exports = {
   scoreTechnicalSnapshot,
   buildTechnicalSnapshot,
   buildTechnicalAnalysisReport,
+  chooseTechnicalAssets,
   buildMarketRegimeAgent,
   sanitizeExternalText,
   lexicalSentiment,
@@ -8920,6 +9690,7 @@ module.exports = {
   buildAlternativeDataCoordinator,
   buildIntelligenceSnapshot,
   buildIntelligenceAnalysisReport,
+  chooseIntelligenceAssets,
   intelligenceCheckForAsset,
   intelligenceSizingMultiplier,
   normalizeCouncilAction,
@@ -8938,6 +9709,14 @@ module.exports = {
   dynamicBuyAmount,
   calculateAvailableCash,
   buildHealthAgent,
+  getPortfolio,
+  getEtoroPortfolioEndpoint,
+  validatePortfolioResponse,
+  verifyRealPortfolioBeforeExecution,
+  verifyPortfolioAfterExecution,
+  buildPersistentState,
+  fitPersistentStateToBudget,
+  serializedByteLength,
   dataIntegrityCheckForAsset,
   riskController,
   executePaperBuy,
