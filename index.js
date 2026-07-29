@@ -148,7 +148,7 @@ function getOpenAIClient() {
   return openAIClient;
 }
 
-const VERSION = "v10.22-agent-portfolio-aware";
+const VERSION = "v10.22.1-agent-token-fallback";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
@@ -196,6 +196,12 @@ const ETORO_EXPECTED_AGENT_PORTFOLIO_GCID = String(
 const ETORO_EXPECTED_MIRROR_ID = String(
   process.env.ETORO_EXPECTED_MIRROR_ID || ""
 ).trim();
+const ETORO_AGENT_VIRTUAL_BALANCE_RAW = String(
+  process.env.ETORO_AGENT_VIRTUAL_BALANCE_USD || ""
+).trim();
+const ETORO_AGENT_VIRTUAL_BALANCE_USD = ETORO_AGENT_VIRTUAL_BALANCE_RAW !== "" && Number.isFinite(Number(ETORO_AGENT_VIRTUAL_BALANCE_RAW))
+  ? Number(ETORO_AGENT_VIRTUAL_BALANCE_RAW)
+  : null;
 const ETORO_AGENT_PORTFOLIOS_ENDPOINT = "https://public-api.etoro.com/api/v1/agent-portfolios";
 const ETORO_AGENT_PORTFOLIO_CACHE_SECONDS = Math.max(
   30,
@@ -3358,6 +3364,58 @@ async function resolveEtoroPortfolioContext(portfolioResponse, summary, { force 
   }
 
   if (ETORO_PORTFOLIO_CONTEXT === "AGENT") {
+    // A token provisionné pour un portefeuille-agent peut lire et négocier sur
+    // /trading/info/real/pnl tout en recevant 403 sur /agent-portfolios, car ce
+    // dernier endpoint liste les portefeuilles appartenant au compte propriétaire.
+    // Lorsque le contexte AGENT est explicitement configuré, le PnL REAL frais et
+    // structurellement valide devient donc la preuve opérationnelle principale.
+    const realPnlUsable = Boolean(
+      portfolioResponse?.ok &&
+      String(portfolioResponse?.accountEnvironment || "").toUpperCase() === "REAL" &&
+      portfolioResponse?.data?.clientPortfolio &&
+      Number.isFinite(Number(summary?.totalTrackedValue)) &&
+      Number.isFinite(Number(summary?.availableCash))
+    );
+
+    if (realPnlUsable) {
+      const storedAgent = runtimeState.livePortfolioIdentity?.contextKind === "AGENT_PORTFOLIO"
+        ? runtimeState.livePortfolioIdentity.agentPortfolio
+        : null;
+      const virtualBalance = Number.isFinite(Number(ETORO_AGENT_VIRTUAL_BALANCE_USD))
+        ? Number(ETORO_AGENT_VIRTUAL_BALANCE_USD)
+        : (Number.isFinite(Number(storedAgent?.virtualBalanceUsd))
+            ? Number(storedAgent.virtualBalanceUsd)
+            : null);
+      const syntheticAgentPortfolio = {
+        agentPortfolioId: ETORO_EXPECTED_AGENT_PORTFOLIO_ID || storedAgent?.agentPortfolioId || null,
+        agentPortfolioName: storedAgent?.agentPortfolioName || "Configured agent portfolio",
+        agentPortfolioGcid: ETORO_EXPECTED_AGENT_PORTFOLIO_GCID || storedAgent?.agentPortfolioGcid || null,
+        mirrorId: ETORO_EXPECTED_MIRROR_ID || storedAgent?.mirrorId || null,
+        agentPortfolioVirtualBalance: virtualBalance,
+        createdAt: null,
+        userTokens: [],
+        resolutionSource: "FORCED_AGENT_CONTEXT_FROM_REAL_PNL"
+      };
+      return {
+        kind: "AGENT_PORTFOLIO",
+        resolved: true,
+        reason: discovery.ok
+          ? "FORCED_AGENT_CONTEXT_METADATA_NOT_MATCHED"
+          : `FORCED_AGENT_CONTEXT_DISCOVERY_ADVISORY_${discovery.status || "ERROR"}`,
+        agentPortfolio: syntheticAgentPortfolio,
+        pnlMirrorIds,
+        scopes: null,
+        discovery,
+        discoveryAdvisoryOnly: true,
+        operationalEvidence: {
+          realPnlEndpoint: portfolioResponse.endpoint || null,
+          realPnlValid: true,
+          availableCashUsd: Number(summary.availableCash),
+          totalTrackedValueUsd: Number(summary.totalTrackedValue)
+        }
+      };
+    }
+
     return {
       kind: "AGENT_PORTFOLIO",
       resolved: false,
@@ -3550,15 +3608,21 @@ function buildLivePortfolioIdentitySnapshot(portfolioResponse, summary, portfoli
     mirrorId: agentPortfolio.mirrorId || null,
     virtualBalanceUsd: Number.isFinite(Number(agentPortfolio.agentPortfolioVirtualBalance))
       ? roundNumber(Number(agentPortfolio.agentPortfolioVirtualBalance), 4)
-      : null
+      : null,
+    resolutionSource: agentPortfolio.resolutionSource || null
   } : null;
+  const credentialFingerprint = createHash("sha256")
+    .update(`${process.env.ETORO_API_KEY || ""}|${process.env.ETORO_USER_KEY || ""}`)
+    .digest("hex");
   const signature = createHash("sha256")
     .update(JSON.stringify({
       environment,
+      endpoint: portfolioResponse?.endpoint || null,
       contextKind,
       portfolioId: portfolioId || null,
       agentPortfolioGcid: agentIdentity?.agentPortfolioGcid || null,
-      mirrorId: agentIdentity?.mirrorId || null
+      mirrorId: agentIdentity?.mirrorId || null,
+      credentialFingerprint
     }))
     .digest("hex");
   return {
@@ -15912,6 +15976,9 @@ app.get("/auto-trading-check", requireSecret, (req, res) => {
   if (ETORO_EXPECTED_ACCOUNT_VALUE_USD !== null && (ETORO_PORTFOLIO_CONTEXT === "AGENT" || runtimeState.livePortfolioIdentity?.contextKind === "AGENT_PORTFOLIO")) {
     warnings.push("ETORO_EXPECTED_ACCOUNT_VALUE_USD est ignoré pour un portefeuille-agent; la référence correcte est son capital virtuel.");
   }
+  if (runtimeState.livePortfolioIdentity?.agentPortfolio?.resolutionSource === "FORCED_AGENT_CONTEXT_FROM_REAL_PNL") {
+    warnings.push("Métadonnées /agent-portfolios indisponibles : identité liée au token eToro et au PnL REAL validé. Le 403 de découverte reste advisory-only.");
+  }
   if (TRADING_MODE === "LIVE" && missingEnvironment.length > 0) {
     blockers.push(`Variables indispensables absentes : ${missingEnvironment.join(", ")}.`);
   } else if (missingEnvironment.length > 0) {
@@ -16029,7 +16096,9 @@ app.get("/agent-portfolio-status", requireSecret, async (req, res) => {
       portfolioContext,
       executionAttempted: false,
       explanation: portfolioContext?.kind === "AGENT_PORTFOLIO"
-        ? "Le solde proche de 10 000 USD est le capital virtuel du portefeuille-agent. L'investissement réel du copieur est proportionnel et n'est pas ce solde."
+        ? (portfolioContext.discoveryAdvisoryOnly
+            ? "Le token du portefeuille-agent accède correctement au PnL REAL. Le 403 éventuel sur /agent-portfolios est informatif seulement et ne bloque plus le trading; cet endpoint concerne la découverte par le compte propriétaire."
+            : "Le solde proche de 10 000 USD est le capital virtuel du portefeuille-agent. L'investissement réel du copieur est proportionnel et n'est pas ce solde.")
         : "Contexte compte eToro standard."
     });
   } catch (error) {
