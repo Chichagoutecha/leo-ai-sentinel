@@ -1,5 +1,5 @@
 /**
- * LEO-AI SENTINEL v10.18 — StrategyLab
+ * LEO-AI SENTINEL v10.21 — Data Integrity & Portfolio Identity Safety
  * - Prix explicitement issus de l'API publique eToro
  * - Gestion week-end / horaires réguliers du marché US
  * - Cryptomonnaies analysables 24/7
@@ -74,6 +74,12 @@
  * - ExperimentAgent : prépare BACKTEST, WALK_FORWARD et PAPER avec critères d’échec et de rollback
  * - Bibliothèque initiale issue des documents académiques transmis par l’utilisateur
  * - Aucune source, preuve ou hypothèse ne peut influencer directement le mode LIVE
+ * - Gouvernance mémoire proactive : cible Upstash inférieure à la limite dure, réduction prioritaire des historiques reconstructibles
+ * - Conservation prioritaire des intents, preuves d’exécution, cooldowns, high-water marks et stratégie active
+ * - Rapport des sections mémoire les plus volumineuses et endpoint /memory-maintenance
+ * - Sauvegarde/compactage immédiat au démarrage pour migrer proprement les anciennes mémoires
+ * - Anti-doublon temporel pour les déclencheurs automatiques internes et externes
+ * - Endpoint /auto-trading-check pour contrôler la chaîne décision → risque → intent → exécution
  * - DataQualityAgent : chronologie, doublons, OHLC, trous, prix futurs et valeurs aberrantes
  * - ScientificBacktestRegistry : holdout temporel, coûts réalistes, stress des coûts et traçabilité des essais
  * - Tous les backtests historiques passent par un audit de données avant simulation
@@ -90,17 +96,37 @@
  * - Aucun candidat StrategyLab ne peut appeler executeBuy/executeSell, être promu automatiquement ou modifier le LIVE
  * - Endpoints /strategy-lab-v2-status, /strategy-lab-compile, /strategy-lab-run,
  *   /strategy-lab-run-all, /strategy-lab-experiments et /strategy-lab-leaderboard
+ * - AntiOverfittingValidationAgent v10.19 : validation purgée, embargo et walk-forward non chevauchant
+ * - Probabilistic Sharpe Ratio et Deflated Sharpe Ratio avec correction du nombre d’essais
+ * - Estimation de durée minimale d’historique et risque de sélection multiple transparent
+ * - Couverture de régimes, robustesse aux coûts, stabilité des folds et rejet des champions fragiles
+ * - Statuts REJECTED, INCONCLUSIVE et ELIGIBLE_FOR_SHADOW; aucune promotion automatique
+ * - Endpoints /anti-overfitting-status, /anti-overfitting-validate, /anti-overfitting-validate-all,
+ *   /anti-overfitting-reports et /purged-walk-forward-protocol
+ * - v10.21 : validation persistante de l'identité du portefeuille REAL avant tout ordre LIVE
+ * - v10.21 : timestamps fournisseurs contrôlés à la source; une réponse HTTP fraîche ne suffit plus
+ * - v10.21 : consensus par cluster; aucune moyenne artificielle entre deux prix divergents
+ * - v10.21 : quarantaine fournisseur × actif et diagnostic des outliers seulement avec deux preuves concordantes
+ * - v10.21 : dimensionnement sans triple comptage des couches informationnelles corrélées
+ * - v10.21 : navigation dashboard par cookie HttpOnly afin de retirer BOT_SECRET des liens internes
  */
 
 const express = require("express");
 const OpenAI = require("openai");
 const cron = require("node-cron");
-const { randomUUID, createHash } = require("crypto");
+const { randomUUID, createHash, timingSafeEqual } = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
 const app = express();
 app.use(express.json());
+app.use((req, res, next) => {
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Cache-Control", "no-store");
+  next();
+});
 
 let openAIClient = null;
 
@@ -118,7 +144,7 @@ function getOpenAIClient() {
   return openAIClient;
 }
 
-const VERSION = "v10.18-strategy-lab";
+const VERSION = "v10.21.1-live-readiness-diagnostics";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
@@ -148,6 +174,29 @@ const LIVE_PORTFOLIO_PREFLIGHT_ENABLED =
 const LIVE_PORTFOLIO_MAX_AGE_SECONDS = Math.max(
   5,
   Math.min(300, Number(process.env.LIVE_PORTFOLIO_MAX_AGE_SECONDS || 45))
+);
+const LIVE_PORTFOLIO_IDENTITY_REQUIRED =
+  process.env.LIVE_PORTFOLIO_IDENTITY_REQUIRED !== "false";
+const ETORO_EXPECTED_PORTFOLIO_ID = String(
+  process.env.ETORO_EXPECTED_PORTFOLIO_ID || ""
+).trim();
+const EXPECTED_ACCOUNT_VALUE_RAW = String(process.env.ETORO_EXPECTED_ACCOUNT_VALUE_USD || "").trim();
+const ETORO_EXPECTED_ACCOUNT_VALUE_USD = EXPECTED_ACCOUNT_VALUE_RAW !== "" && Number.isFinite(Number(EXPECTED_ACCOUNT_VALUE_RAW))
+  ? Number(EXPECTED_ACCOUNT_VALUE_RAW)
+  : null;
+const LIVE_PORTFOLIO_VALUE_TOLERANCE_PCT = Math.max(
+  5,
+  Math.min(100, Number(process.env.LIVE_PORTFOLIO_VALUE_TOLERANCE_PCT || 35))
+);
+const LIVE_PORTFOLIO_VALUE_MIN_TOLERANCE_USD = Math.max(
+  10,
+  Number(process.env.LIVE_PORTFOLIO_VALUE_MIN_TOLERANCE_USD || 100)
+);
+const PORTFOLIO_IDENTITY_CONFIRMATION = "CONFIRM_REAL_PORTFOLIO";
+const BOT_AUTH_COOKIE_NAME = "leo_sentinel_auth";
+const BOT_AUTH_COOKIE_MAX_AGE_SECONDS = Math.max(
+  300,
+  Math.min(86400, Number(process.env.BOT_AUTH_COOKIE_MAX_AGE_SECONDS || 21600))
 );
 const LIVE_POST_TRADE_VERIFY_DELAY_MS = Math.max(
   0,
@@ -233,6 +282,18 @@ const PROVIDER_MAX_FAILURES = Math.max(
 const PROVIDER_QUARANTINE_MINUTES = Math.max(
   1,
   Number(process.env.PROVIDER_QUARANTINE_MINUTES || 15)
+);
+const PROVIDER_QUOTE_MAX_AGE_MINUTES = Math.max(
+  1,
+  Math.min(240, Number(process.env.PROVIDER_QUOTE_MAX_AGE_MINUTES || 30))
+);
+const PROVIDER_ASSET_MAX_FAILURES = Math.max(
+  1,
+  Number(process.env.PROVIDER_ASSET_MAX_FAILURES || 2)
+);
+const PROVIDER_ASSET_QUARANTINE_MINUTES = Math.max(
+  1,
+  Number(process.env.PROVIDER_ASSET_QUARANTINE_MINUTES || 30)
 );
 const HISTORICAL_MULTI_SOURCE_ENABLED =
   process.env.HISTORICAL_MULTI_SOURCE_ENABLED !== "false";
@@ -870,7 +931,7 @@ const SCIENTIFIC_BACKTEST_MIN_CLOSED_TRADES = Math.max(
 // v10.18 — StrategyLab fondé sur les hypothèses de la Research Knowledge Layer.
 // Cette couche reste strictement analytique, y compris lorsque le portefeuille est en mode LIVE.
 const STRATEGY_LAB_V2_ENABLED = process.env.STRATEGY_LAB_V2_ENABLED !== "false";
-const STRATEGY_LAB_V2_SCHEDULE_ENABLED = process.env.STRATEGY_LAB_V2_SCHEDULE_ENABLED === "true";
+const STRATEGY_LAB_V2_SCHEDULE_ENABLED = process.env.STRATEGY_LAB_V2_SCHEDULE_ENABLED !== "false";
 const STRATEGY_LAB_V2_CRON = process.env.STRATEGY_LAB_V2_CRON || "50 4 * * 0";
 const STRATEGY_LAB_V2_LIVE_ANALYSIS_ENABLED = process.env.STRATEGY_LAB_V2_LIVE_ANALYSIS_ENABLED !== "false";
 const STRATEGY_LAB_V2_DEFAULT_ASSETS = String(
@@ -946,6 +1007,71 @@ const STRATEGY_LAB_V2_FAMILIES = Object.freeze({
   QUANTUM_SANDBOX_PLACEHOLDER: "QUANTUM_SANDBOX_PLACEHOLDER"
 });
 
+
+// v10.19 — validation anti-surapprentissage. Cette couche est strictement analytique.
+const ANTI_OVERFITTING_ENABLED = process.env.ANTI_OVERFITTING_ENABLED !== "false";
+const ANTI_OVERFITTING_LIVE_ANALYSIS_ENABLED = process.env.ANTI_OVERFITTING_LIVE_ANALYSIS_ENABLED !== "false";
+const ANTI_OVERFITTING_MIN_OBSERVATIONS = Math.max(
+  60,
+  Math.min(5000, Number(process.env.ANTI_OVERFITTING_MIN_OBSERVATIONS || 180))
+);
+const ANTI_OVERFITTING_MIN_TRADES = Math.max(
+  1,
+  Math.min(250, Number(process.env.ANTI_OVERFITTING_MIN_TRADES || 8))
+);
+const ANTI_OVERFITTING_MIN_FOLDS = Math.max(
+  2,
+  Math.min(30, Number(process.env.ANTI_OVERFITTING_MIN_FOLDS || 4))
+);
+const ANTI_OVERFITTING_TRAIN_CANDLES = Math.max(
+  90,
+  Math.min(1000, Number(process.env.ANTI_OVERFITTING_TRAIN_CANDLES || 252))
+);
+const ANTI_OVERFITTING_TEST_CANDLES = Math.max(
+  20,
+  Math.min(300, Number(process.env.ANTI_OVERFITTING_TEST_CANDLES || 63))
+);
+const ANTI_OVERFITTING_EMBARGO_CANDLES = Math.max(
+  1,
+  Math.min(100, Number(process.env.ANTI_OVERFITTING_EMBARGO_CANDLES || SCIENTIFIC_BACKTEST_EMBARGO_CANDLES || 5))
+);
+const ANTI_OVERFITTING_MIN_POSITIVE_FOLDS_PCT = Math.max(
+  0,
+  Math.min(100, Number(process.env.ANTI_OVERFITTING_MIN_POSITIVE_FOLDS_PCT || 60))
+);
+const ANTI_OVERFITTING_MIN_DSR = Math.max(
+  0.5,
+  Math.min(0.9999, Number(process.env.ANTI_OVERFITTING_MIN_DSR || 0.95))
+);
+const ANTI_OVERFITTING_MAX_SELECTION_BIAS_RISK_PCT = Math.max(
+  1,
+  Math.min(95, Number(process.env.ANTI_OVERFITTING_MAX_SELECTION_BIAS_RISK_PCT || 35))
+);
+const ANTI_OVERFITTING_MAX_WORST_FOLD_LOSS_PCT = Math.max(
+  1,
+  Math.min(80, Number(process.env.ANTI_OVERFITTING_MAX_WORST_FOLD_LOSS_PCT || 15))
+);
+const ANTI_OVERFITTING_MIN_REGIMES = Math.max(
+  1,
+  Math.min(4, Number(process.env.ANTI_OVERFITTING_MIN_REGIMES || 2))
+);
+const ANTI_OVERFITTING_HISTORY_LIMIT = Math.max(
+  20,
+  Math.min(1000, Number(process.env.ANTI_OVERFITTING_HISTORY_LIMIT || 180))
+);
+const ANTI_OVERFITTING_BATCH_LIMIT = Math.max(
+  1,
+  Math.min(20, Number(process.env.ANTI_OVERFITTING_BATCH_LIMIT || 3))
+);
+const ANTI_OVERFITTING_RUN_CONFIRMATION = "RUN_ANTI_OVERFITTING_VALIDATION";
+const ANTI_OVERFITTING_BATCH_CONFIRMATION = "RUN_ANTI_OVERFITTING_BATCH";
+
+const ANTI_OVERFITTING_STATUS = Object.freeze({
+  REJECTED: "REJECTED",
+  INCONCLUSIVE: "INCONCLUSIVE",
+  ELIGIBLE_FOR_SHADOW: "ELIGIBLE_FOR_SHADOW"
+});
+
 const MIN_ORDER_USD = Number(process.env.MIN_ORDER_USD || 1);
 const MAX_CONSECUTIVE_FAILURES = Number(
   process.env.MAX_CONSECUTIVE_FAILURES || 3
@@ -977,25 +1103,45 @@ const UPSTASH_MAX_STATE_BYTES = Math.max(
 );
 const UPSTASH_PERSISTED_LOG_LIMIT = Math.max(
   5,
-  Math.min(100, Number(process.env.UPSTASH_PERSISTED_LOG_LIMIT || 25))
+  Math.min(100, Number(process.env.UPSTASH_PERSISTED_LOG_LIMIT || 20))
 );
 const UPSTASH_PERSISTED_AUDIT_LIMIT = Math.max(
   10,
-  Math.min(250, Number(process.env.UPSTASH_PERSISTED_AUDIT_LIMIT || 80))
+  Math.min(250, Number(process.env.UPSTASH_PERSISTED_AUDIT_LIMIT || 60))
 );
 const UPSTASH_PERSISTED_ARCHIVE_LIMIT = Math.max(
   25,
-  Math.min(500, Number(process.env.UPSTASH_PERSISTED_ARCHIVE_LIMIT || 150))
+  Math.min(500, Number(process.env.UPSTASH_PERSISTED_ARCHIVE_LIMIT || 90))
 );
 const UPSTASH_PERSISTED_PAPER_SNAPSHOTS = Math.max(
   25,
-  Math.min(750, Number(process.env.UPSTASH_PERSISTED_PAPER_SNAPSHOTS || 250))
+  Math.min(750, Number(process.env.UPSTASH_PERSISTED_PAPER_SNAPSHOTS || 160))
+);
+const UPSTASH_TARGET_STATE_PCT = Math.max(
+  50,
+  Math.min(85, Number(process.env.UPSTASH_TARGET_STATE_PCT || 68))
+);
+const UPSTASH_TARGET_STATE_BYTES = Math.max(
+  150000,
+  Math.min(UPSTASH_MAX_STATE_BYTES, Math.floor(UPSTASH_MAX_STATE_BYTES * UPSTASH_TARGET_STATE_PCT / 100))
+);
+const MEMORY_SECTION_REPORT_LIMIT = Math.max(
+  3,
+  Math.min(25, Number(process.env.MEMORY_SECTION_REPORT_LIMIT || 10))
+);
+const AUTO_SCAN_DEDUP_MINUTES = Math.max(
+  1,
+  Math.min(120, Number(process.env.AUTO_SCAN_DEDUP_MINUTES || 30))
+);
+const AUTO_WATCH_DEDUP_MINUTES = Math.max(
+  1,
+  Math.min(30, Number(process.env.AUTO_WATCH_DEDUP_MINUTES || 8))
 );
 
 const REQUIRE_FRESH_RATE_FOR_EXECUTION =
   process.env.REQUIRE_FRESH_RATE_FOR_EXECUTION !== "false";
 
-const MAX_ORDER_USD = 10;
+const MAX_ORDER_USD = Math.max(MIN_ORDER_USD, Number(process.env.MAX_ORDER_USD || 10));
 const MAX_OPEN_POSITIONS = 12;
 const TARGET_STARTER_POSITIONS = 8;
 
@@ -1032,7 +1178,7 @@ const AUTOMATION_LOG_DETAIL = ["compact", "full"].includes(
   : "compact";
 const MEMORY_WARNING_PCT = Math.max(
   50,
-  Math.min(95, Number(process.env.MEMORY_WARNING_PCT || 75))
+  Math.min(95, Number(process.env.MEMORY_WARNING_PCT || 72))
 );
 const MEMORY_CRITICAL_PCT = Math.max(
   MEMORY_WARNING_PCT + 1,
@@ -1453,6 +1599,14 @@ const ASSET_SEARCH_ALIASES = {
 const runtimeState = {
   scanRunning: false,
   watchRunning: false,
+  automationGuards: {
+    lastAutoScanStartedAt: null,
+    lastAutoScanCompletedAt: null,
+    lastAutoWatchStartedAt: null,
+    lastAutoWatchCompletedAt: null,
+    duplicateScansSkipped: 0,
+    duplicateWatchesSkipped: 0
+  },
   cooldownMemory: {},
   logs: [],
   lastDecision: null,
@@ -1464,6 +1618,7 @@ const runtimeState = {
   performanceHistory: [],
   performanceBaseline: null,
   lastPerformanceReport: null,
+  livePortfolioIdentity: null,
   riskSellHighWaterByAsset: {},
   riskSellHistory: [],
   lastRiskSellReport: null,
@@ -1503,6 +1658,11 @@ const runtimeState = {
   strategyLabV2Leaderboard: [],
   strategyLabV2Events: [],
   lastStrategyLabV2Run: null,
+  antiOverfittingRunning: false,
+  antiOverfittingReports: [],
+  antiOverfittingEvents: [],
+  antiOverfittingLeaderboard: [],
+  lastAntiOverfittingReport: null,
   lastFoundationAgents: null,
   lastAgentCouncil: null,
   agentCouncilHistory: [],
@@ -1534,7 +1694,7 @@ const runtimeState = {
 };
 
 const PROMPT = `
-Tu es LEO-AI SENTINEL v10.18, le StrategyCoordinator d'un conseil multi-agents quantitatif, fondamental, informationnel, multi-source et explicable.
+Tu es LEO-AI SENTINEL v10.21, le StrategyCoordinator d'un conseil multi-agents quantitatif, fondamental, informationnel, multi-source et explicable.
 
 MISSION :
 Construire et gérer progressivement un portefeuille diversifié, en protégeant le capital.
@@ -1933,7 +2093,8 @@ function compactLastMarketDataForPersistence(lastMarketData) {
 }
 
 function serializedByteLength(value) {
-  return Buffer.byteLength(JSON.stringify(value), "utf8");
+  const serialized = JSON.stringify(value);
+  return Buffer.byteLength(serialized === undefined ? "null" : serialized, "utf8");
 }
 
 function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
@@ -1942,6 +2103,7 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
       savedAt: nowIso(),
       version: VERSION,
       persistenceMode: "FULL_LOCAL_STATE",
+      automationGuards: runtimeState.automationGuards || {},
       cooldownMemory: runtimeState.cooldownMemory || {},
       logs: (runtimeState.logs || []).slice(0, MAX_LOGS),
       lastDecision: runtimeState.lastDecision || null,
@@ -1952,6 +2114,7 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
       performanceHistory: (runtimeState.performanceHistory || []).slice(-PERFORMANCE_HISTORY_LIMIT),
       performanceBaseline: runtimeState.performanceBaseline || null,
       lastPerformanceReport: runtimeState.lastPerformanceReport || null,
+      livePortfolioIdentity: runtimeState.livePortfolioIdentity || null,
       riskSellHighWaterByAsset: runtimeState.riskSellHighWaterByAsset || {},
       riskSellHistory: (runtimeState.riskSellHistory || []).slice(0, RISK_SELL_HISTORY_LIMIT),
       lastRiskSellReport: runtimeState.lastRiskSellReport || null,
@@ -1990,6 +2153,10 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
       strategyLabV2Leaderboard: (runtimeState.strategyLabV2Leaderboard || []).slice(0, STRATEGY_LAB_V2_LEADERBOARD_LIMIT),
       strategyLabV2Events: (runtimeState.strategyLabV2Events || []).slice(0, STRATEGY_LAB_V2_HISTORY_LIMIT),
       lastStrategyLabV2Run: runtimeState.lastStrategyLabV2Run || null,
+      antiOverfittingReports: (runtimeState.antiOverfittingReports || []).slice(0, ANTI_OVERFITTING_HISTORY_LIMIT),
+      antiOverfittingEvents: (runtimeState.antiOverfittingEvents || []).slice(0, ANTI_OVERFITTING_HISTORY_LIMIT),
+      antiOverfittingLeaderboard: (runtimeState.antiOverfittingLeaderboard || []).slice(0, ANTI_OVERFITTING_HISTORY_LIMIT),
+      lastAntiOverfittingReport: runtimeState.lastAntiOverfittingReport || null,
       lastFoundationAgents: runtimeState.lastFoundationAgents || null,
       lastAgentCouncil: runtimeState.lastAgentCouncil || null,
       agentCouncilHistory: (runtimeState.agentCouncilHistory || []).slice(0, COUNCIL_HISTORY_LIMIT),
@@ -2021,7 +2188,8 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
   return {
     savedAt: nowIso(),
     version: VERSION,
-    persistenceMode: "UPSTASH_COMPACT_V1",
+    persistenceMode: "UPSTASH_COMPACT_V2_PROACTIVE",
+    automationGuards: runtimeState.automationGuards || {},
     cooldownMemory: runtimeState.cooldownMemory || {},
     logs: (runtimeState.logs || [])
       .slice(0, UPSTASH_PERSISTED_LOG_LIMIT)
@@ -2035,6 +2203,7 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
     performanceHistory: (runtimeState.performanceHistory || []).slice(-Math.min(365, PERFORMANCE_HISTORY_LIMIT)),
     performanceBaseline: runtimeState.performanceBaseline || null,
     lastPerformanceReport: runtimeState.lastPerformanceReport || null,
+    livePortfolioIdentity: runtimeState.livePortfolioIdentity || null,
     riskSellHighWaterByAsset: runtimeState.riskSellHighWaterByAsset || {},
     riskSellHistory: (runtimeState.riskSellHistory || []).slice(0, Math.min(80, RISK_SELL_HISTORY_LIMIT)),
     lastRiskSellReport: runtimeState.lastRiskSellReport || null,
@@ -2068,6 +2237,10 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
     strategyLabV2Leaderboard: (runtimeState.strategyLabV2Leaderboard || []).slice(0, Math.min(60, STRATEGY_LAB_V2_LEADERBOARD_LIMIT)),
     strategyLabV2Events: (runtimeState.strategyLabV2Events || []).slice(0, Math.min(50, STRATEGY_LAB_V2_HISTORY_LIMIT)),
     lastStrategyLabV2Run: runtimeState.lastStrategyLabV2Run || null,
+    antiOverfittingReports: (runtimeState.antiOverfittingReports || []).slice(0, Math.min(40, ANTI_OVERFITTING_HISTORY_LIMIT)),
+    antiOverfittingEvents: (runtimeState.antiOverfittingEvents || []).slice(0, Math.min(40, ANTI_OVERFITTING_HISTORY_LIMIT)),
+    antiOverfittingLeaderboard: (runtimeState.antiOverfittingLeaderboard || []).slice(0, Math.min(50, ANTI_OVERFITTING_HISTORY_LIMIT)),
+    lastAntiOverfittingReport: runtimeState.lastAntiOverfittingReport || null,
     agentCouncilHistory: (runtimeState.agentCouncilHistory || []).slice(0, Math.min(80, COUNCIL_HISTORY_LIMIT)),
     backtestHistory: (runtimeState.backtestHistory || []).slice(0, 30),
     lastBacktest: compactBacktestResult(runtimeState.lastBacktest),
@@ -2090,97 +2263,170 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
   };
 }
 
-function fitPersistentStateToBudget(state, maxBytes = UPSTASH_MAX_STATE_BYTES) {
+function persistentSectionSizes(state, limit = MEMORY_SECTION_REPORT_LIMIT) {
+  if (!state || typeof state !== "object") return [];
+  return Object.entries(state)
+    .map(([section, value]) => ({ section, bytes: serializedByteLength(value) }))
+    .sort((a, b) => b.bytes - a.bytes)
+    .slice(0, Math.max(1, limit));
+}
+
+function compactOrderIntentsForPersistence(orderIntents) {
+  const entries = Object.entries(orderIntents || {});
+  const active = entries.filter(([, intent]) => isActiveExecutionStatus(intent?.status));
+  const terminal = entries
+    .filter(([, intent]) => !isActiveExecutionStatus(intent?.status))
+    .sort((a, b) => String(b[1]?.updatedAt || b[1]?.createdAt || "").localeCompare(String(a[1]?.updatedAt || a[1]?.createdAt || "")))
+    .slice(0, 60);
+  return Object.fromEntries([...active, ...terminal]);
+}
+
+function fitPersistentStateToBudget(
+  state,
+  targetBytes = UPSTASH_TARGET_STATE_BYTES,
+  hardMaxBytes = UPSTASH_MAX_STATE_BYTES
+) {
   const working = JSON.parse(JSON.stringify(state));
   const initialBytes = serializedByteLength(working);
+  const initialLargestSections = persistentSectionSizes(working);
+  const safeHardMax = Math.max(150000, Number(hardMaxBytes || UPSTASH_MAX_STATE_BYTES));
+  const safeTarget = Math.max(150000, Math.min(safeHardMax, Number(targetBytes || safeHardMax)));
   const reductions = [];
 
-  const reduceArray = (key, minimum) => {
+  if (working.orderIntents && typeof working.orderIntents === "object") {
+    const before = Object.keys(working.orderIntents).length;
+    working.orderIntents = compactOrderIntentsForPersistence(working.orderIntents);
+    const after = Object.keys(working.orderIntents).length;
+    if (after < before) reductions.push(`orderIntents:${before}->${after}`);
+  }
+
+  const reduceArray = (key, minimum, keepNewestAtEnd = false) => {
     if (!Array.isArray(working[key]) || working[key].length <= minimum) return false;
     const nextLength = Math.max(minimum, Math.ceil(working[key].length / 2));
-    working[key] = key === "equityHistory" || key === "performanceHistory" || key === "paperPerformanceHistory" || key === "pointInTimeArchive"
-      ? working[key].slice(-nextLength)
-      : working[key].slice(0, nextLength);
+    working[key] = keepNewestAtEnd ? working[key].slice(-nextLength) : working[key].slice(0, nextLength);
     reductions.push(`${key}:${nextLength}`);
     return true;
   };
 
+  const reduceObjectEntries = (key, minimum) => {
+    const value = working[key];
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const entries = Object.entries(value);
+    if (entries.length <= minimum) return false;
+    const nextLength = Math.max(minimum, Math.ceil(entries.length / 2));
+    working[key] = Object.fromEntries(entries.slice(0, nextLength));
+    reductions.push(`${key}:${entries.length}->${nextLength}`);
+    return true;
+  };
+
+  const reduceTrendPoints = (minimumPoints = 8) => {
+    if (!working.trendMemory || typeof working.trendMemory !== "object") return false;
+    let changed = false;
+    for (const [asset, points] of Object.entries(working.trendMemory)) {
+      if (!Array.isArray(points) || points.length <= minimumPoints) continue;
+      const nextLength = Math.max(minimumPoints, Math.ceil(points.length / 2));
+      working.trendMemory[asset] = points.slice(-nextLength);
+      changed = true;
+    }
+    if (changed) reductions.push(`trendMemory:points-reduced`);
+    return changed;
+  };
+
   let guard = 0;
-  while (serializedByteLength(working) > maxBytes && guard < 20) {
+  while (serializedByteLength(working) > safeTarget && guard < 30) {
     guard += 1;
     let changed = false;
-    changed = reduceArray("pointInTimeArchive", 10) || changed;
-    changed = reduceArray("paperPerformanceHistory", 25) || changed;
-    changed = reduceArray("logs", 5) || changed;
-    changed = reduceArray("auditTrail", 10) || changed;
-    changed = reduceArray("agentCouncilHistory", 10) || changed;
-    changed = reduceArray("equityHistory", 50) || changed;
-    changed = reduceArray("performanceHistory", 30) || changed;
-    changed = reduceArray("riskSellHistory", 20) || changed;
-    changed = reduceArray("macroCreditRegimeHistory", 20) || changed;
-    changed = reduceArray("backtestHistory", 5) || changed;
+
+    // Données reconstructibles / analytiques en premier.
+    changed = reduceArray("pointInTimeArchive", 20, true) || changed;
+    changed = reduceArray("paperPerformanceHistory", 40, true) || changed;
+    changed = reduceArray("agentCouncilHistory", 20) || changed;
+    changed = reduceArray("strategyLabV2Events", 10) || changed;
+    changed = reduceArray("strategyLabV2Runs", 5) || changed;
+    changed = reduceArray("strategyLabV2Experiments", 5) || changed;
+    changed = reduceArray("strategyLabV2Leaderboard", 10) || changed;
+    changed = reduceArray("antiOverfittingEvents", 10) || changed;
+    changed = reduceArray("antiOverfittingReports", 5) || changed;
+    changed = reduceArray("antiOverfittingLeaderboard", 10) || changed;
+    changed = reduceArray("scientificBacktestRegistry", 10) || changed;
+    changed = reduceArray("dataQualityHistory", 10) || changed;
     changed = reduceArray("researchEvents", 10) || changed;
     changed = reduceArray("researchExperiments", 10) || changed;
     changed = reduceArray("researchHypotheses", 10) || changed;
     changed = reduceArray("researchEvidence", 20) || changed;
     changed = reduceArray("researchSources", 20) || changed;
-    changed = reduceArray("dataQualityHistory", 10) || changed;
-    changed = reduceArray("scientificBacktestRegistry", 10) || changed;
-    changed = reduceArray("strategyLabV2Events", 10) || changed;
-    changed = reduceArray("strategyLabV2Runs", 5) || changed;
-    changed = reduceArray("strategyLabV2Experiments", 5) || changed;
-    changed = reduceArray("strategyLabV2Leaderboard", 10) || changed;
+    changed = reduceArray("backtestHistory", 5) || changed;
     changed = reduceArray("strategyCandidates", 5) || changed;
     changed = reduceArray("improvementHistory", 5) || changed;
-    changed = reduceArray("executionVerificationHistory", 10) || changed;
-    if (working.paperPortfolio?.snapshots?.length > 25) {
-      working.paperPortfolio.snapshots = working.paperPortfolio.snapshots.slice(-Math.max(25, Math.ceil(working.paperPortfolio.snapshots.length / 2)));
-      reductions.push(`paperPortfolio.snapshots:${working.paperPortfolio.snapshots.length}`);
+    changed = reduceArray("macroCreditRegimeHistory", 20, true) || changed;
+    changed = reduceArray("riskSellHistory", 20) || changed;
+    changed = reduceArray("performanceHistory", 40, true) || changed;
+    changed = reduceArray("equityHistory", 80, true) || changed;
+    changed = reduceArray("logs", 8) || changed;
+    changed = reduceArray("auditTrail", 20) || changed;
+    changed = reduceArray("executionVerificationHistory", 20) || changed;
+    changed = reduceObjectEntries("dataQualityBySeries", 12) || changed;
+    changed = reduceTrendPoints(8) || changed;
+
+    if (working.paperPortfolio?.snapshots?.length > 40) {
+      const nextLength = Math.max(40, Math.ceil(working.paperPortfolio.snapshots.length / 2));
+      working.paperPortfolio.snapshots = working.paperPortfolio.snapshots.slice(-nextLength);
+      reductions.push(`paperPortfolio.snapshots:${nextLength}`);
       changed = true;
     }
+    if (working.paperPortfolio?.orders?.length > 80) {
+      const nextLength = Math.max(80, Math.ceil(working.paperPortfolio.orders.length / 2));
+      working.paperPortfolio.orders = working.paperPortfolio.orders.slice(0, nextLength);
+      reductions.push(`paperPortfolio.orders:${nextLength}`);
+      changed = true;
+    }
+    if (working.paperPortfolio?.closedTrades?.length > 80) {
+      const nextLength = Math.max(80, Math.ceil(working.paperPortfolio.closedTrades.length / 2));
+      working.paperPortfolio.closedTrades = working.paperPortfolio.closedTrades.slice(0, nextLength);
+      reductions.push(`paperPortfolio.closedTrades:${nextLength}`);
+      changed = true;
+    }
+
     if (!changed) break;
   }
 
-  if (serializedByteLength(working) > maxBytes) {
+  // Les preuves d’exécution, intents actifs, cooldowns, high-water marks et stratégie active
+  // ne sont jamais supprimés par la compaction normale.
+  if (serializedByteLength(working) > safeHardMax) {
     reductions.push("critical-fallback");
     const critical = {
       savedAt: working.savedAt,
       version: working.version,
-      persistenceMode: "UPSTASH_CRITICAL_MINIMAL_V1",
+      persistenceMode: "UPSTASH_CRITICAL_MINIMAL_V2",
+      automationGuards: working.automationGuards || {},
       cooldownMemory: working.cooldownMemory || {},
       lastDecision: working.lastDecision || null,
       lastWatch: working.lastWatch || null,
-      executionHistory: (working.executionHistory || []).slice(0, 20),
+      executionHistory: (working.executionHistory || []).slice(0, 30),
+      orderIntents: compactOrderIntentsForPersistence(working.orderIntents),
+      executionVerificationHistory: (working.executionVerificationHistory || []).slice(0, 30),
+      lastExecutionVerification: working.lastExecutionVerification || null,
+      lastExecutionReconciliation: working.lastExecutionReconciliation || null,
       trendMemory: working.trendMemory || {},
-      equityHistory: (working.equityHistory || []).slice(-100),
-      performanceHistory: (working.performanceHistory || []).slice(-50),
+      equityHistory: (working.equityHistory || []).slice(-120),
+      performanceHistory: (working.performanceHistory || []).slice(-60),
       performanceBaseline: working.performanceBaseline || null,
       lastPerformanceReport: working.lastPerformanceReport || null,
       riskSellHighWaterByAsset: working.riskSellHighWaterByAsset || {},
-      riskSellHistory: (working.riskSellHistory || []).slice(0, 20),
+      riskSellHistory: (working.riskSellHistory || []).slice(0, 25),
       lastRiskSellReport: working.lastRiskSellReport || null,
-      macroCreditRegimeHistory: (working.macroCreditRegimeHistory || []).slice(-20),
+      macroCreditRegimeHistory: (working.macroCreditRegimeHistory || []).slice(-25),
       lastMacroCreditRegime: working.lastMacroCreditRegime || null,
       researchSources: (working.researchSources || []).slice(0, 20),
       researchEvidence: (working.researchEvidence || []).slice(0, 20),
       researchHypotheses: (working.researchHypotheses || []).slice(0, 10),
-      researchExperiments: (working.researchExperiments || []).slice(0, 10),
-      researchEvents: (working.researchEvents || []).slice(0, 10),
-      lastResearchReport: working.lastResearchReport || null,
       dataQualityHistory: (working.dataQualityHistory || []).slice(0, 10),
-      dataQualityBySeries: working.dataQualityBySeries || {},
-      lastDataQualityReport: working.lastDataQualityReport || null,
       scientificBacktestRegistry: (working.scientificBacktestRegistry || []).slice(0, 10),
-      lastScientificBacktestReport: working.lastScientificBacktestReport || null,
-      strategyLabV2Experiments: (working.strategyLabV2Experiments || []).slice(0, 5),
       strategyLabV2Runs: (working.strategyLabV2Runs || []).slice(0, 5),
       strategyLabV2Leaderboard: (working.strategyLabV2Leaderboard || []).slice(0, 10),
-      strategyLabV2Events: (working.strategyLabV2Events || []).slice(0, 10),
-      lastStrategyLabV2Run: working.lastStrategyLabV2Run || null,
-      orderIntents: working.orderIntents || {},
-      executionVerificationHistory: (working.executionVerificationHistory || []).slice(0, 20),
-      lastExecutionVerification: working.lastExecutionVerification || null,
-      lastExecutionReconciliation: working.lastExecutionReconciliation || null,
+      antiOverfittingReports: (working.antiOverfittingReports || []).slice(0, 5),
+      antiOverfittingLeaderboard: (working.antiOverfittingLeaderboard || []).slice(0, 10),
+      lastAntiOverfittingReport: working.lastAntiOverfittingReport || null,
       paperPortfolio: working.paperPortfolio ? {
         ...working.paperPortfolio,
         orders: (working.paperPortfolio.orders || []).slice(0, 50),
@@ -2196,21 +2442,38 @@ function fitPersistentStateToBudget(state, maxBytes = UPSTASH_MAX_STATE_BYTES) {
       state: critical,
       initialBytes,
       finalBytes: serializedByteLength(critical),
-      reductions
+      targetBytes: safeTarget,
+      hardMaxBytes: safeHardMax,
+      targetReached: serializedByteLength(critical) <= safeTarget,
+      reductions,
+      initialLargestSections,
+      finalLargestSections: persistentSectionSizes(critical)
     };
   }
 
+  const finalBytes = serializedByteLength(working);
   return {
     state: working,
     initialBytes,
-    finalBytes: serializedByteLength(working),
-    reductions
+    finalBytes,
+    targetBytes: safeTarget,
+    hardMaxBytes: safeHardMax,
+    targetReached: finalBytes <= safeTarget,
+    reductions,
+    initialLargestSections,
+    finalLargestSections: persistentSectionSizes(working)
   };
 }
 
 function applyPersistentState(state) {
   if (!state || typeof state !== "object") return false;
 
+  if (state.automationGuards && typeof state.automationGuards === "object") {
+    runtimeState.automationGuards = {
+      ...runtimeState.automationGuards,
+      ...state.automationGuards
+    };
+  }
   if (state.cooldownMemory && typeof state.cooldownMemory === "object") {
     runtimeState.cooldownMemory = state.cooldownMemory;
   }
@@ -2251,6 +2514,9 @@ function applyPersistentState(state) {
   }
   if (state.lastPerformanceReport && typeof state.lastPerformanceReport === "object") {
     runtimeState.lastPerformanceReport = state.lastPerformanceReport;
+  }
+  if (state.livePortfolioIdentity && typeof state.livePortfolioIdentity === "object") {
+    runtimeState.livePortfolioIdentity = state.livePortfolioIdentity;
   }
   if (state.riskSellHighWaterByAsset && typeof state.riskSellHighWaterByAsset === "object") {
     runtimeState.riskSellHighWaterByAsset = state.riskSellHighWaterByAsset;
@@ -2333,6 +2599,10 @@ function applyPersistentState(state) {
   if (Array.isArray(state.strategyLabV2Leaderboard)) runtimeState.strategyLabV2Leaderboard = state.strategyLabV2Leaderboard.slice(0, STRATEGY_LAB_V2_LEADERBOARD_LIMIT);
   if (Array.isArray(state.strategyLabV2Events)) runtimeState.strategyLabV2Events = state.strategyLabV2Events.slice(0, STRATEGY_LAB_V2_HISTORY_LIMIT);
   if (state.lastStrategyLabV2Run && typeof state.lastStrategyLabV2Run === "object") runtimeState.lastStrategyLabV2Run = state.lastStrategyLabV2Run;
+  if (Array.isArray(state.antiOverfittingReports)) runtimeState.antiOverfittingReports = state.antiOverfittingReports.slice(0, ANTI_OVERFITTING_HISTORY_LIMIT);
+  if (Array.isArray(state.antiOverfittingEvents)) runtimeState.antiOverfittingEvents = state.antiOverfittingEvents.slice(0, ANTI_OVERFITTING_HISTORY_LIMIT);
+  if (Array.isArray(state.antiOverfittingLeaderboard)) runtimeState.antiOverfittingLeaderboard = state.antiOverfittingLeaderboard.slice(0, ANTI_OVERFITTING_HISTORY_LIMIT);
+  if (state.lastAntiOverfittingReport && typeof state.lastAntiOverfittingReport === "object") runtimeState.lastAntiOverfittingReport = state.lastAntiOverfittingReport;
   if (state.lastFoundationAgents) runtimeState.lastFoundationAgents = state.lastFoundationAgents;
   if (state.lastAgentCouncil && typeof state.lastAgentCouncil === "object") {
     runtimeState.lastAgentCouncil = state.lastAgentCouncil;
@@ -2416,22 +2686,36 @@ async function savePersistentState() {
     let state = buildPersistentState({ compact: hasUpstashMemory() });
 
     if (hasUpstashMemory()) {
-      const fitted = fitPersistentStateToBudget(state, UPSTASH_MAX_STATE_BYTES);
+      const fitted = fitPersistentStateToBudget(
+        state,
+        UPSTASH_TARGET_STATE_BYTES,
+        UPSTASH_MAX_STATE_BYTES
+      );
       state = fitted.state;
       lastMemoryCompaction = {
-        mode: state.persistenceMode || "UPSTASH_COMPACT_V1",
+        mode: state.persistenceMode || "UPSTASH_COMPACT_V2_PROACTIVE",
         initialBytes: fitted.initialBytes,
         finalBytes: fitted.finalBytes,
+        targetBytes: fitted.targetBytes,
+        targetPct: UPSTASH_TARGET_STATE_PCT,
+        targetReached: fitted.targetReached,
         maxBytes: UPSTASH_MAX_STATE_BYTES,
-        reductions: fitted.reductions
+        reductions: fitted.reductions,
+        initialLargestSections: fitted.initialLargestSections,
+        finalLargestSections: fitted.finalLargestSections
       };
     } else {
       lastMemoryCompaction = {
         mode: state.persistenceMode || "FULL_LOCAL_STATE",
         initialBytes: serializedByteLength(state),
         finalBytes: serializedByteLength(state),
+        targetBytes: null,
+        targetPct: null,
+        targetReached: true,
         maxBytes: null,
-        reductions: []
+        reductions: [],
+        initialLargestSections: persistentSectionSizes(state),
+        finalLargestSections: persistentSectionSizes(state)
       };
     }
 
@@ -2498,11 +2782,15 @@ function memoryStatus() {
     last_save: lastMemorySave,
     last_save_bytes: lastMemorySaveBytes,
     upstash_max_state_bytes: maxBytes,
+    upstash_target_state_bytes: hasUpstashMemory() ? UPSTASH_TARGET_STATE_BYTES : null,
+    upstash_target_state_pct: hasUpstashMemory() ? UPSTASH_TARGET_STATE_PCT : null,
     memory_usage_pct: usagePct,
     memory_pressure: pressure,
     memory_warning_pct: MEMORY_WARNING_PCT,
     memory_critical_pct: MEMORY_CRITICAL_PCT,
     compaction: lastMemoryCompaction,
+    largest_persisted_sections: lastMemoryCompaction?.finalLargestSections || [],
+    automation_guards: runtimeState.automationGuards,
     last_error: lastMemoryError,
     logs_count: runtimeState.logs.length,
     audit_count: runtimeState.auditTrail.length,
@@ -2513,6 +2801,10 @@ function memoryStatus() {
     strategy_lab_v2_leaderboard_count: runtimeState.strategyLabV2Leaderboard.length,
     strategy_lab_v2_running: Boolean(runtimeState.strategyLabV2Running),
     last_strategy_lab_v2_run: runtimeState.lastStrategyLabV2Run?.generatedAt || null,
+    anti_overfitting_reports_count: runtimeState.antiOverfittingReports.length,
+    anti_overfitting_leaderboard_count: runtimeState.antiOverfittingLeaderboard.length,
+    anti_overfitting_running: Boolean(runtimeState.antiOverfittingRunning),
+    last_anti_overfitting_report: runtimeState.lastAntiOverfittingReport?.generatedAt || null,
     trend_assets_count: Object.keys(runtimeState.trendMemory || {}).length,
     technical_cache_entries: Object.keys(runtimeState.technicalCache || {}).length,
     historical_cache_entries: Object.keys(runtimeState.historicalCache || {}).length,
@@ -2594,7 +2886,13 @@ function schedulerStatus() {
       ? STRATEGY_LAB_V2_CRON
       : null,
     automationLogDetail: AUTOMATION_LOG_DETAIL,
-    note: "Si cron-job.org appelle /watch et /scan, désactive les crons internes correspondants pour éviter les doublons."
+    duplicateProtection: {
+      enabled: true,
+      automaticScanWindowMinutes: AUTO_SCAN_DEDUP_MINUTES,
+      automaticWatchWindowMinutes: AUTO_WATCH_DEDUP_MINUTES,
+      guards: runtimeState.automationGuards
+    },
+    note: "La protection temporelle bloque les doublons rapprochés, mais il reste préférable de n'utiliser qu'un seul système de cron."
   };
 }
 
@@ -2610,8 +2908,12 @@ function compactMemoryStatus() {
     last_save: memory.last_save,
     last_save_bytes: memory.last_save_bytes,
     max_bytes: memory.upstash_max_state_bytes,
+    target_bytes: memory.upstash_target_state_bytes,
+    target_pct: memory.upstash_target_state_pct,
     usage_pct: memory.memory_usage_pct,
     pressure: memory.memory_pressure,
+    reductions: memory.compaction?.reductions || [],
+    target_reached: memory.compaction?.targetReached ?? null,
     last_error: memory.last_error,
     execution_history_count: memory.execution_history_count,
     order_intents_count: memory.order_intents_count,
@@ -2826,6 +3128,41 @@ function getExecutionStats24h() {
   };
 }
 
+function parseCookies(headerValue) {
+  return String(headerValue || "")
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .reduce((acc, part) => {
+      const index = part.indexOf("=");
+      if (index <= 0) return acc;
+      const key = decodeURIComponent(part.slice(0, index));
+      const value = decodeURIComponent(part.slice(index + 1));
+      acc[key] = value;
+      return acc;
+    }, {});
+}
+
+function safeSecretEqual(left, right) {
+  const a = Buffer.from(String(left || ""));
+  const b = Buffer.from(String(right || ""));
+  if (a.length !== b.length || a.length === 0) return false;
+  return timingSafeEqual(a, b);
+}
+
+function setBotAuthCookie(req, res) {
+  const secure = String(req.headers["x-forwarded-proto"] || req.protocol || "").toLowerCase() === "https";
+  const parts = [
+    `${BOT_AUTH_COOKIE_NAME}=${encodeURIComponent(BOT_SECRET)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Strict",
+    `Max-Age=${BOT_AUTH_COOKIE_MAX_AGE_SECONDS}`
+  ];
+  if (secure) parts.push("Secure");
+  res.setHeader("Set-Cookie", parts.join("; "));
+}
+
 function requireSecret(req, res, next) {
   if (!BOT_SECRET) {
     return res.status(500).json({
@@ -2834,15 +3171,17 @@ function requireSecret(req, res, next) {
     });
   }
 
-  const providedSecret = req.query.secret || req.headers["x-bot-secret"];
+  const cookies = parseCookies(req.headers.cookie);
+  const providedSecret = req.query.secret || req.headers["x-bot-secret"] || cookies[BOT_AUTH_COOKIE_NAME];
 
-  if (providedSecret !== BOT_SECRET) {
+  if (!safeSecretEqual(providedSecret, BOT_SECRET)) {
     return res.status(401).json({
       error: "Accès refusé",
-      hint: "Ajoute ?secret=TON_SECRET à l'URL."
+      hint: "Ouvre une fois le dashboard avec ?secret=TON_SECRET; un cookie sécurisé prendra ensuite le relais."
     });
   }
 
+  if (req.query.secret || req.headers["x-bot-secret"]) setBotAuthCookie(req, res);
   next();
 }
 
@@ -2986,6 +3325,112 @@ function validatePortfolioResponse(portfolioResponse, { requireReal = false } = 
   };
 }
 
+function extractPortfolioIdentifier(portfolioResponse) {
+  const root = portfolioResponse?.data || {};
+  const client = root?.clientPortfolio || {};
+  const candidates = [
+    client.portfolioId,
+    client.portfolioID,
+    client.clientPortfolioId,
+    client.clientPortfolioID,
+    client.accountId,
+    client.accountID,
+    root.portfolioId,
+    root.portfolioID,
+    root.accountId,
+    root.accountID
+  ].filter((value) => value !== undefined && value !== null && String(value).trim() !== "");
+  return candidates.length ? String(candidates[0]).trim() : null;
+}
+
+function buildLivePortfolioIdentitySnapshot(portfolioResponse, summary) {
+  const portfolioId = extractPortfolioIdentifier(portfolioResponse);
+  const environment = String(portfolioResponse?.accountEnvironment || "UNKNOWN").toUpperCase();
+  const totalValueUsd = Number(summary?.totalTrackedValue);
+  const openInstrumentIds = (summary?.openPositions || [])
+    .map((item) => Number(item.instrumentId))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+  const signature = createHash("sha256")
+    .update(JSON.stringify({ environment, portfolioId: portfolioId || null }))
+    .digest("hex");
+  return {
+    confirmedAt: nowIso(),
+    environment,
+    endpoint: portfolioResponse?.endpoint || null,
+    portfolioId,
+    totalValueUsd: Number.isFinite(totalValueUsd) ? roundNumber(totalValueUsd, 4) : null,
+    availableCashUsd: Number.isFinite(Number(summary?.availableCash)) ? roundNumber(Number(summary.availableCash), 4) : null,
+    positionsCount: Number(summary?.uniquePositionsCount || 0),
+    openInstrumentIds,
+    signature
+  };
+}
+
+function validateLivePortfolioIdentity(portfolioResponse, summary, { allowUnconfirmed = false } = {}) {
+  if (!LIVE_TRADING_ENABLED || !LIVE_PORTFOLIO_IDENTITY_REQUIRED) {
+    return { ok: true, status: "NOT_REQUIRED", reasons: [], expected: null, current: null };
+  }
+  const current = buildLivePortfolioIdentitySnapshot(portfolioResponse, summary);
+  const stored = runtimeState.livePortfolioIdentity;
+  const expectedId = ETORO_EXPECTED_PORTFOLIO_ID || stored?.portfolioId || null;
+  const expectedValue = Number.isFinite(ETORO_EXPECTED_ACCOUNT_VALUE_USD)
+    ? ETORO_EXPECTED_ACCOUNT_VALUE_USD
+    : (Number.isFinite(Number(stored?.totalValueUsd)) ? Number(stored.totalValueUsd) : null);
+  const reasons = [];
+
+  if (!stored && !ETORO_EXPECTED_PORTFOLIO_ID && !Number.isFinite(ETORO_EXPECTED_ACCOUNT_VALUE_USD)) {
+    reasons.push("PORTFOLIO_IDENTITY_UNCONFIRMED");
+  }
+  if (expectedId && current.portfolioId !== expectedId) {
+    reasons.push(`PORTFOLIO_ID_MISMATCH:${current.portfolioId || "MISSING"}`);
+  }
+  if (stored?.environment && current.environment !== stored.environment) {
+    reasons.push(`PORTFOLIO_ENVIRONMENT_MISMATCH:${current.environment}`);
+  }
+  if (stored?.signature && current.signature !== stored.signature && (stored.portfolioId || current.portfolioId)) {
+    reasons.push("PORTFOLIO_SIGNATURE_MISMATCH");
+  }
+  if (Number.isFinite(expectedValue) && Number.isFinite(Number(current.totalValueUsd))) {
+    const toleranceUsd = Math.max(
+      LIVE_PORTFOLIO_VALUE_MIN_TOLERANCE_USD,
+      Math.abs(expectedValue) * LIVE_PORTFOLIO_VALUE_TOLERANCE_PCT / 100
+    );
+    if (Math.abs(Number(current.totalValueUsd) - expectedValue) > toleranceUsd) {
+      reasons.push(`PORTFOLIO_VALUE_MISMATCH:${current.totalValueUsd}_VS_${roundNumber(expectedValue, 4)}`);
+    }
+  }
+
+  const ok = reasons.length === 0 || (allowUnconfirmed && reasons.every((reason) => reason === "PORTFOLIO_IDENTITY_UNCONFIRMED"));
+  return {
+    ok,
+    status: reasons.length === 0 ? "CONFIRMED" : (reasons.includes("PORTFOLIO_IDENTITY_UNCONFIRMED") ? "UNCONFIRMED" : "MISMATCH"),
+    reasons,
+    expected: {
+      portfolioId: expectedId,
+      totalValueUsd: Number.isFinite(expectedValue) ? roundNumber(expectedValue, 4) : null,
+      tolerancePct: LIVE_PORTFOLIO_VALUE_TOLERANCE_PCT,
+      minimumToleranceUsd: LIVE_PORTFOLIO_VALUE_MIN_TOLERANCE_USD
+    },
+    current
+  };
+}
+
+async function confirmLivePortfolioIdentity() {
+  const portfolio = await getPortfolio({ environment: "REAL" });
+  const validation = validatePortfolioResponse(portfolio, { requireReal: true });
+  if (!validation.ok) {
+    throw new Error(`Portefeuille REAL non vérifiable: ${validation.errors.join(", ")}`);
+  }
+  const summary = extractPortfolioSummary(portfolio);
+  const snapshot = buildLivePortfolioIdentitySnapshot(portfolio, summary);
+  runtimeState.livePortfolioIdentity = snapshot;
+  summary.livePortfolioIdentity = validateLivePortfolioIdentity(portfolio, summary);
+  addAudit("LIVE_PORTFOLIO_IDENTITY_CONFIRMED", snapshot);
+  await flushPersistentState();
+  return { portfolio, summary, snapshot };
+}
+
 async function getPortfolio(options = {}) {
   const requestedEnvironment = String(options.environment || ETORO_ACCOUNT_ENV).toUpperCase();
   const environment = LIVE_TRADING_ENABLED ? "REAL" : requestedEnvironment;
@@ -3041,6 +3486,16 @@ async function verifyRealPortfolioBeforeExecution({ asset, side, amount = 0 } = 
   }
 
   const summary = extractPortfolioSummary(portfolio);
+  const identity = validateLivePortfolioIdentity(portfolio, summary);
+  if (!identity.ok) {
+    return {
+      ok: false,
+      reason: `Identité du portefeuille REAL non validée: ${identity.reasons.join(", ")}`,
+      validation,
+      identity,
+      summary
+    };
+  }
   const normalizedSide = String(side || "BUY").toUpperCase();
   const safeAsset = String(asset || "").toUpperCase();
   const safeAmount = Number(amount || 0);
@@ -3081,7 +3536,8 @@ async function verifyRealPortfolioBeforeExecution({ asset, side, amount = 0 } = 
     reason: `Portefeuille ${validation.environment} vérifié via ${validation.endpoint}`,
     validation,
     portfolio,
-    summary
+    summary,
+    identity
   };
 }
 
@@ -3207,18 +3663,25 @@ function normalizeMarketRates(data, metadata = {}) {
     const spread = hasBidAsk ? ask - bid : null;
     const spreadPct = hasBidAsk && mid > 0 ? (spread / mid) * 100 : null;
 
-    const priceDate = getFirstValue(rate, [
+    const rawPriceDate = getFirstValue(rate, [
       "date",
       "Date",
       "time",
       "Time",
+      "timestamp",
+      "Timestamp",
+      "lastExecutionTime",
+      "LastExecutionTime",
       "lastUpdate",
       "LastUpdate",
       "lastUpdated",
       "LastUpdated"
     ]);
-
-    const ageMinutes = priceDate ? minutesSince(priceDate) : null;
+    const parsedPriceDate = parseProviderDate(rawPriceDate);
+    const priceDate = parsedPriceDate.date;
+    const ageMinutes = Number.isFinite(parsedPriceDate.timestamp)
+      ? (Date.now() - parsedPriceDate.timestamp) / 60000
+      : null;
     const classification = classifyMarketRate({
       asset,
       mid,
@@ -3776,6 +4239,7 @@ function extractPortfolioSummary(portfolioResponse) {
     pendingWarnings
   };
   summary.allocationPlan = buildPortfolioAllocationPlan(summary);
+  summary.livePortfolioIdentity = validateLivePortfolioIdentity(portfolioResponse, summary);
   return summary;
 }
 
@@ -3882,10 +4346,17 @@ function buildPortfolioAllocationPlan(portfolioSummary) {
   const underweightBuckets = Object.values(bucketPlans).filter((item) => ["UNDER_MIN", "UNDER_TARGET"].includes(item.status));
   const hardCashMinimumBreached = cashWeightPct + 0.0001 < policy.hardCashMinimumPct;
   const cashBelowTarget = cashWeightPct + ALLOCATION_MIN_GAP_PCT < policy.cashTargetPct;
+  const cashAboveTarget = cashWeightPct - ALLOCATION_MIN_GAP_PCT > policy.cashTargetPct;
+  const targetCashUsd = totalValue * policy.cashTargetPct / 100;
+  const excessCashUsd = Math.max(0, availableCash - targetCashUsd);
+  const estimatedOrdersAtCurrentCap = MAX_ORDER_USD > 0 ? Math.ceil(excessCashUsd / MAX_ORDER_USD) : null;
+  const estimatedMinimumDaysAtDailyLimit = Number.isFinite(estimatedOrdersAtCurrentCap) && MAX_BUYS_24H > 0
+    ? Math.ceil(estimatedOrdersAtCurrentCap / MAX_BUYS_24H)
+    : null;
   let status = "BALANCED";
   if (hardCashMinimumBreached) status = "CASH_MINIMUM_BREACHED";
   else if (overweightBuckets.some((item) => item.status === "OVER_MAX") || overweightAssets.some((item) => item.status === "OVER_MAX")) status = "OVER_MAX";
-  else if (underweightBuckets.length > 0 || cashBelowTarget) status = "REBALANCE_NEEDED";
+  else if (underweightBuckets.length > 0 || cashBelowTarget || cashAboveTarget) status = "REBALANCE_NEEDED";
 
   return {
     name: "PortfolioAllocationEngine",
@@ -3901,7 +4372,18 @@ function buildPortfolioAllocationPlan(portfolioSummary) {
       targetPct: policy.cashTargetPct,
       hardMinimumPct: policy.hardCashMinimumPct,
       gapPct: roundNumber(policy.cashTargetPct - cashWeightPct, 4),
-      status: hardCashMinimumBreached ? "BELOW_HARD_MINIMUM" : (cashBelowTarget ? "BELOW_TARGET" : "OK")
+      targetUsd: roundNumber(targetCashUsd, 2),
+      excessUsd: roundNumber(excessCashUsd, 2),
+      status: hardCashMinimumBreached
+        ? "BELOW_HARD_MINIMUM"
+        : (cashBelowTarget ? "BELOW_TARGET" : (cashAboveTarget ? "ABOVE_TARGET" : "OK"))
+    },
+    feasibility: {
+      maxOrderUsd: MAX_ORDER_USD,
+      maxBuys24h: MAX_BUYS_24H,
+      estimatedOrdersAtCurrentCap,
+      estimatedMinimumDaysAtDailyLimit,
+      status: estimatedOrdersAtCurrentCap > 100 ? "SLOW_REBALANCE" : "FEASIBLE"
     },
     buckets: bucketPlans,
     assets,
@@ -4429,6 +4911,13 @@ function envConfiguration() {
     etoroPortfolioEndpoint: getEtoroPortfolioEndpoint(ETORO_ACCOUNT_ENV),
     livePortfolioPreflightEnabled: LIVE_PORTFOLIO_PREFLIGHT_ENABLED,
     livePortfolioMaxAgeSeconds: LIVE_PORTFOLIO_MAX_AGE_SECONDS,
+    livePortfolioIdentity: {
+      required: LIVE_PORTFOLIO_IDENTITY_REQUIRED,
+      confirmed: Boolean(runtimeState.livePortfolioIdentity),
+      expectedPortfolioIdConfigured: Boolean(ETORO_EXPECTED_PORTFOLIO_ID),
+      expectedAccountValueUsd: ETORO_EXPECTED_ACCOUNT_VALUE_USD,
+      valueTolerancePct: LIVE_PORTFOLIO_VALUE_TOLERANCE_PCT
+    },
     executionVerifier: {
       enabled: EXECUTION_VERIFIER_ENABLED,
       attempts: EXECUTION_VERIFY_ATTEMPTS,
@@ -4447,7 +4936,10 @@ function envConfiguration() {
     memoryObservability: {
       warningPct: MEMORY_WARNING_PCT,
       criticalPct: MEMORY_CRITICAL_PCT,
-      maxStateBytes: UPSTASH_MAX_STATE_BYTES
+      targetPct: UPSTASH_TARGET_STATE_PCT,
+      targetStateBytes: UPSTASH_TARGET_STATE_BYTES,
+      maxStateBytes: UPSTASH_MAX_STATE_BYTES,
+      proactiveCompaction: true
     },
     secondaryProvider: "Twelve Data",
     secondaryConfigured: SECONDARY_DATA_ENABLED,
@@ -4569,6 +5061,22 @@ function envConfiguration() {
       minimumPositiveFoldsPct: STRATEGY_LAB_V2_MIN_POSITIVE_FOLDS_PCT,
       minimumScore: STRATEGY_LAB_V2_MIN_SCORE,
       trialPenalty: STRATEGY_LAB_V2_TRIAL_PENALTY,
+      analysisOnly: true,
+      canPlaceOrder: false,
+      canPromoteLive: false
+    },
+    antiOverfittingValidation: {
+      enabled: ANTI_OVERFITTING_ENABLED,
+      liveAnalysisEnabled: ANTI_OVERFITTING_LIVE_ANALYSIS_ENABLED,
+      trainCandles: ANTI_OVERFITTING_TRAIN_CANDLES,
+      testCandles: ANTI_OVERFITTING_TEST_CANDLES,
+      embargoCandles: ANTI_OVERFITTING_EMBARGO_CANDLES,
+      minimumFolds: ANTI_OVERFITTING_MIN_FOLDS,
+      minimumObservations: ANTI_OVERFITTING_MIN_OBSERVATIONS,
+      minimumTrades: ANTI_OVERFITTING_MIN_TRADES,
+      minimumDsr: ANTI_OVERFITTING_MIN_DSR,
+      minimumPositiveFoldsPct: ANTI_OVERFITTING_MIN_POSITIVE_FOLDS_PCT,
+      maximumSelectionBiasRiskPct: ANTI_OVERFITTING_MAX_SELECTION_BIAS_RISK_PCT,
       analysisOnly: true,
       canPlaceOrder: false,
       canPromoteLive: false
@@ -5353,6 +5861,81 @@ function providerQuarantineStatus(provider) {
   };
 }
 
+function getProviderAssetHealthState(provider, asset) {
+  const providerState = getProviderHealthState(provider);
+  providerState.assets = providerState.assets && typeof providerState.assets === "object"
+    ? providerState.assets
+    : {};
+  const safeAsset = String(asset || "UNKNOWN").toUpperCase();
+  if (!providerState.assets[safeAsset]) {
+    providerState.assets[safeAsset] = {
+      asset: safeAsset,
+      totalChecks: 0,
+      successes: 0,
+      failures: 0,
+      consecutiveFailures: 0,
+      consecutiveConsensusOutliers: 0,
+      lastSuccessAt: null,
+      lastFailureAt: null,
+      lastError: null,
+      lastStatus: null,
+      lastSourceDate: null,
+      quarantinedUntil: null
+    };
+  }
+  return providerState.assets[safeAsset];
+}
+
+function providerAssetQuarantineStatus(provider, asset) {
+  const state = getProviderAssetHealthState(provider, asset);
+  const until = state.quarantinedUntil ? new Date(state.quarantinedUntil).getTime() : NaN;
+  const active = Number.isFinite(until) && until > Date.now();
+  if (!active && state.quarantinedUntil) {
+    state.quarantinedUntil = null;
+    state.consecutiveFailures = 0;
+    state.consecutiveConsensusOutliers = 0;
+  }
+  return { active, until: active ? state.quarantinedUntil : null, state };
+}
+
+function recordProviderAssetResult(provider, asset, ok, details = {}) {
+  const state = getProviderAssetHealthState(provider, asset);
+  state.totalChecks = Number(state.totalChecks || 0) + 1;
+  state.consecutiveConsensusOutliers = Number(state.consecutiveConsensusOutliers || 0);
+  state.lastStatus = details.status || null;
+  state.lastSourceDate = details.sourceDate || null;
+  const consensusOutlier = details.status === "CONSENSUS_OUTLIER";
+  const consensusMember = details.status === "CONSENSUS_MEMBER";
+
+  if (ok) {
+    state.successes = Number(state.successes || 0) + 1;
+    state.consecutiveFailures = 0;
+    if (consensusMember) state.consecutiveConsensusOutliers = 0;
+    state.lastSuccessAt = nowIso();
+    state.lastError = null;
+    if (!state.consecutiveConsensusOutliers) state.quarantinedUntil = null;
+  } else {
+    state.failures = Number(state.failures || 0) + 1;
+    if (consensusOutlier) {
+      state.consecutiveConsensusOutliers += 1;
+    } else {
+      state.consecutiveFailures = Number(state.consecutiveFailures || 0) + 1;
+    }
+    state.lastFailureAt = nowIso();
+    state.lastError = String(details.error || details.reason || "Anomalie de donnée").slice(0, 500);
+    if (
+      state.consecutiveFailures >= PROVIDER_ASSET_MAX_FAILURES ||
+      state.consecutiveConsensusOutliers >= PROVIDER_ASSET_MAX_FAILURES
+    ) {
+      state.quarantinedUntil = new Date(
+        Date.now() + PROVIDER_ASSET_QUARANTINE_MINUTES * 60 * 1000
+      ).toISOString();
+    }
+  }
+  scheduleSave();
+  return state;
+}
+
 function recordProviderResult(provider, ok, details = {}) {
   const state = getProviderHealthState(provider);
   state.totalCalls = Number(state.totalCalls || 0) + 1;
@@ -5390,31 +5973,50 @@ function recordProviderResult(provider, ok, details = {}) {
 }
 
 function buildProviderHealthAgent() {
+  const configuration = {
+    "eToro": true,
+    "Twelve Data": SECONDARY_DATA_ENABLED,
+    "Alpha Vantage": ALPHA_VANTAGE_MARKET_DATA_ENABLED && Boolean(ALPHA_VANTAGE_API_KEY)
+  };
   const providers = {};
   for (const provider of ["eToro", "Twelve Data", "Alpha Vantage"]) {
     const state = getProviderHealthState(provider);
     const quarantine = providerQuarantineStatus(provider);
     const total = Number(state.totalCalls || 0);
+    const assetStates = Object.values(state.assets || {}).map((item) => {
+      const assetQuarantine = providerAssetQuarantineStatus(provider, item.asset);
+      return {
+        ...item,
+        quarantined: assetQuarantine.active,
+        quarantinedUntil: assetQuarantine.until
+      };
+    });
     providers[provider] = {
       ...state,
+      configured: Boolean(configuration[provider]),
+      tested: total > 0,
       successRatePct: total > 0
         ? roundNumber(Number(state.successes || 0) / total * 100, 2)
         : null,
       quarantined: quarantine.active,
-      quarantinedUntil: quarantine.until
+      quarantinedUntil: quarantine.until,
+      quarantinedAssets: assetStates.filter((item) => item.quarantined).map((item) => item.asset),
+      assetStates
     };
   }
   const secondaryAvailable = Object.entries(providers)
     .filter(([name]) => name !== "eToro")
-    .some(([, item]) => !item.quarantined);
+    .some(([, item]) => item.configured && !item.quarantined);
   return {
     name: "ProviderHealthAgent",
     generatedAt: nowIso(),
     providerMaxFailures: PROVIDER_MAX_FAILURES,
     quarantineMinutes: PROVIDER_QUARANTINE_MINUTES,
+    providerAssetMaxFailures: PROVIDER_ASSET_MAX_FAILURES,
+    providerAssetQuarantineMinutes: PROVIDER_ASSET_QUARANTINE_MINUTES,
     providers,
     secondaryAvailable,
-    healthy: !providers.eToro?.quarantined
+    healthy: providers.eToro.configured && !providers.eToro.quarantined
   };
 }
 
@@ -5425,6 +6027,64 @@ function median(numbers) {
   return values.length % 2
     ? values[middle]
     : (values[middle - 1] + values[middle]) / 2;
+}
+
+function priceDeviationPct(a, b) {
+  const left = Number(a);
+  const right = Number(b);
+  if (!Number.isFinite(left) || !Number.isFinite(right) || left <= 0 || right <= 0) return null;
+  return Math.abs(left - right) / ((left + right) / 2) * 100;
+}
+
+function buildConsensusCluster(sources, maxDeviationPct = MAX_PROVIDER_DEVIATION_PCT) {
+  const usable = (sources || []).filter((item) => Number.isFinite(Number(item?.price)) && Number(item.price) > 0);
+  if (!usable.length) return { cluster: [], outliers: [], consensusPrice: null, pairwise: {} };
+  const pairwise = {};
+  for (let i = 0; i < usable.length; i += 1) {
+    for (let j = i + 1; j < usable.length; j += 1) {
+      const key = `${usable[i].provider}__${usable[j].provider}`;
+      pairwise[key] = roundNumber(priceDeviationPct(usable[i].price, usable[j].price), 4);
+    }
+  }
+
+  let best = [];
+  const limit = 1 << usable.length;
+  for (let mask = 1; mask < limit; mask += 1) {
+    const subset = usable.filter((_, index) => mask & (1 << index));
+    let valid = true;
+    for (let i = 0; i < subset.length && valid; i += 1) {
+      for (let j = i + 1; j < subset.length; j += 1) {
+        const deviation = priceDeviationPct(subset[i].price, subset[j].price);
+        if (!Number.isFinite(deviation) || deviation > maxDeviationPct) {
+          valid = false;
+          break;
+        }
+      }
+    }
+    if (!valid) continue;
+    const preferSubset = subset.length > best.length || (
+      subset.length === best.length &&
+      subset.some((item) => item.provider === "eToro") &&
+      !best.some((item) => item.provider === "eToro")
+    );
+    if (preferSubset) best = subset;
+  }
+
+  // One isolated provider is not a consensus. With two incompatible sources,
+  // neither one is labelled as an outlier; a third independent source is required.
+  if (usable.length >= 2 && best.length < 2) {
+    return { cluster: [], outliers: [], consensusPrice: null, pairwise };
+  }
+  const selected = new Set(best.map((item) => item.provider));
+  const outliers = best.length >= 2
+    ? usable.filter((item) => !selected.has(item.provider))
+    : [];
+  return {
+    cluster: best,
+    outliers,
+    consensusPrice: best.length ? median(best.map((item) => item.price)) : null,
+    pairwise
+  };
 }
 
 function meanAbsolutePercentageDeviation(primaryValues, secondaryValues) {
@@ -5587,15 +6247,74 @@ function isHistoricalCacheFresh(entry) {
 }
 
 function parseProviderDate(value) {
-  if (!value) return { date: null, timestamp: null };
-  const text = String(value).trim();
-  let timestamp = Date.parse(text);
-  if (!Number.isFinite(timestamp) && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(text)) {
-    timestamp = Date.parse(text.replace(" ", "T") + "Z");
+  if (value === undefined || value === null || value === "") {
+    return { date: null, timestamp: null, precision: "missing" };
   }
+
+  let timestamp = null;
+  let precision = "datetime";
+  const text = String(value).trim();
+  const numericText = /^-?\d+(?:\.\d+)?$/.test(text);
+  const numeric = Number(value);
+  if (numericText && Number.isFinite(numeric)) {
+    if (numeric <= 0) return { date: null, timestamp: null, precision: "invalid" };
+    const milliseconds = Math.abs(numeric) < 1e12 ? numeric * 1000 : numeric;
+    if (Number.isFinite(milliseconds) && milliseconds > 0) timestamp = milliseconds;
+  }
+
+  if (!Number.isFinite(timestamp)) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+      precision = "date";
+      timestamp = Date.parse(`${text}T00:00:00Z`);
+    } else if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?$/.test(text)) {
+      timestamp = Date.parse(text.replace(" ", "T") + "Z");
+    } else {
+      timestamp = Date.parse(text);
+    }
+  }
+
   return {
     date: Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : text,
-    timestamp: Number.isFinite(timestamp) ? timestamp : null
+    timestamp: Number.isFinite(timestamp) ? timestamp : null,
+    precision
+  };
+}
+
+function providerQuoteFreshness({ date, asset, maxAgeMinutes = PROVIDER_QUOTE_MAX_AGE_MINUTES } = {}) {
+  const parsed = parseProviderDate(date);
+  const session = getExpectedMarketSession(String(asset || "").toUpperCase());
+  if (!Number.isFinite(parsed.timestamp)) {
+    return {
+      usable: false,
+      status: "NO_SOURCE_TIMESTAMP",
+      sourceDate: parsed.date,
+      sourceTimestamp: null,
+      ageMinutes: null,
+      precision: parsed.precision,
+      session
+    };
+  }
+  const ageMinutes = (Date.now() - parsed.timestamp) / 60000;
+  if (ageMinutes < -5) {
+    return {
+      usable: false,
+      status: "SOURCE_TIMESTAMP_IN_FUTURE",
+      sourceDate: parsed.date,
+      sourceTimestamp: parsed.timestamp,
+      ageMinutes: roundNumber(ageMinutes, 2),
+      precision: parsed.precision,
+      session
+    };
+  }
+  const usable = ageMinutes <= Number(maxAgeMinutes);
+  return {
+    usable,
+    status: usable ? "FRESH" : "STALE_SOURCE",
+    sourceDate: parsed.date,
+    sourceTimestamp: parsed.timestamp,
+    ageMinutes: roundNumber(Math.max(0, ageMinutes), 2),
+    precision: parsed.precision,
+    session
   };
 }
 
@@ -5773,20 +6492,33 @@ async function getAlphaVantageMarketQuote(asset, force = false) {
       latencyMs: Date.now() - started,
       error: ok ? null : (data?.Note || data?.Information || data?.Error_Message || "Quote invalide")
     });
+    const freshness = providerQuoteFreshness({ date, asset });
+    const assetQuarantine = providerAssetQuarantineStatus("Alpha Vantage", asset);
     const quote = {
       asset,
       symbol,
       configured: true,
       provider: "Alpha Vantage",
       ok,
-      status: ok ? "OK" : (response.ok ? "INVALID" : `HTTP_${response.status}`),
+      status: ok ? freshness.status : (response.ok ? "INVALID" : `HTTP_${response.status}`),
       price: ok ? roundNumber(price, 6) : null,
-      date,
+      date: freshness.sourceDate || date,
+      sourceTimestamp: freshness.sourceTimestamp,
+      sourceAgeMinutes: freshness.ageMinutes,
+      sourcePrecision: freshness.precision,
+      freshForConsensus: Boolean(ok && freshness.usable && !assetQuarantine.active),
+      assetQuarantined: assetQuarantine.active,
+      assetQuarantinedUntil: assetQuarantine.until,
       fetchedAt: nowIso(),
       attempts,
       error: ok ? null : (data?.Note || data?.Information || data?.Error_Message || null),
       analysisOnly: true
     };
+    recordProviderAssetResult("Alpha Vantage", asset, quote.freshForConsensus, {
+      status: quote.status,
+      sourceDate: quote.date,
+      error: quote.freshForConsensus ? null : (quote.error || quote.status)
+    });
     runtimeState.secondaryCache[cacheKey] = quote;
     scheduleSave();
     return quote;
@@ -6009,70 +6741,153 @@ async function buildMarketDataFusionReport(primarySummary, assets = [], force = 
   const uniqueAssets = [...new Set(assets.filter((asset) => WATCHLIST[asset]))]
     .slice(0, SECONDARY_MAX_ASSETS_PER_SCAN);
   const comparisons = {};
+
   for (const asset of uniqueAssets) {
     const primary = primarySummary?.ratesByAsset?.[asset] || null;
     const secondary = await getSecondaryQuote(asset, force);
     const tertiary = await getAlphaVantageMarketQuote(asset, force);
-    const sources = [
+    const primaryAssetQuarantine = providerAssetQuarantineStatus("eToro", asset);
+    const primaryFresh = Boolean(
+      primary &&
+      primary.priceStatus === "FRESH" &&
+      primary.eligibleForTrade &&
+      !primaryAssetQuarantine.active
+    );
+
+    const allSources = [
       primary && Number.isFinite(Number(primary.mid)) && Number(primary.mid) > 0
-        ? { provider: "eToro", price: Number(primary.mid), date: primary.date, status: primary.priceStatus, executionReference: true }
+        ? {
+            provider: "eToro",
+            price: Number(primary.mid),
+            date: primary.date,
+            ageMinutes: primary.ageMinutes,
+            status: primary.priceStatus,
+            freshForConsensus: primaryFresh,
+            executionReference: true,
+            quarantined: primaryAssetQuarantine.active
+          }
         : null,
-      secondary?.ok
-        ? { provider: "Twelve Data", price: Number(secondary.price), date: secondary.date, status: secondary.status, executionReference: false }
+      secondary && Number.isFinite(Number(secondary.price)) && Number(secondary.price) > 0
+        ? {
+            provider: "Twelve Data",
+            price: Number(secondary.price),
+            date: secondary.date,
+            ageMinutes: secondary.sourceAgeMinutes,
+            status: secondary.status,
+            freshForConsensus: Boolean(secondary.freshForConsensus),
+            executionReference: false,
+            quarantined: providerAssetQuarantineStatus("Twelve Data", asset).active
+          }
         : null,
-      tertiary?.ok
-        ? { provider: "Alpha Vantage", price: Number(tertiary.price), date: tertiary.date, status: tertiary.status, executionReference: false }
+      tertiary && Number.isFinite(Number(tertiary.price)) && Number(tertiary.price) > 0
+        ? {
+            provider: "Alpha Vantage",
+            price: Number(tertiary.price),
+            date: tertiary.date,
+            ageMinutes: tertiary.sourceAgeMinutes,
+            status: tertiary.status,
+            freshForConsensus: Boolean(tertiary.freshForConsensus),
+            executionReference: false,
+            quarantined: providerAssetQuarantineStatus("Alpha Vantage", asset).active
+          }
         : null
     ].filter(Boolean);
-    const consensusPrice = median(sources.map((item) => item.price));
-    const primaryPrice = Number(primary?.mid);
-    const providerDeviations = Object.fromEntries(sources.map((item) => [
-      item.provider,
-      consensusPrice && item.price > 0
-        ? roundNumber(Math.abs(item.price - consensusPrice) / consensusPrice * 100, 4)
-        : null
-    ]));
-    const maxDeviation = Math.max(0, ...Object.values(providerDeviations).filter(Number.isFinite));
-    const deviationFromEtoroPct = Number.isFinite(primaryPrice) && primaryPrice > 0 && Number.isFinite(consensusPrice) && consensusPrice > 0
-      ? Math.abs(primaryPrice - consensusPrice) / consensusPrice * 100
-      : null;
+
+    const usableSources = allSources.filter((item) => item.freshForConsensus && !item.quarantined);
+    const clusterReport = buildConsensusCluster(usableSources, MAX_PROVIDER_DEVIATION_PCT);
+    const clusterProviders = clusterReport.cluster.map((item) => item.provider);
+    const outlierProviders = clusterReport.outliers.map((item) => item.provider);
+    const primaryAligned = clusterProviders.includes("eToro");
+    const requiredSatisfied = clusterReport.cluster.length >= MIN_CONSENSUS_PROVIDERS;
+
     let status = "PROVIDERS_UNAVAILABLE";
     if (!primary) status = "PRIMARY_MISSING";
-    else if (sources.length === 1) status = "PRIMARY_ONLY";
-    else if (maxDeviation > MAX_PROVIDER_DEVIATION_PCT) status = "DIVERGENCE";
-    else if (sources.length >= MIN_CONSENSUS_PROVIDERS) status = "CONSENSUS";
+    else if (!primaryFresh) status = primaryAssetQuarantine.active ? "PRIMARY_ASSET_QUARANTINED" : `PRIMARY_${primary.priceStatus || "UNUSABLE"}`;
+    else if (usableSources.length === 1) status = "PRIMARY_ONLY";
+    else if (clusterReport.cluster.length >= MIN_CONSENSUS_PROVIDERS && outlierProviders.length > 0) {
+      status = primaryAligned ? "CONSENSUS_WITH_OUTLIER" : "PRIMARY_OUTLIER";
+    } else if (clusterReport.cluster.length >= MIN_CONSENSUS_PROVIDERS) status = "CONSENSUS";
+    else if (usableSources.length >= 2) status = "DIVERGENCE";
     else status = "PARTIAL_CONSENSUS";
-    const requiredSatisfied = sources.length >= MIN_CONSENSUS_PROVIDERS;
+
+    // A provider is blamed only when at least two independent providers agree against it.
+    if (clusterReport.cluster.length >= 2 && clusterReport.outliers.length > 0) {
+      for (const outlier of clusterReport.outliers) {
+        recordProviderAssetResult(outlier.provider, asset, false, {
+          status: "CONSENSUS_OUTLIER",
+          sourceDate: outlier.date,
+          error: `Écart supérieur à ${MAX_PROVIDER_DEVIATION_PCT}% face à ${clusterProviders.join(", ")}`
+        });
+      }
+      for (const accepted of clusterReport.cluster) {
+        recordProviderAssetResult(accepted.provider, asset, true, {
+          status: "CONSENSUS_MEMBER",
+          sourceDate: accepted.date
+        });
+      }
+    }
+
+    const displayConsensusPrice = ["DIVERGENCE", "PRIMARY_OUTLIER"].includes(status)
+      ? null
+      : clusterReport.consensusPrice;
+    const providerDeviations = Object.fromEntries(allSources.map((item) => [
+      item.provider,
+      Number.isFinite(displayConsensusPrice) && displayConsensusPrice > 0
+        ? roundNumber(Math.abs(item.price - displayConsensusPrice) / displayConsensusPrice * 100, 4)
+        : null
+    ]));
+    const finiteDeviations = Object.values(clusterReport.pairwise).filter(Number.isFinite);
+    const maxDeviation = finiteDeviations.length ? Math.max(...finiteDeviations) : 0;
     const executionSafe = Boolean(primary?.eligibleForTrade) &&
-      status !== "DIVERGENCE" &&
+      primaryFresh &&
+      primaryAligned &&
+      !["DIVERGENCE", "PRIMARY_OUTLIER", "PRIMARY_ASSET_QUARANTINED"].includes(status) &&
       (MARKET_DATA_CONSENSUS_MODE !== "required" || requiredSatisfied);
+
     comparisons[asset] = {
       asset,
       primaryProvider: "eToro",
-      primaryPrice: Number.isFinite(primaryPrice) ? roundNumber(primaryPrice, 6) : null,
+      primaryPrice: Number.isFinite(Number(primary?.mid)) ? roundNumber(Number(primary.mid), 6) : null,
       primaryStatus: primary?.priceStatus || "MISSING",
+      primaryAgeMinutes: primary?.ageMinutes ?? null,
       secondaryProvider: "Twelve Data",
       secondaryPrice: Number.isFinite(Number(secondary?.price)) ? roundNumber(Number(secondary.price), 6) : null,
       secondaryStatus: secondary?.status || "MISSING",
+      secondaryAgeMinutes: secondary?.sourceAgeMinutes ?? null,
       tertiaryProvider: "Alpha Vantage",
       tertiaryPrice: Number.isFinite(Number(tertiary?.price)) ? roundNumber(Number(tertiary.price), 6) : null,
       tertiaryStatus: tertiary?.status || "MISSING",
-      sources,
-      providerCount: sources.length,
-      consensusPrice: roundNumber(consensusPrice, 6),
+      tertiaryAgeMinutes: tertiary?.sourceAgeMinutes ?? null,
+      sources: allSources,
+      usableSources,
+      providerCount: usableSources.length,
+      consensusProviderCount: clusterReport.cluster.length,
+      consensusProviders: clusterProviders,
+      outlierProviders,
+      consensusPrice: Number.isFinite(Number(displayConsensusPrice)) && Number(displayConsensusPrice) > 0
+        ? roundNumber(Number(displayConsensusPrice), 6)
+        : null,
       providerDeviations,
-      deviationPct: roundNumber(deviationFromEtoroPct, 4),
+      pairwiseDeviationsPct: clusterReport.pairwise,
       maxDeviationPct: roundNumber(maxDeviation, 4),
       status,
       requiredSatisfied,
+      primaryAligned,
       executionSafe,
       executionReference: "eToro",
-      note: "Le consensus contrôle la qualité; seul le prix eToro peut servir à l'exécution."
+      note: status === "DIVERGENCE"
+        ? "Deux sources incompatibles: aucun prix moyen n'est présenté et aucun fournisseur n'est accusé sans troisième preuve."
+        : "Le consensus contrôle la qualité; seul un prix eToro frais et aligné peut servir à l'exécution."
     };
   }
+
   const values = Object.values(comparisons);
-  const divergenceAssets = values.filter((item) => item.status === "DIVERGENCE").map((item) => item.asset);
-  const missingAssets = values.filter((item) => ["PROVIDERS_UNAVAILABLE", "PRIMARY_MISSING"].includes(item.status)).map((item) => item.asset);
+  const divergenceAssets = values
+    .filter((item) => ["DIVERGENCE", "PRIMARY_OUTLIER"].includes(item.status))
+    .map((item) => item.asset);
+  const missingAssets = values
+    .filter((item) => ["PROVIDERS_UNAVAILABLE", "PRIMARY_MISSING"].includes(item.status))
+    .map((item) => item.asset);
   const insufficientConsensusAssets = values.filter((item) => !item.requiredSatisfied).map((item) => item.asset);
   const report = {
     name: "MarketDataFusionAgent",
@@ -6087,6 +6902,7 @@ async function buildMarketDataFusionReport(primarySummary, assets = [], force = 
     confirmationMode: MARKET_DATA_CONSENSUS_MODE,
     minConsensusProviders: MIN_CONSENSUS_PROVIDERS,
     maxDeviationPct: MAX_PROVIDER_DEVIATION_PCT,
+    quoteMaxAgeMinutes: PROVIDER_QUOTE_MAX_AGE_MINUTES,
     checkedAssets: uniqueAssets,
     comparisons,
     divergenceAssets,
@@ -6139,29 +6955,44 @@ async function getSecondaryQuote(asset, force = false) {
       { label: `TwelveData ${asset}`, retries: 1 }
     );
     const price = Number(data?.close ?? data?.price);
-    const timestamp = Number(data?.timestamp || data?.last_quote_at || 0);
-    const date = timestamp > 0 ? new Date(timestamp * 1000).toISOString() : (data?.datetime || null);
+    const rawSourceDate = [data?.timestamp, data?.last_quote_at, data?.datetime]
+      .find((value) => value !== undefined && value !== null && String(value).trim() !== "" && Number(value) !== 0) ?? null;
+    const parsedSourceDate = parseProviderDate(rawSourceDate);
+    const date = parsedSourceDate.date;
     const ok = response.ok && data?.status !== "error" && Number.isFinite(price) && price > 0;
     recordProviderResult("Twelve Data", ok, {
       status: response.status,
       latencyMs: Date.now() - started,
       error: ok ? null : (data?.message || data?.code || "Quote invalide")
     });
+    const freshness = providerQuoteFreshness({ date, asset });
+    const assetQuarantine = providerAssetQuarantineStatus("Twelve Data", asset);
     const quote = {
       asset,
       symbol,
       configured: true,
       provider: "Twelve Data",
       ok,
-      status: ok ? "OK" : (response.ok ? "INVALID" : `HTTP_${response.status}`),
+      status: ok ? freshness.status : (response.ok ? "INVALID" : `HTTP_${response.status}`),
       price: Number.isFinite(price) ? roundNumber(price, 6) : null,
-      date,
+      date: freshness.sourceDate || date,
+      sourceTimestamp: freshness.sourceTimestamp,
+      sourceAgeMinutes: freshness.ageMinutes,
+      sourcePrecision: freshness.precision,
+      freshForConsensus: Boolean(ok && freshness.usable && !assetQuarantine.active),
+      assetQuarantined: assetQuarantine.active,
+      assetQuarantinedUntil: assetQuarantine.until,
       isMarketOpen: data?.is_market_open ?? null,
       fetchedAt: nowIso(),
       attempts,
       error: data?.status === "error" ? (data?.message || data?.code || null) : (data?.message || null),
       analysisOnly: true
     };
+    recordProviderAssetResult("Twelve Data", asset, quote.freshForConsensus, {
+      status: quote.status,
+      sourceDate: quote.date,
+      error: quote.freshForConsensus ? null : (quote.error || quote.status)
+    });
     runtimeState.secondaryCache[asset] = quote;
     scheduleSave();
     return quote;
@@ -10249,7 +11080,9 @@ function buildRiskSellIntelligenceAgent({
   const softDailyLoss = dailyChangePct <= -RISK_SELL_SOFT_DAILY_LOSS_PCT;
   const regime = marketRegimeAgent?.regime || "UNKNOWN";
   const hardCircuit = hardDrawdown || hardDailyLoss;
-  const cautionZone = !hardCircuit && (softDrawdown || softDailyLoss || ["RISK_OFF", "HIGH_VOLATILITY", "CRYPTO_RISK_OFF"].includes(regime));
+  const accountCautionZone = !hardCircuit && (softDrawdown || softDailyLoss);
+  const regimeCautionZone = !hardCircuit && ["RISK_OFF", "HIGH_VOLATILITY", "CRYPTO_RISK_OFF"].includes(regime);
+  const cautionZone = accountCautionZone || regimeCautionZone;
   const globalReasons = [];
   if (hardDrawdown) globalReasons.push(`drawdown courant ${accountDrawdownPct}% >= ${RISK_SELL_HARD_DRAWDOWN_PCT}%`);
   else if (softDrawdown) globalReasons.push(`drawdown courant ${accountDrawdownPct}% >= ${RISK_SELL_SOFT_DRAWDOWN_PCT}%`);
@@ -10371,7 +11204,10 @@ function buildRiskSellIntelligenceAgent({
       cautionZone,
       blockNewBuys: hardCircuit,
       reduceNewBuys: cautionZone,
-      buySizeMultiplier: hardCircuit ? 0 : (cautionZone ? 0.45 : 1),
+      buySizeMultiplier: hardCircuit ? 0 : (accountCautionZone ? 0.6 : 1),
+      accountCautionZone,
+      regimeCautionZone,
+      regimeAlreadyPricedByMarketRegimeAgent: true,
       reasons: globalReasons,
       thresholds: {
         softDrawdownPct: RISK_SELL_SOFT_DRAWDOWN_PCT,
@@ -10629,10 +11465,10 @@ function dataIntegrityCheckForAsset(agent, asset) {
       ? { ok: false, reason: `MarketDataFusionAgent: aucun consensus pour ${asset}` }
       : { ok: true, reason: `MarketDataFusionAgent non exécuté pour ${asset} (mode advisory)` };
   }
-  if (comparison.status === "DIVERGENCE") {
+  if (["DIVERGENCE", "PRIMARY_OUTLIER", "PRIMARY_ASSET_QUARANTINED"].includes(comparison.status)) {
     return {
       ok: false,
-      reason: `Divergence multi-source ${comparison.maxDeviationPct ?? comparison.deviationPct}% sur ${asset}`
+      reason: `MarketDataFusionAgent bloque ${asset}: ${comparison.status}, écart max ${comparison.maxDeviationPct ?? "?"}%`
     };
   }
   if (!comparison.executionSafe) {
@@ -10640,7 +11476,7 @@ function dataIntegrityCheckForAsset(agent, asset) {
   }
   return {
     ok: true,
-    reason: `MarketDataFusionAgent: ${comparison.status}, ${comparison.providerCount || 1} fournisseur(s), exécution eToro`
+    reason: `MarketDataFusionAgent: ${comparison.status}, consensus ${comparison.consensusProviderCount || 1} fournisseur(s), prix d'exécution eToro aligné`
   };
 }
 
@@ -10669,6 +11505,28 @@ function dynamicBuyAmount(decision, portfolioSummary) {
   return roundNumber(Math.max(0, room), 2);
 }
 
+
+function combineBuySizingMultipliers({ technical = 1, intelligence = 1, macro = 1, council = 1, riskSell = 1 } = {}) {
+  const safeTechnical = clampNumber(technical, 0, 1);
+  const safeIntelligence = clampNumber(intelligence, 0, 1);
+  const safeMacro = clampNumber(macro, 0, 1);
+  const safeCouncil = clampNumber(council, 0, 1);
+  const safeRiskSell = clampNumber(riskSell, 0, 1);
+  // Intelligence, macro and council share part of the same evidence. Applying only
+  // their most conservative value prevents triple-counting while preserving safety.
+  const informationMultiplier = Math.min(safeIntelligence, safeMacro, safeCouncil);
+  const combined = safeTechnical * informationMultiplier * safeRiskSell;
+  return {
+    technicalMultiplier: roundNumber(safeTechnical, 4),
+    informationMultiplier: roundNumber(informationMultiplier, 4),
+    intelligenceMultiplier: roundNumber(safeIntelligence, 4),
+    macroMultiplier: roundNumber(safeMacro, 4),
+    councilMultiplier: roundNumber(safeCouncil, 4),
+    riskSellMultiplier: roundNumber(safeRiskSell, 4),
+    combinedMultiplier: roundNumber(clampNumber(combined, 0, 1), 4),
+    method: "TECHNICAL_X_MIN_INFORMATION_X_ACCOUNT_RISK"
+  };
+}
 
 function sanitizeDecision(decision) {
   let rawDecision = String(decision?.decision || "HOLD").toUpperCase();
@@ -10744,10 +11602,20 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
     dataIntegrityAgent: { comparisons: {}, healthy: true }
   });
 
-  const hold = (reason, riskCheck = "failed") => ({
+  const hold = (reason, riskCheck = "failed", code = "HOLD", diagnostics = null) => ({
     approved: false,
-    finalDecision: { ...d, decision: "HOLD", asset: "NONE", amount_usd: 0, risk_check: riskCheck },
-    reason
+    finalDecision: {
+      ...d,
+      decision: "HOLD",
+      asset: "NONE",
+      amount_usd: 0,
+      risk_check: riskCheck,
+      hold_code: code,
+      reason: String(reason || d.reason || "HOLD").slice(0, 500)
+    },
+    reason,
+    code,
+    diagnostics
   });
 
   if (d.decision === "HOLD") return hold("HOLD choisi", "passed");
@@ -10828,9 +11696,21 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
     const macroMultiplier = Number(macroCheck.multiplier ?? 1);
     const councilMultiplier = Number(councilCheck.multiplier ?? 1);
     const riskSellMultiplier = Number(riskSellCheck.multiplier ?? 1);
-    const dynamicAmount = roundNumber(baseDynamicAmount * technicalMultiplier * intelligenceMultiplier * macroMultiplier * councilMultiplier * riskSellMultiplier, 2);
+    const sizing = combineBuySizingMultipliers({
+      technical: technicalMultiplier,
+      intelligence: intelligenceMultiplier,
+      macro: macroMultiplier,
+      council: councilMultiplier,
+      riskSell: riskSellMultiplier
+    });
+    const dynamicAmount = roundNumber(baseDynamicAmount * sizing.combinedMultiplier, 2);
     if (!Number.isFinite(dynamicAmount) || dynamicAmount < MIN_ORDER_USD) {
-      return hold(`Budget ajusté insuffisant après réserve, régime, volatilité et conseil (${dynamicAmount || 0} USD)`);
+      return hold(
+        `Montant ${dynamicAmount || 0} USD inférieur au minimum ${MIN_ORDER_USD} USD après ajustement des risques`,
+        "failed",
+        "BELOW_MIN_ORDER_AFTER_RISK_SCALING",
+        { baseDynamicAmount, sizing, minimumOrderUsd: MIN_ORDER_USD }
+      );
     }
     const finalDecision = {
       ...d,
@@ -10844,7 +11724,7 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
     return {
       approved: true,
       finalDecision,
-      reason: `BUY approuvé; ${allocationGuard.reason}; ${marketCheck.reason}; ${integrityCheck.reason}; ${technicalCheck.reason}; ${intelligenceCheck.reason}; ${macroCheck.reason}; ${councilCheck.reason}; ${riskSellCheck.reason}; multiplicateurs technique ${technicalMultiplier}, intelligence ${intelligenceMultiplier}, macro ${macroMultiplier}, conseil ${councilMultiplier} et risque ${riskSellMultiplier}; montant ${dynamicAmount} USD`,
+      reason: `BUY approuvé; ${allocationGuard.reason}; ${marketCheck.reason}; ${integrityCheck.reason}; ${technicalCheck.reason}; ${intelligenceCheck.reason}; ${macroCheck.reason}; ${councilCheck.reason}; ${riskSellCheck.reason}; dimensionnement ${sizing.method}, multiplicateur combiné ${sizing.combinedMultiplier}; montant ${dynamicAmount} USD`,
       allocationGuard,
       riskBudget: agents.riskBudgetAgent,
       technicalSizingMultiplier: technicalMultiplier,
@@ -10855,7 +11735,8 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
       riskSellSizingMultiplier: riskSellMultiplier,
       riskSellRecord: riskSellCheck.record,
       agentCouncilRecord: councilCheck.record,
-      marketRegime: agents.marketRegimeAgent
+      marketRegime: agents.marketRegimeAgent,
+      sizing
     };
   }
 
@@ -10896,7 +11777,7 @@ async function executeBuy(asset, amount, marketData = null) {
   const preflight = await verifyRealPortfolioBeforeExecution({ asset, side: "BUY", amount: safeAmount });
   if (!preflight.ok) {
     addAudit("LIVE_BUY_PREFLIGHT_BLOCKED", { asset, amount: safeAmount, reason: preflight.reason, validation: preflight.validation || null });
-    return { skipped: true, mode: "LIVE", reason: preflight.reason, preflight: preflight.validation || null };
+    return { skipped: true, mode: "LIVE", reason: preflight.reason, preflight: preflight.validation || null, identity: preflight.identity || null };
   }
 
   const executionMarketData = await getMarketRates();
@@ -10969,6 +11850,7 @@ async function executeBuy(asset, amount, marketData = null) {
         intentId: intent.id,
         requestId: headers["x-request-id"],
         preflight: preflight.validation || null,
+        identity: preflight.identity || null,
         data: compactResponse
       };
     }
@@ -11036,6 +11918,7 @@ async function executeBuy(asset, amount, marketData = null) {
       intentId: intent.id,
       requestId: headers["x-request-id"],
       preflight: preflight.validation || null,
+      identity: preflight.identity || null,
       verification,
       data: compactResponse,
       action: verification.confirmed ? null : "Ne pas répéter l'ordre; laisser ExecutionVerifier réconcilier le portefeuille."
@@ -11086,7 +11969,7 @@ async function executeSell(asset, marketData = null) {
   const preflight = await verifyRealPortfolioBeforeExecution({ asset, side: "SELL", amount: 0 });
   if (!preflight.ok) {
     addAudit("LIVE_SELL_PREFLIGHT_BLOCKED", { asset, reason: preflight.reason, validation: preflight.validation || null });
-    return { skipped: true, mode: "LIVE", reason: preflight.reason, preflight: preflight.validation || null };
+    return { skipped: true, mode: "LIVE", reason: preflight.reason, preflight: preflight.validation || null, identity: preflight.identity || null };
   }
 
   const portfolio = preflight.portfolio;
@@ -11154,6 +12037,7 @@ async function executeSell(asset, marketData = null) {
         intentId: intent.id,
         requestId: headers["x-request-id"],
         preflight: preflight.validation,
+        identity: preflight.identity || null,
         data: compactResponse
       };
     }
@@ -11219,6 +12103,7 @@ async function executeSell(asset, marketData = null) {
       intentId: intent.id,
       requestId: headers["x-request-id"],
       preflight: preflight.validation,
+      identity: preflight.identity || null,
       verification,
       data: compactResponse,
       action: verification.confirmed ? null : "Ne pas répéter l'ordre; laisser ExecutionVerifier réconcilier le portefeuille."
@@ -11461,8 +12346,62 @@ async function buildRuntimeContext(source) {
   };
 }
 
+function isAutomaticAutomationSource(source) {
+  return /(^|[-_])(auto|cron|scheduler)([-_]|$)/i.test(String(source || ""));
+}
+
+function requestAutomationSource(req, manualFallback) {
+  if (req?.query?.source) return String(req.query.source).slice(0, 50);
+  const userAgent = String(req?.headers?.["user-agent"] || "").toLowerCase();
+  if (/cron-job|healthchecks|uptimerobot|easycron|setcronjob/.test(userAgent)) {
+    return manualFallback === "manual-scan" ? "external-cron-scan" : "external-cron-watch";
+  }
+  return manualFallback;
+}
+
+function automationGuardKey(kind, phase) {
+  const normalizedKind = kind === "scan" ? "Scan" : "Watch";
+  const normalizedPhase = phase === "completed" ? "CompletedAt" : "StartedAt";
+  return `lastAuto${normalizedKind}${normalizedPhase}`;
+}
+
+function automaticRunDedupCheck(kind, source) {
+  if (!isAutomaticAutomationSource(source)) {
+    return { skipped: false, automatic: false, ageMinutes: null, windowMinutes: null };
+  }
+  const windowMinutes = kind === "scan" ? AUTO_SCAN_DEDUP_MINUTES : AUTO_WATCH_DEDUP_MINUTES;
+  const startedAt = runtimeState.automationGuards?.[automationGuardKey(kind, "started")] || null;
+  const completedAt = runtimeState.automationGuards?.[automationGuardKey(kind, "completed")] || null;
+  const latest = [startedAt, completedAt].filter(Boolean).sort().slice(-1)[0] || null;
+  const ageMinutes = latest ? minutesSince(latest) : null;
+  const skipped = ageMinutes !== null && ageMinutes >= 0 && ageMinutes < windowMinutes;
+  if (skipped) {
+    if (kind === "scan") runtimeState.automationGuards.duplicateScansSkipped += 1;
+    else runtimeState.automationGuards.duplicateWatchesSkipped += 1;
+    scheduleSave();
+  }
+  return { skipped, automatic: true, ageMinutes, windowMinutes, latest };
+}
+
+function markAutomaticRun(kind, source, phase) {
+  if (!isAutomaticAutomationSource(source)) return;
+  runtimeState.automationGuards[automationGuardKey(kind, phase)] = nowIso();
+}
+
 async function watchMarket(source = "manual-watch") {
   if (runtimeState.watchRunning) return { version: VERSION, skipped: true, reason: "Un watch est déjà en cours" };
+  const duplicateGuard = automaticRunDedupCheck("watch", source);
+  if (duplicateGuard.skipped) {
+    return {
+      version: VERSION,
+      source,
+      trading_mode: TRADING_MODE,
+      skipped: true,
+      reason: `Watch automatique dupliqué dans une fenêtre de ${duplicateGuard.windowMinutes} minutes`,
+      duplicateGuard
+    };
+  }
+  markAutomaticRun("watch", source, "started");
   runtimeState.watchRunning = true;
   try {
     const executionReconciliation = LIVE_TRADING_ENABLED && EXECUTION_RECONCILE_ON_WATCH
@@ -11496,6 +12435,7 @@ async function watchMarket(source = "manual-watch") {
       portfolio: context.portfolioSummary,
       memory: memoryStatus()
     });
+    markAutomaticRun("watch", source, "completed");
     return result;
   } catch (error) {
     addAudit("WATCH_ERROR", { source, error: error.message });
@@ -11507,6 +12447,18 @@ async function watchMarket(source = "manual-watch") {
 
 async function scanMarket(source = "manual-scan") {
   if (runtimeState.scanRunning) return { version: VERSION, skipped: true, reason: "Un scan est déjà en cours" };
+  const duplicateGuard = automaticRunDedupCheck("scan", source);
+  if (duplicateGuard.skipped) {
+    return {
+      version: VERSION,
+      source,
+      trading_mode: TRADING_MODE,
+      skipped: true,
+      reason: `Scan automatique dupliqué dans une fenêtre de ${duplicateGuard.windowMinutes} minutes`,
+      duplicateGuard
+    };
+  }
+  markAutomaticRun("scan", source, "started");
   runtimeState.scanRunning = true;
   try {
     const context = await buildRuntimeContext(source);
@@ -11675,6 +12627,7 @@ async function scanMarket(source = "manual-scan") {
       memory: memoryStatus()
     });
     addAudit("SCAN_COMPLETED", { source, tradingMode: TRADING_MODE, decision: control.finalDecision, approved: control.approved, execution });
+    markAutomaticRun("scan", source, "completed");
     return result;
   } catch (error) {
     addAudit("SCAN_ERROR", { source, error: error.message });
@@ -13919,6 +14872,584 @@ function strategyLabV2Status() {
   };
 }
 
+
+// v10.19 — Walk-Forward & Anti-Overfitting.
+// Les calculs ci-dessous servent à rejeter les faux positifs; ils ne peuvent pas envoyer d'ordre.
+function antiOverfittingEvent(type, details = {}) {
+  const event = {
+    id: `anti-overfit-event-${randomUUID()}`,
+    generatedAt: nowIso(),
+    version: VERSION,
+    type: researchSafeText(type, 120),
+    details
+  };
+  runtimeState.antiOverfittingEvents.unshift(event);
+  runtimeState.antiOverfittingEvents = runtimeState.antiOverfittingEvents.slice(0, ANTI_OVERFITTING_HISTORY_LIMIT);
+  return event;
+}
+
+function normalCdfApprox(value) {
+  const x = Number(value);
+  if (!Number.isFinite(x)) return x === Infinity ? 1 : 0;
+  const sign = x < 0 ? -1 : 1;
+  const z = Math.abs(x) / Math.sqrt(2);
+  const t = 1 / (1 + 0.3275911 * z);
+  const erf = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-z * z);
+  return 0.5 * (1 + sign * erf);
+}
+
+function inverseNormalCdfApprox(probability) {
+  const p = clampNumber(Number(probability), 1e-12, 1 - 1e-12);
+  const a = [-39.6968302866538, 220.946098424521, -275.928510446969, 138.357751867269, -30.6647980661472, 2.50662827745924];
+  const b = [-54.4760987982241, 161.585836858041, -155.698979859887, 66.8013118877197, -13.2806815528857];
+  const c = [-0.00778489400243029, -0.322396458041136, -2.40075827716184, -2.54973253934373, 4.37466414146497, 2.93816398269878];
+  const d = [0.00778469570904146, 0.32246712907004, 2.445134137143, 3.75440866190742];
+  const low = 0.02425;
+  const high = 1 - low;
+  if (p < low) {
+    const q = Math.sqrt(-2 * Math.log(p));
+    return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
+      ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
+  }
+  if (p > high) {
+    const q = Math.sqrt(-2 * Math.log(1 - p));
+    return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
+      ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
+  }
+  const q = p - 0.5;
+  const r = q * q;
+  return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q /
+    (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
+}
+
+function returnSeriesStatistics(equityCurve = []) {
+  const points = (equityCurve || [])
+    .map((point) => ({ time: new Date(point.time).getTime(), equity: Number(point.equity) }))
+    .filter((point) => Number.isFinite(point.time) && Number.isFinite(point.equity) && point.equity > 0)
+    .sort((a, b) => a.time - b.time);
+  const returns = [];
+  const intervals = [];
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = points[index - 1];
+    const current = points[index];
+    if (previous.equity > 0) returns.push(current.equity / previous.equity - 1);
+    const interval = current.time - previous.time;
+    if (interval > 0) intervals.push(interval);
+  }
+  const mean = average(returns);
+  const deviation = standardDeviation(returns);
+  const sortedIntervals = [...intervals].sort((a, b) => a - b);
+  const medianIntervalMs = sortedIntervals.length ? sortedIntervals[Math.floor(sortedIntervals.length / 2)] : 86400000;
+  let periodsPerYear = 252;
+  if (medianIntervalMs < 20 * 3600000) periodsPerYear = Math.min(8760, Math.max(252, Math.round(365.25 * 86400000 / medianIntervalMs)));
+  else if (medianIntervalMs > 5 * 86400000) periodsPerYear = Math.max(12, Math.round(365.25 * 86400000 / medianIntervalMs));
+  const centered = returns.map((value) => value - Number(mean || 0));
+  const m2 = returns.length ? centered.reduce((sum, value) => sum + value ** 2, 0) / returns.length : 0;
+  const m3 = returns.length ? centered.reduce((sum, value) => sum + value ** 3, 0) / returns.length : 0;
+  const m4 = returns.length ? centered.reduce((sum, value) => sum + value ** 4, 0) / returns.length : 0;
+  const skewness = m2 > 0 ? m3 / Math.pow(m2, 1.5) : 0;
+  const kurtosis = m2 > 0 ? m4 / (m2 * m2) : 3;
+  const sharpePerPeriod = Number.isFinite(mean) && Number.isFinite(deviation) && deviation > 0 ? mean / deviation : 0;
+  return {
+    observations: returns.length,
+    periodsPerYear,
+    medianIntervalMs,
+    meanReturn: roundNumber(mean, 10),
+    volatilityPerPeriod: roundNumber(deviation, 10),
+    sharpePerPeriod: roundNumber(sharpePerPeriod, 8),
+    annualizedSharpe: roundNumber(sharpePerPeriod * Math.sqrt(periodsPerYear), 6),
+    skewness: roundNumber(skewness, 6),
+    kurtosis: roundNumber(kurtosis, 6),
+    returns
+  };
+}
+
+function probabilisticSharpeRatio({ sharpePerPeriod, benchmarkSharpePerPeriod = 0, observations, skewness = 0, kurtosis = 3 }) {
+  const sr = Number(sharpePerPeriod || 0);
+  const target = Number(benchmarkSharpePerPeriod || 0);
+  const n = Math.max(2, Number(observations || 0));
+  const denominatorTerm = Math.max(1e-12, 1 - Number(skewness || 0) * sr + ((Number(kurtosis || 3) - 1) / 4) * sr * sr);
+  const z = (sr - target) * Math.sqrt(n - 1) / Math.sqrt(denominatorTerm);
+  return roundNumber(clampNumber(normalCdfApprox(z), 0, 1), 8);
+}
+
+function expectedMaximumSharpePerPeriod({ trials, observations, skewness = 0, kurtosis = 3 }) {
+  const nTrials = Math.max(1, Number(trials || 1));
+  if (nTrials <= 1) return 0;
+  const n = Math.max(2, Number(observations || 0));
+  const standardError = Math.sqrt(Math.max(1e-12, 1 + ((Number(kurtosis || 3) - 3) / 4))) / Math.sqrt(n - 1);
+  const eulerGamma = 0.5772156649015329;
+  const first = inverseNormalCdfApprox(1 - 1 / nTrials);
+  const second = inverseNormalCdfApprox(1 - 1 / (nTrials * Math.E));
+  return roundNumber(Math.max(0, standardError * ((1 - eulerGamma) * first + eulerGamma * second)), 8);
+}
+
+function deflatedSharpeRatio(stats, trials) {
+  const benchmark = expectedMaximumSharpePerPeriod({
+    trials,
+    observations: stats.observations,
+    skewness: stats.skewness,
+    kurtosis: stats.kurtosis
+  });
+  const probability = probabilisticSharpeRatio({
+    sharpePerPeriod: stats.sharpePerPeriod,
+    benchmarkSharpePerPeriod: benchmark,
+    observations: stats.observations,
+    skewness: stats.skewness,
+    kurtosis: stats.kurtosis
+  });
+  return {
+    trials: Math.max(1, Number(trials || 1)),
+    benchmarkSharpePerPeriod: benchmark,
+    benchmarkSharpeAnnualized: roundNumber(benchmark * Math.sqrt(stats.periodsPerYear || 252), 6),
+    probability,
+    probabilityPct: roundNumber(probability * 100, 4)
+  };
+}
+
+function minimumTrackRecordLength({ stats, targetProbability = ANTI_OVERFITTING_MIN_DSR, benchmarkSharpePerPeriod = 0 }) {
+  const sr = Number(stats.sharpePerPeriod || 0);
+  const target = Number(benchmarkSharpePerPeriod || 0);
+  if (!(sr > target)) return null;
+  const z = inverseNormalCdfApprox(clampNumber(Number(targetProbability), 0.500001, 0.999999));
+  const momentTerm = Math.max(1e-12, 1 - Number(stats.skewness || 0) * sr + ((Number(stats.kurtosis || 3) - 1) / 4) * sr * sr);
+  return Math.ceil(1 + momentTerm * (z / (sr - target)) ** 2);
+}
+
+function buildPurgedWalkForwardFolds(candles, options = {}) {
+  const sorted = (candles || [])
+    .filter(looksLikeCandle)
+    .map((candle) => ({
+      ...candle,
+      timestamp: Number(candle.timestamp ?? new Date(candle.date || candle.fromDate || candle.from || candle.time || candle.Date).getTime())
+    }))
+    .filter((candle) => Number.isFinite(candle.timestamp))
+    .sort((a, b) => a.timestamp - b.timestamp);
+  const trainCandles = Math.max(60, Number(options.trainCandles || ANTI_OVERFITTING_TRAIN_CANDLES));
+  const testCandles = Math.max(20, Number(options.testCandles || ANTI_OVERFITTING_TEST_CANDLES));
+  const embargoCandles = Math.max(1, Number(options.embargoCandles || ANTI_OVERFITTING_EMBARGO_CANDLES));
+  const folds = [];
+  for (let trainStart = 0; trainStart + trainCandles + embargoCandles + testCandles <= sorted.length; trainStart += testCandles) {
+    const trainEndExclusive = trainStart + trainCandles;
+    const testStartIndex = trainEndExclusive + embargoCandles;
+    const testEndExclusive = testStartIndex + testCandles;
+    folds.push({
+      fold: folds.length + 1,
+      trainStartIndex: trainStart,
+      trainEndIndex: trainEndExclusive - 1,
+      embargoStartIndex: trainEndExclusive,
+      embargoEndIndex: testStartIndex - 1,
+      testStartIndex,
+      testEndIndex: testEndExclusive - 1,
+      trainStartTime: sorted[trainStart]?.timestamp || null,
+      trainEndTime: sorted[trainEndExclusive - 1]?.timestamp || null,
+      testStartTime: sorted[testStartIndex]?.timestamp || null,
+      testEndTime: sorted[testEndExclusive - 1]?.timestamp || null,
+      segment: sorted.slice(trainStart, testEndExclusive),
+      startTradingTimestamp: sorted[testStartIndex]?.timestamp || null,
+      trainCandles,
+      embargoCandles,
+      testCandles
+    });
+  }
+  return { sorted, folds, trainCandles, testCandles, embargoCandles };
+}
+
+function classifyValidationRegime(metrics = {}) {
+  const benchmarkReturn = Number(metrics.benchmarkReturnPct);
+  const volatility = Number(metrics.annualizedVolatilityPct);
+  if (Number.isFinite(volatility) && volatility >= 28) return "HIGH_VOLATILITY";
+  if (Number.isFinite(benchmarkReturn) && benchmarkReturn >= 4) return "BULL";
+  if (Number.isFinite(benchmarkReturn) && benchmarkReturn <= -4) return "BEAR";
+  return "SIDEWAYS";
+}
+
+function runPurgedWalkForwardValidation(asset, candles, params = {}, options = {}) {
+  const protocol = buildPurgedWalkForwardFolds(candles, options);
+  const foldReports = protocol.folds.map((fold) => {
+    const result = simulateAssetBacktest(asset, fold.segment, {
+      ...params,
+      startTradingTimestamp: fold.startTradingTimestamp
+    });
+    return {
+      fold: fold.fold,
+      trainStartTime: fold.trainStartTime ? new Date(fold.trainStartTime).toISOString() : null,
+      trainEndTime: fold.trainEndTime ? new Date(fold.trainEndTime).toISOString() : null,
+      testStartTime: fold.testStartTime ? new Date(fold.testStartTime).toISOString() : null,
+      testEndTime: fold.testEndTime ? new Date(fold.testEndTime).toISOString() : null,
+      embargoCandles: fold.embargoCandles,
+      metrics: result.metrics,
+      validation: result.validation,
+      regime: classifyValidationRegime(result.metrics)
+    };
+  });
+  const returns = foldReports.map((fold) => Number(fold.metrics?.totalReturnPct)).filter(Number.isFinite);
+  const drawdowns = foldReports.map((fold) => Number(fold.metrics?.maxDrawdownPct)).filter(Number.isFinite);
+  const regimes = [...new Set(foldReports.map((fold) => fold.regime))];
+  return {
+    asset,
+    protocol: {
+      trainCandles: protocol.trainCandles,
+      testCandles: protocol.testCandles,
+      embargoCandles: protocol.embargoCandles,
+      nonOverlappingTestWindows: true,
+      chronological: true
+    },
+    folds: foldReports.length,
+    positiveFolds: returns.filter((value) => value > 0).length,
+    positiveFoldPct: returns.length ? roundNumber(returns.filter((value) => value > 0).length / returns.length * 100, 4) : 0,
+    averageReturnPct: returns.length ? roundNumber(average(returns), 4) : null,
+    medianReturnPct: returns.length ? roundNumber([...returns].sort((a, b) => a - b)[Math.floor(returns.length / 2)], 4) : null,
+    worstReturnPct: returns.length ? roundNumber(Math.min(...returns), 4) : null,
+    bestReturnPct: returns.length ? roundNumber(Math.max(...returns), 4) : null,
+    worstDrawdownPct: drawdowns.length ? roundNumber(Math.max(...drawdowns), 4) : null,
+    regimes,
+    regimeCount: regimes.length,
+    foldReports
+  };
+}
+
+function findStrategyLabV2Candidate(candidateId) {
+  const key = researchSafeText(candidateId, 220);
+  if (!key) return null;
+  const direct = (runtimeState.strategyLabV2Leaderboard || []).find((item) => item.id === key || item.fingerprint === key);
+  if (direct) return direct;
+  for (const experiment of runtimeState.strategyLabV2Experiments || []) {
+    const candidate = (experiment.results || []).find((item) => item.id === key || item.fingerprint === key);
+    if (candidate) return { ...candidate, experimentTitle: experiment.title, experimentStatus: experiment.status };
+  }
+  return null;
+}
+
+function estimateSelectionBiasRisk({ dsrProbability, trials, positiveFoldPct, regimeCount, costStressReturnPct, rank, totalCandidates }) {
+  const probabilityRisk = (1 - clampNumber(Number(dsrProbability || 0), 0, 1)) * 55;
+  const trialRisk = Math.min(20, Math.log2(Math.max(2, Number(trials || 1))) * 2.5);
+  const foldRisk = Math.max(0, 60 - Number(positiveFoldPct || 0)) * 0.35;
+  const regimeRisk = Number(regimeCount || 0) < ANTI_OVERFITTING_MIN_REGIMES ? 8 : 0;
+  const stressRisk = Number(costStressReturnPct || 0) < 0 ? Math.min(12, Math.abs(Number(costStressReturnPct || 0)) * 0.4) : 0;
+  const rankRisk = totalCandidates > 1 ? Math.max(0, 1 - (Number(rank || totalCandidates) - 1) / (totalCandidates - 1)) * 5 : 0;
+  return roundNumber(clampNumber(probabilityRisk + trialRisk + foldRisk + regimeRisk + stressRisk + rankRisk, 0, 100), 4);
+}
+
+function rebuildAntiOverfittingLeaderboard() {
+  const latestByCandidate = new Map();
+  for (const report of runtimeState.antiOverfittingReports || []) {
+    const key = report.candidate?.fingerprint || report.candidate?.id;
+    if (!key || latestByCandidate.has(key)) continue;
+    latestByCandidate.set(key, report);
+  }
+  runtimeState.antiOverfittingLeaderboard = [...latestByCandidate.values()]
+    .sort((a, b) => {
+      const statusOrder = { ELIGIBLE_FOR_SHADOW: 3, INCONCLUSIVE: 2, REJECTED: 1 };
+      const byStatus = Number(statusOrder[b.status] || 0) - Number(statusOrder[a.status] || 0);
+      if (byStatus) return byStatus;
+      return Number(b.robustnessScore || 0) - Number(a.robustnessScore || 0);
+    })
+    .slice(0, ANTI_OVERFITTING_HISTORY_LIMIT)
+    .map((report) => ({
+      reportId: report.id,
+      generatedAt: report.generatedAt,
+      candidate: report.candidate,
+      status: report.status,
+      robustnessScore: report.robustnessScore,
+      dsrProbabilityPct: report.statistics?.deflatedSharpe?.probabilityPct ?? null,
+      selectionBiasRiskPct: report.selectionBiasRiskPct,
+      positiveFoldPct: report.purgedWalkForward?.positiveFoldPct ?? null,
+      regimeCount: report.purgedWalkForward?.regimeCount ?? null,
+      blockingReasons: report.blockingReasons,
+      warnings: report.warnings,
+      analysisOnly: true
+    }));
+  return runtimeState.antiOverfittingLeaderboard;
+}
+
+async function runAntiOverfittingValidation(candidateId, options = {}) {
+  if (!ANTI_OVERFITTING_ENABLED) throw new Error("Validation anti-surapprentissage désactivée");
+  if (TRADING_MODE === "LIVE" && !ANTI_OVERFITTING_LIVE_ANALYSIS_ENABLED) {
+    throw new Error("Validation anti-surapprentissage désactivée pendant le mode LIVE");
+  }
+  if (runtimeState.antiOverfittingRunning) throw new Error("Une validation anti-surapprentissage est déjà en cours");
+  const candidate = findStrategyLabV2Candidate(candidateId);
+  if (!candidate) throw new Error("Candidat StrategyLab introuvable");
+  const experiment = (runtimeState.strategyLabV2Experiments || []).find((item) => item.id === candidate.experimentId);
+  if (!experiment) throw new Error("Expérience StrategyLab liée introuvable");
+  if (candidate.baseline) throw new Error("Le candidat de référence n'est pas éligible à cette validation");
+
+  runtimeState.antiOverfittingRunning = true;
+  const startedAt = Date.now();
+  antiOverfittingEvent("VALIDATION_STARTED", { candidateId: candidate.id, experimentId: candidate.experimentId, trigger: options.trigger || "manual" });
+  try {
+    const dataset = await prepareStrategyLabV2Dataset(options.assets || experiment.assets, {
+      count: Number(options.count || STRATEGY_LAB_V2_CANDLES),
+      force: Boolean(options.force)
+    });
+    const params = normalizeStrategyParams(candidate.params || {});
+    const benchmarkAsset = dataset.usableAssets.includes(BACKTEST_BENCHMARK_ASSET)
+      ? BACKTEST_BENCHMARK_ASSET
+      : dataset.usableAssets[0];
+    const portfolioBacktest = simulatePortfolioBacktest(dataset.series, {
+      ...params,
+      benchmarkAsset,
+      startTradingTimestamp: dataset.commonTestStartTimestamp
+    });
+    const normalizedConfig = normalizeBacktestConfig({ ...params, benchmarkAsset });
+    const costStress = simulatePortfolioBacktest(dataset.series, {
+      ...params,
+      benchmarkAsset,
+      startTradingTimestamp: dataset.commonTestStartTimestamp,
+      feePct: normalizedConfig.feePct * SCIENTIFIC_BACKTEST_COST_STRESS_MULTIPLIER,
+      slippageBps: normalizedConfig.slippageBps * SCIENTIFIC_BACKTEST_COST_STRESS_MULTIPLIER
+    });
+    const statistics = returnSeriesStatistics(portfolioBacktest.equityCurve);
+    const uniqueTrials = new Set([
+      ...(runtimeState.strategyLabV2Leaderboard || []).map((item) => item.fingerprint).filter(Boolean),
+      ...(runtimeState.strategyLabV2Experiments || []).flatMap((item) => (item.results || []).map((result) => result.fingerprint)).filter(Boolean)
+    ]).size;
+    const trials = Math.max(1, uniqueTrials);
+    const dsr = deflatedSharpeRatio(statistics, trials);
+    const minimumTrackRecord = minimumTrackRecordLength({
+      stats: statistics,
+      targetProbability: ANTI_OVERFITTING_MIN_DSR,
+      benchmarkSharpePerPeriod: dsr.benchmarkSharpePerPeriod
+    });
+
+    const assetValidations = Object.entries(dataset.series).map(([asset, candles]) =>
+      runPurgedWalkForwardValidation(asset, candles, params, {
+        trainCandles: ANTI_OVERFITTING_TRAIN_CANDLES,
+        testCandles: ANTI_OVERFITTING_TEST_CANDLES,
+        embargoCandles: ANTI_OVERFITTING_EMBARGO_CANDLES
+      })
+    );
+    const allFolds = assetValidations.reduce((sum, item) => sum + item.folds, 0);
+    const positiveFolds = assetValidations.reduce((sum, item) => sum + item.positiveFolds, 0);
+    const foldReturns = assetValidations.flatMap((item) => item.foldReports.map((fold) => Number(fold.metrics?.totalReturnPct))).filter(Number.isFinite);
+    const foldDrawdowns = assetValidations.flatMap((item) => item.foldReports.map((fold) => Number(fold.metrics?.maxDrawdownPct))).filter(Number.isFinite);
+    const regimes = [...new Set(assetValidations.flatMap((item) => item.regimes))];
+    const purgedWalkForward = {
+      assets: assetValidations.map((item) => item.asset),
+      folds: allFolds,
+      positiveFolds,
+      positiveFoldPct: allFolds ? roundNumber(positiveFolds / allFolds * 100, 4) : 0,
+      averageFoldReturnPct: foldReturns.length ? roundNumber(average(foldReturns), 4) : null,
+      worstFoldReturnPct: foldReturns.length ? roundNumber(Math.min(...foldReturns), 4) : null,
+      worstFoldDrawdownPct: foldDrawdowns.length ? roundNumber(Math.max(...foldDrawdowns), 4) : null,
+      regimes,
+      regimeCount: regimes.length,
+      protocol: {
+        chronological: true,
+        purged: true,
+        embargoCandles: ANTI_OVERFITTING_EMBARGO_CANDLES,
+        nonOverlappingTestWindows: true,
+        trainCandles: ANTI_OVERFITTING_TRAIN_CANDLES,
+        testCandles: ANTI_OVERFITTING_TEST_CANDLES
+      },
+      assetValidations
+    };
+    const sortedLeaderboard = runtimeState.strategyLabV2Leaderboard || [];
+    const rankIndex = sortedLeaderboard.findIndex((item) => item.id === candidate.id || item.fingerprint === candidate.fingerprint);
+    const rank = rankIndex >= 0 ? rankIndex + 1 : sortedLeaderboard.length || 1;
+    const selectionBiasRiskPct = estimateSelectionBiasRisk({
+      dsrProbability: dsr.probability,
+      trials,
+      positiveFoldPct: purgedWalkForward.positiveFoldPct,
+      regimeCount: purgedWalkForward.regimeCount,
+      costStressReturnPct: costStress.metrics?.totalReturnPct,
+      rank,
+      totalCandidates: Math.max(1, sortedLeaderboard.length)
+    });
+
+    const blockingReasons = [];
+    const warnings = [];
+    if (!portfolioBacktest.validation?.lookaheadSafe) blockingReasons.push("LOOKAHEAD_CHECK_FAILED");
+    if (statistics.observations < ANTI_OVERFITTING_MIN_OBSERVATIONS) blockingReasons.push("INSUFFICIENT_OBSERVATIONS");
+    if (Number(portfolioBacktest.metrics?.closedTrades || 0) < ANTI_OVERFITTING_MIN_TRADES) warnings.push("INSUFFICIENT_CLOSED_TRADES");
+    if (allFolds < ANTI_OVERFITTING_MIN_FOLDS) blockingReasons.push("INSUFFICIENT_PURGED_FOLDS");
+    if (Number(dsr.probability || 0) < ANTI_OVERFITTING_MIN_DSR) blockingReasons.push("DEFLATED_SHARPE_BELOW_THRESHOLD");
+    if (minimumTrackRecord && minimumTrackRecord > statistics.observations) warnings.push("MINIMUM_TRACK_RECORD_NOT_REACHED");
+    if (purgedWalkForward.positiveFoldPct < ANTI_OVERFITTING_MIN_POSITIVE_FOLDS_PCT) warnings.push("LOW_WALK_FORWARD_STABILITY");
+    if (purgedWalkForward.regimeCount < ANTI_OVERFITTING_MIN_REGIMES) warnings.push("INSUFFICIENT_REGIME_COVERAGE");
+    if (Number(purgedWalkForward.worstFoldReturnPct || 0) < -ANTI_OVERFITTING_MAX_WORST_FOLD_LOSS_PCT) blockingReasons.push("WORST_FOLD_LOSS_EXCEEDED");
+    if (Number(costStress.metrics?.totalReturnPct || 0) < 0) warnings.push("NEGATIVE_RETURN_UNDER_COST_STRESS");
+    if (selectionBiasRiskPct > ANTI_OVERFITTING_MAX_SELECTION_BIAS_RISK_PCT) blockingReasons.push("SELECTION_BIAS_RISK_TOO_HIGH");
+    if (!candidate.beatsBaseline) warnings.push("CANDIDATE_DID_NOT_CLEAR_BASELINE_GATE");
+
+    let status = ANTI_OVERFITTING_STATUS.ELIGIBLE_FOR_SHADOW;
+    if (blockingReasons.length) status = ANTI_OVERFITTING_STATUS.REJECTED;
+    else if (warnings.length) status = ANTI_OVERFITTING_STATUS.INCONCLUSIVE;
+    const robustnessScore = roundNumber(clampNumber(
+      Number(dsr.probabilityPct || 0) * 0.42
+      + Number(purgedWalkForward.positiveFoldPct || 0) * 0.28
+      + Math.min(100, Number(purgedWalkForward.regimeCount || 0) / Math.max(1, ANTI_OVERFITTING_MIN_REGIMES) * 100) * 0.12
+      + Math.max(0, 100 - selectionBiasRiskPct) * 0.18
+      - blockingReasons.length * 12
+      - warnings.length * 3,
+      0,
+      100
+    ), 4);
+
+    const report = {
+      id: `anti-overfit-report-${randomUUID()}`,
+      generatedAt: nowIso(),
+      version: VERSION,
+      durationMs: Date.now() - startedAt,
+      trigger: options.trigger || "manual",
+      tradingMode: TRADING_MODE,
+      candidate: {
+        id: candidate.id,
+        fingerprint: candidate.fingerprint,
+        experimentId: candidate.experimentId,
+        hypothesisId: candidate.hypothesisId,
+        family: candidate.family,
+        params,
+        originalScore: candidate.score?.adjustedScore ?? null,
+        beatsBaseline: Boolean(candidate.beatsBaseline),
+        originalRank: rank
+      },
+      dataset: {
+        fingerprint: dataset.fingerprint,
+        requestedAssets: dataset.requestedAssets,
+        usableAssets: dataset.usableAssets,
+        excludedAssets: dataset.excludedAssets,
+        minimumTestCandles: dataset.minimumTestCandles
+      },
+      status,
+      robustnessScore,
+      blockingReasons,
+      warnings,
+      statistics: {
+        observations: statistics.observations,
+        periodsPerYear: statistics.periodsPerYear,
+        annualizedSharpe: statistics.annualizedSharpe,
+        skewness: statistics.skewness,
+        kurtosis: statistics.kurtosis,
+        probabilisticSharpeVsZero: probabilisticSharpeRatio({
+          sharpePerPeriod: statistics.sharpePerPeriod,
+          benchmarkSharpePerPeriod: 0,
+          observations: statistics.observations,
+          skewness: statistics.skewness,
+          kurtosis: statistics.kurtosis
+        }),
+        deflatedSharpe: dsr,
+        minimumTrackRecordObservations: minimumTrackRecord,
+        minimumTrackRecordReached: minimumTrackRecord === null ? false : statistics.observations >= minimumTrackRecord
+      },
+      portfolioMetrics: portfolioBacktest.metrics,
+      costStressMetrics: costStress.metrics,
+      purgedWalkForward,
+      selectionBiasRiskPct,
+      selectionBiasMethod: "transparent heuristic combining DSR, trial count, fold stability, regime coverage and cost stress; not an exact PBO estimator",
+      governance: {
+        analysisOnly: true,
+        canPlaceOrder: false,
+        canPromotePaperAutomatically: false,
+        canPromoteLive: false,
+        nextAllowedStage: status === ANTI_OVERFITTING_STATUS.ELIGIBLE_FOR_SHADOW ? "SHADOW_LIVE_REVIEW" : "NONE"
+      }
+    };
+    runtimeState.antiOverfittingReports.unshift(report);
+    runtimeState.antiOverfittingReports = runtimeState.antiOverfittingReports.slice(0, ANTI_OVERFITTING_HISTORY_LIMIT);
+    runtimeState.lastAntiOverfittingReport = report;
+    rebuildAntiOverfittingLeaderboard();
+    antiOverfittingEvent("VALIDATION_COMPLETED", { candidateId: candidate.id, reportId: report.id, status, robustnessScore });
+    addAudit("ANTI_OVERFITTING_VALIDATION_COMPLETED", {
+      candidateId: candidate.id,
+      reportId: report.id,
+      status,
+      robustnessScore,
+      analysisOnly: true
+    });
+    scheduleSave();
+    return report;
+  } catch (error) {
+    antiOverfittingEvent("VALIDATION_FAILED", { candidateId, error: error.message });
+    addAudit("ANTI_OVERFITTING_VALIDATION_FAILED", { candidateId, error: error.message });
+    scheduleSave();
+    throw error;
+  } finally {
+    runtimeState.antiOverfittingRunning = false;
+  }
+}
+
+async function runAntiOverfittingBatch(options = {}) {
+  const limit = Math.max(1, Math.min(ANTI_OVERFITTING_BATCH_LIMIT, Number(options.limit || ANTI_OVERFITTING_BATCH_LIMIT)));
+  const candidates = (runtimeState.strategyLabV2Leaderboard || [])
+    .filter((candidate) => !candidate.baseline && candidate.verdict !== "FAIL")
+    .slice(0, limit);
+  const results = [];
+  for (const candidate of candidates) {
+    try {
+      const report = await runAntiOverfittingValidation(candidate.id, {
+        count: options.count,
+        force: options.force,
+        trigger: options.trigger || "manual-batch"
+      });
+      results.push({ candidateId: candidate.id, ok: true, reportId: report.id, status: report.status, robustnessScore: report.robustnessScore });
+    } catch (error) {
+      results.push({ candidateId: candidate.id, ok: false, error: error.message });
+    }
+  }
+  const summary = {
+    generatedAt: nowIso(),
+    requested: candidates.length,
+    completed: results.filter((item) => item.ok).length,
+    failed: results.filter((item) => !item.ok).length,
+    eligibleForShadow: results.filter((item) => item.status === ANTI_OVERFITTING_STATUS.ELIGIBLE_FOR_SHADOW).length,
+    results,
+    analysisOnly: true,
+    orderSent: false,
+    promotionPerformed: false
+  };
+  antiOverfittingEvent("BATCH_COMPLETED", summary);
+  scheduleSave();
+  return summary;
+}
+
+function antiOverfittingStatus() {
+  const reports = runtimeState.antiOverfittingReports || [];
+  const latestByStatus = Object.fromEntries(Object.values(ANTI_OVERFITTING_STATUS).map((status) => [
+    status,
+    reports.filter((report) => report.status === status).length
+  ]));
+  return {
+    name: "AntiOverfittingValidationAgent",
+    version: VERSION,
+    generatedAt: nowIso(),
+    enabled: ANTI_OVERFITTING_ENABLED,
+    running: Boolean(runtimeState.antiOverfittingRunning),
+    liveAnalysisEnabled: ANTI_OVERFITTING_LIVE_ANALYSIS_ENABLED,
+    counts: {
+      reports: reports.length,
+      leaderboard: runtimeState.antiOverfittingLeaderboard.length,
+      ...latestByStatus
+    },
+    protocol: {
+      chronological: true,
+      purgedWalkForward: true,
+      nonOverlappingTestWindows: true,
+      trainCandles: ANTI_OVERFITTING_TRAIN_CANDLES,
+      testCandles: ANTI_OVERFITTING_TEST_CANDLES,
+      embargoCandles: ANTI_OVERFITTING_EMBARGO_CANDLES,
+      minimumFolds: ANTI_OVERFITTING_MIN_FOLDS,
+      minimumObservations: ANTI_OVERFITTING_MIN_OBSERVATIONS,
+      minimumTrades: ANTI_OVERFITTING_MIN_TRADES,
+      minimumDeflatedSharpeProbability: ANTI_OVERFITTING_MIN_DSR,
+      minimumPositiveFoldsPct: ANTI_OVERFITTING_MIN_POSITIVE_FOLDS_PCT,
+      maximumSelectionBiasRiskPct: ANTI_OVERFITTING_MAX_SELECTION_BIAS_RISK_PCT,
+      costStressMultiplier: SCIENTIFIC_BACKTEST_COST_STRESS_MULTIPLIER
+    },
+    lastReport: runtimeState.lastAntiOverfittingReport || null,
+    topValidatedCandidates: runtimeState.antiOverfittingLeaderboard.slice(0, 10),
+    governance: {
+      analysisOnly: true,
+      directLiveInfluence: false,
+      canPlaceOrder: false,
+      canPromotePaperAutomatically: false,
+      canPromoteLive: false,
+      nextVersionStage: "SHADOW_LIVE"
+    }
+  };
+}
+
 function htmlEscape(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -13927,7 +15458,7 @@ function htmlEscape(value) {
     .replaceAll('"', "&quot;");
 }
 
-function renderDashboard({ summary, metrics, market, trend, preferredNextAssets, secret }) {
+function renderDashboard({ summary, metrics, market, trend, preferredNextAssets }) {
   const agents = runtimeState.lastFoundationAgents || {};
   const risk = agents.riskBudgetAgent || buildRiskBudgetState(summary);
   const health = agents.healthAgent || buildHealthAgent();
@@ -13944,34 +15475,48 @@ function renderDashboard({ summary, metrics, market, trend, preferredNextAssets,
   const dataQualityStatus = buildDataQualityStatus();
   const scientificStatus = scientificBacktestStatus();
   const strategyLabV2 = strategyLabV2Status();
+  const antiOverfitting = antiOverfittingStatus();
   const livePerformance = agents.livePerformanceAgent || runtimeState.lastPerformanceReport || {
     status: "NOT_MEASURED",
     performance: {},
     attribution: { topContributors: [], bottomContributors: [] }
   };
   const regime = agents.marketRegimeAgent || technical.marketRegimeAgent || { regime: "UNKNOWN", riskMultiplier: 0.65 };
+  const portfolioIdentity = summary.livePortfolioIdentity || { ok: !LIVE_TRADING_ENABLED, status: LIVE_TRADING_ENABLED ? "UNCONFIRMED" : "NOT_REQUIRED", reasons: [] };
   const modeClass = TRADING_MODE === "LIVE" ? "danger" : (TRADING_MODE === "PAPER" ? "paper" : "safe");
   const positionsRows = (summary.aggregatedPositions || []).map((p) => `
     <tr><td>${htmlEscape(p.asset)}</td><td>${htmlEscape(p.category)}</td><td>${htmlEscape(p.estimatedValue ?? p.totalAmount ?? "?")}</td><td>${htmlEscape(summary.assetWeightsPct?.[p.asset] ?? "?")}%</td></tr>`).join("") || '<tr><td colspan="4">Aucune position</td></tr>';
   const candidatesRows = (preferredNextAssets || []).slice(0, 10).map((p) => `
     <tr><td>${p.priority}</td><td>${htmlEscape(p.asset)}</td><td>${htmlEscape(p.priceStatus)}</td><td>${p.eligibleForTrade ? "✅" : "—"}</td><td>${htmlEscape(p.diversificationReason)}</td></tr>`).join("");
   const comparisonRows = Object.values(integrity.comparisons || {}).map((c) => `
-    <tr><td>${htmlEscape(c.asset)}</td><td>${htmlEscape(c.primaryPrice ?? "—")}</td><td>${htmlEscape(c.secondaryPrice ?? "—")}</td><td>${htmlEscape(c.tertiaryPrice ?? "—")}</td><td>${htmlEscape(c.consensusPrice ?? "—")}</td><td>${htmlEscape(c.maxDeviationPct ?? c.deviationPct ?? "—")}%</td><td>${htmlEscape(c.status)}</td></tr>`).join("") || '<tr><td colspan="7">Aucun consensus calculé</td></tr>';
-  const providerRows = Object.values(providerHealth.providers || {}).map((p) => `
-    <tr><td>${htmlEscape(p.provider)}</td><td>${htmlEscape(p.successRatePct ?? "—")}%</td><td>${htmlEscape(p.averageLatencyMs ?? "—")} ms</td><td>${htmlEscape(p.consecutiveFailures ?? 0)}</td><td>${p.quarantined ? "⛔ jusqu’au " + htmlEscape(p.quarantinedUntil) : "✅"}</td></tr>`).join("");
+    <tr><td>${htmlEscape(c.asset)}</td><td>${htmlEscape(c.primaryPrice ?? "—")}<div class="muted">${htmlEscape(c.primaryAgeMinutes ?? "—")} min</div></td><td>${htmlEscape(c.secondaryPrice ?? "—")}<div class="muted">${htmlEscape(c.secondaryAgeMinutes ?? "—")} min</div></td><td>${htmlEscape(c.tertiaryPrice ?? "—")}<div class="muted">${htmlEscape(c.tertiaryAgeMinutes ?? "—")} min</div></td><td>${htmlEscape(c.consensusPrice ?? "—")}<div class="muted">${htmlEscape((c.consensusProviders || []).join(", ") || "aucun")}</div></td><td>${htmlEscape(c.maxDeviationPct ?? c.deviationPct ?? "—")}%</td><td>${htmlEscape(c.status)}${(c.outlierProviders || []).length ? `<div class="bad">hors consensus: ${htmlEscape(c.outlierProviders.join(", "))}</div>` : ""}</td></tr>`).join("") || '<tr><td colspan="7">Aucun consensus calculé</td></tr>';
+  const providerRows = Object.values(providerHealth.providers || {}).map((p) => {
+    const stateLabel = !p.configured
+      ? "NON CONFIGURÉ"
+      : (!p.tested ? "NON TESTÉ" : (p.quarantined ? "⛔ jusqu’au " + htmlEscape(p.quarantinedUntil) : "✅"));
+    const assetLabel = (p.quarantinedAssets || []).length
+      ? `<div class="bad">actifs: ${htmlEscape(p.quarantinedAssets.join(", "))}</div>`
+      : "";
+    return `<tr><td>${htmlEscape(p.provider)}</td><td>${htmlEscape(p.successRatePct ?? "—")}${p.successRatePct === null ? "" : "%"}</td><td>${htmlEscape(p.averageLatencyMs ?? "—")} ms</td><td>${htmlEscape(p.consecutiveFailures ?? 0)}</td><td>${stateLabel}${assetLabel}</td></tr>`;
+  }).join("");
   const technicalRows = (technical.ranking || []).slice(0, 12).map((item) => `
     <tr><td>${htmlEscape(item.asset)}</td><td>${htmlEscape(item.technicalScore)}</td><td>${htmlEscape(item.signal)}</td><td>${htmlEscape(item.rsiDaily ?? "—")}</td><td>${htmlEscape(item.atrDailyPct ?? "—")}%</td><td>${item.buyEligible && item.marketEligible ? "✅" : "—"}</td></tr>`).join("") || '<tr><td colspan="6">Analyse technique non disponible</td></tr>';
-  const intelligenceRows = (intelligence.ranking || []).slice(0, 12).map((item) => `
-    <tr><td>${htmlEscape(item.asset)}</td><td>${htmlEscape(item.intelligenceScore)}</td><td>${htmlEscape(item.newsScore)}</td><td>${htmlEscape(item.fundamentalScore)}</td><td>${htmlEscape(item.socialScore)}</td><td>${item.buyVeto ? "⛔" : item.buySupport ? "✅" : "—"}</td><td>${htmlEscape((item.riskFlags || []).join(", ") || "—")}</td></tr>`).join("") || '<tr><td colspan="7">Couche intelligence non disponible</td></tr>';
+  const intelligenceRows = (intelligence.ranking || []).slice(0, 12).map((item) => {
+    const neutralFallback = Number(item.confidence || item.coordinatorConfidence || 0) <= 0 &&
+      Number(item.newsScore) === 50 && Number(item.fundamentalScore) === 50 && Number(item.socialScore) === 50;
+    const display = (value) => neutralFallback ? "—" : value;
+    return `<tr><td>${htmlEscape(item.asset)}</td><td>${htmlEscape(display(item.intelligenceScore))}</td><td>${htmlEscape(display(item.newsScore))}</td><td>${htmlEscape(display(item.fundamentalScore))}</td><td>${htmlEscape(display(item.socialScore))}</td><td>${neutralFallback ? "PAS DE DONNÉES" : (item.buyVeto ? "⛔" : item.buySupport ? "✅" : "—")}</td><td>${htmlEscape((item.riskFlags || []).join(", ") || "—")}</td></tr>`;
+  }).join("") || '<tr><td colspan="7">Couche intelligence non disponible</td></tr>';
   const councilRows = (council.ranking || []).slice(0, 14).map((item) => `
     <tr><td>${htmlEscape(item.asset)}</td><td>${htmlEscape(item.status)}</td><td>${htmlEscape(item.recommendation)}</td><td>${htmlEscape(item.support?.buyPct ?? "—")}%</td><td>${htmlEscape(item.support?.sellPct ?? "—")}%</td><td>${htmlEscape(item.support?.vetoPct ?? "—")}%</td><td>${htmlEscape(item.disagreementPct ?? "—")}%</td><td>${htmlEscape(item.participationCount ?? 0)}</td><td>${htmlEscape((item.hardVetoes || []).map((v) => v.agent).join(", ") || "—")}</td></tr>`).join("") || '<tr><td colspan="9">Conseil multi-agents non disponible</td></tr>';
   const lastDecision = runtimeState.lastDecision?.decision || null;
   const performanceRows = (livePerformance.attribution?.topContributors || []).map((item) => `<tr><td>${htmlEscape(item.asset)}</td><td>${htmlEscape(item.category)}</td><td>${htmlEscape(item.invested)}</td><td>${htmlEscape(item.unrealizedProfit)}</td><td>${htmlEscape(item.returnPctOnInvested ?? "—")}%</td></tr>`).join("") || `<tr><td colspan="5">Aucune attribution disponible</td></tr>`;
   return `<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LEO-AI ${VERSION}</title><style>
     body{font-family:system-ui;background:#0b1020;color:#edf2ff;margin:0;padding:16px}.wrap{max-width:1200px;margin:auto}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.card{background:#151d34;border:1px solid #293554;border-radius:14px;padding:14px}.hero{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.badge{padding:8px 12px;border-radius:999px;font-weight:800}.safe{background:#173c2c}.paper{background:#4a3b13}.danger{background:#5a1f2b}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;border-bottom:1px solid #2d3857;padding:8px;vertical-align:top}a{color:#8fc5ff}.ok{color:#72e0a8}.bad{color:#ff8797}.muted{color:#a7b1ca}pre{white-space:pre-wrap;word-break:break-word}</style></head><body><div class="wrap">
-    <div class="hero"><div><h1>LEO-AI SENTINEL v10.18</h1><div class="muted">StrategyLab + Scientific Backtesting + Research Knowledge Layer</div></div><div class="badge ${modeClass}">MODE ${TRADING_MODE}</div></div>
+    <div class="hero"><div><h1>LEO-AI SENTINEL v10.21</h1><div class="muted">Intégrité des prix + identité du portefeuille + fiabilité des automatismes</div></div><div class="badge ${modeClass}">MODE ${TRADING_MODE}</div></div>
     <div class="grid" style="margin-top:14px">
       <div class="card"><b>Portefeuille</b><h2>${summary.uniquePositionsCount} actifs</h2><div>Valeur suivie: ${htmlEscape(summary.totalTrackedValue)} USD</div><div>Cash disponible: ${htmlEscape(summary.availableCash)} USD</div></div>
+      <div class="card"><b>Identité portefeuille LIVE</b><h2 class="${portfolioIdentity.ok ? "ok" : "bad"}">${htmlEscape(portfolioIdentity.status)}</h2><div>${htmlEscape((portfolioIdentity.reasons || []).join(", ") || "Portefeuille REAL confirmé")}</div><div class="muted">ID ${htmlEscape(portfolioIdentity.current?.portfolioId || "non fourni par l’API")} · base ${htmlEscape(portfolioIdentity.expected?.totalValueUsd ?? "—")} USD</div></div>
       <div class="card"><b>Marché eToro</b><h2>${market?.tradableCount || 0} négociables</h2><div>${market?.freshCount || 0} frais · ${market?.closedCount || 0} fermés · ${market?.staleCount || 0} périmés</div></div>
       <div class="card"><b>RiskBudgetAgent</b><h2 class="${risk.newBuyBlocked ? "bad" : "ok"}">${risk.newBuyBlocked ? "ACHATS BLOQUÉS" : "BUDGET OK"}</h2><div>Jour: ${htmlEscape(risk.dailyChangePct ?? "—")}% · Drawdown: ${htmlEscape(risk.drawdownPct ?? "—")}%</div></div>
       <div class="card"><b>HealthAgent</b><h2 class="${health.circuitBreakerOpen ? "bad" : "ok"}">${health.circuitBreakerOpen ? "CIRCUIT OUVERT" : "SYSTÈME OK"}</h2><div>${htmlEscape(health.reasons?.join(", ") || "Aucun veto")}</div></div>
@@ -13986,7 +15531,7 @@ function renderDashboard({ summary, metrics, market, trend, preferredNextAssets,
       <div class="card"><b>PaperPerformanceAgent</b><h2>${htmlEscape(paperPerformance.totalReturnPct ?? "—")}%</h2><div>Drawdown ${htmlEscape(paperPerformance.maxDrawdownPct ?? "—")}% · Sharpe ${htmlEscape(paperPerformance.sharpe ?? "—")}</div></div>
       <div class="card"><b>Dernière décision</b><h2>${htmlEscape(lastDecision?.decision || "Aucune")}</h2><div>${htmlEscape(lastDecision?.asset || "")}</div><div class="muted">${htmlEscape(runtimeState.lastDecision?.risk_reason || "")}</div></div>
       <div class="card"><b>ExecutionVerifier</b><h2 class="${executionVerifierStatus().activeIntentsCount ? "bad" : "ok"}">${executionVerifierStatus().activeIntentsCount ? executionVerifierStatus().activeIntentsCount + " À RÉCONCILIER" : "AUCUN INTENT ACTIF"}</h2><div>${htmlEscape(runtimeState.lastExecutionVerification?.status || "Aucune exécution vérifiée")}</div></div>
-      <div class="card"><b>PortfolioAllocationEngine</b><h2 class="${summary.allocationPlan?.status === "CASH_MINIMUM_BREACHED" || summary.allocationPlan?.status === "OVER_MAX" ? "bad" : "ok"}">${htmlEscape(summary.allocationPlan?.status || "UNKNOWN")}</h2><div>Profil ${htmlEscape(summary.allocationPlan?.profile || PORTFOLIO_ALLOCATION_PROFILE)} · cash ${htmlEscape(summary.allocationPlan?.cash?.currentPct ?? "—")}% / cible ${htmlEscape(summary.allocationPlan?.cash?.targetPct ?? "—")}%</div></div>
+      <div class="card"><b>PortfolioAllocationEngine</b><h2 class="${summary.allocationPlan?.status === "CASH_MINIMUM_BREACHED" || summary.allocationPlan?.status === "OVER_MAX" ? "bad" : "ok"}">${htmlEscape(summary.allocationPlan?.status || "UNKNOWN")}</h2><div>Profil ${htmlEscape(summary.allocationPlan?.profile || PORTFOLIO_ALLOCATION_PROFILE)} · cash ${htmlEscape(summary.allocationPlan?.cash?.currentPct ?? "—")}% / cible ${htmlEscape(summary.allocationPlan?.cash?.targetPct ?? "—")}%</div><div class="muted">${htmlEscape(summary.allocationPlan?.feasibility?.estimatedOrdersAtCurrentCap ?? "—")} ordres estimés au plafond actuel · ${htmlEscape(summary.allocationPlan?.feasibility?.estimatedMinimumDaysAtDailyLimit ?? "—")} jours minimum</div></div>
       <div class="card"><b>LivePerformanceAttributionAgent</b><h2>${htmlEscape(livePerformance.performance?.accountReturnPct ?? "—")}%</h2><div>Benchmark ${htmlEscape(livePerformance.benchmarkAsset || PERFORMANCE_BENCHMARK_ASSET)} ${htmlEscape(livePerformance.performance?.benchmarkReturnPct ?? "—")}% · excès ${htmlEscape(livePerformance.performance?.excessReturnPct ?? "—")}%</div><div class="muted">${htmlEscape(livePerformance.status || "NOT_MEASURED")} · Sharpe ${htmlEscape(livePerformance.performance?.sharpe ?? "—")}</div></div>
       <div class="card"><b>RiskSellIntelligenceAgent</b><h2 class="${riskSell.status === "HARD_CIRCUIT" ? "bad" : "ok"}">${htmlEscape(riskSell.status || "NOT_MEASURED")}</h2><div>Drawdown ${htmlEscape(riskSell.globalRisk?.accountDrawdownPct ?? "—")}% · jour ${htmlEscape(riskSell.globalRisk?.dailyChangePct ?? "—")}%</div><div>${riskSell.sellCandidates?.length || 0} revue(s) SELL · ${riskSell.emergencyReviews?.length || 0} urgente(s)</div></div>
     </div>
@@ -14003,8 +15548,9 @@ function renderDashboard({ summary, metrics, market, trend, preferredNextAssets,
     <div class="card" style="margin-top:14px"><h3>Research Knowledge Layer</h3><div>Sources ${htmlEscape(researchKnowledge.counts?.sources ?? 0)} · preuves acceptées ${htmlEscape(researchKnowledge.counts?.acceptedEvidence ?? 0)} · hypothèses prêtes ${htmlEscape(researchKnowledge.counts?.readyHypotheses ?? 0)} · expériences ${htmlEscape(researchKnowledge.counts?.experiments ?? 0)}</div><div class="muted">Bibliothèque advisory-only : aucune preuve ou hypothèse ne peut créer directement un ordre LIVE.</div></div>
     <div class="card" style="margin-top:14px"><h3>Data Quality & Scientific Backtesting</h3><div>Audits ${htmlEscape(dataQualityStatus.counts?.total ?? 0)} · PASS ${htmlEscape(dataQualityStatus.counts?.pass ?? 0)} · WARN ${htmlEscape(dataQualityStatus.counts?.warn ?? 0)} · FAIL ${htmlEscape(dataQualityStatus.counts?.fail ?? 0)}</div><div>Essais scientifiques ${htmlEscape(scientificStatus.counts?.totalTrials ?? 0)} · uniques ${htmlEscape(scientificStatus.counts?.uniqueTrials ?? 0)} · verdict ${htmlEscape(scientificStatus.lastReport?.verdict || "NOT_RUN")}</div><div class="muted">Holdout temporel, embargo, coûts stressés et registre des essais. Analyse uniquement.</div></div>
     <div class="card" style="margin-top:14px"><h3>StrategyLab v10.18</h3><div>Expériences ${htmlEscape(strategyLabV2.counts?.experiments ?? 0)} · planifiées ${htmlEscape(strategyLabV2.counts?.planned ?? 0)} · réussies ${htmlEscape(strategyLabV2.counts?.passed ?? 0)} · classement ${htmlEscape(strategyLabV2.counts?.leaderboard ?? 0)}</div><div>Dernier état ${htmlEscape(strategyLabV2.lastRun?.status || "NOT_RUN")} · champion ${htmlEscape(strategyLabV2.lastRun?.champion?.id || "aucun")}</div><div class="muted">Hypothèses transformées en candidats reproductibles; aucun ordre et aucune promotion automatique.</div></div>
-    <div class="card" style="margin-top:14px"><h3>Contrôles</h3><a href="/watch?secret=${encodeURIComponent(secret || "")}">Watch</a> · <a href="/scan?secret=${encodeURIComponent(secret || "")}">Scan</a> · <a href="/foundation-status?secret=${encodeURIComponent(secret || "")}">Foundation status</a> · <a href="/data-sources?secret=${encodeURIComponent(secret || "")}">Data sources</a> · <a href="/provider-health?secret=${encodeURIComponent(secret || "")}">Provider health</a> · <a href="/technical-summary?secret=${encodeURIComponent(secret || "")}">Technical summary</a> · <a href="/intelligence-summary?secret=${encodeURIComponent(secret || "")}">Intelligence summary</a> · <a href="/market-regime?secret=${encodeURIComponent(secret || "")}">Market regime</a> · <a href="/agent-council?secret=${encodeURIComponent(secret || "")}">Agent council</a> · <a href="/agent-history?secret=${encodeURIComponent(secret || "")}">Agent history</a> · <a href="/paper-status?secret=${encodeURIComponent(secret || "")}">Paper status</a> · <a href="/paper-performance?secret=${encodeURIComponent(secret || "")}">Paper performance</a> · <a href="/backtest-status?secret=${encodeURIComponent(secret || "")}">Backtest status</a> · <a href="/strategy-validation?secret=${encodeURIComponent(secret || "")}">Strategy validation</a> · <a href="/live-preflight?secret=${encodeURIComponent(secret || "")}&asset=SPY&side=BUY&amount=10">LIVE preflight</a> · <a href="/execution-status?secret=${encodeURIComponent(secret || "")}">Execution status</a> · <a href="/allocation-status?secret=${encodeURIComponent(secret || "")}">Allocation status</a> · <a href="/performance-status?secret=${encodeURIComponent(secret || "")}">Performance status</a> · <a href="/performance-history?secret=${encodeURIComponent(secret || "")}">Performance history</a> · <a href="/risk-sell-status?secret=${encodeURIComponent(secret || "")}">Risk/Sell status</a> · <a href="/risk-sell-history?secret=${encodeURIComponent(secret || "")}">Risk/Sell history</a> · <a href="/macro-regime-status?secret=${encodeURIComponent(secret || "")}">Macro regime</a> · <a href="/macro-regime-history?secret=${encodeURIComponent(secret || "")}">Macro history</a> · <a href="/data-quality-status?secret=${encodeURIComponent(secret || "")}">Data quality</a> · <a href="/scientific-backtest-status?secret=${encodeURIComponent(secret || "")}">Scientific backtests</a> · <a href="/scientific-backtest?secret=${encodeURIComponent(secret || "")}&asset=SPY">Scientific SPY</a> · <a href="/research-status?secret=${encodeURIComponent(secret || "")}">Research status</a> · <a href="/research-sources?secret=${encodeURIComponent(secret || "")}">Research sources</a> · <a href="/research-hypotheses?secret=${encodeURIComponent(secret || "")}">Research hypotheses</a> · <a href="/strategy-lab-v2-status?secret=${encodeURIComponent(secret || "")}">StrategyLab v10.18</a> · <a href="/strategy-lab-experiments?secret=${encodeURIComponent(secret || "")}">Lab experiments</a> · <a href="/strategy-lab-leaderboard?secret=${encodeURIComponent(secret || "")}">Lab leaderboard</a> · <a href="/audit?secret=${encodeURIComponent(secret || "")}">Audit</a></div>
-  </div></body></html>`;
+    <div class="card" style="margin-top:14px"><h3>Anti-Overfitting v10.19</h3><div>Rapports ${htmlEscape(antiOverfitting.counts?.reports ?? 0)} · éligibles shadow ${htmlEscape(antiOverfitting.counts?.ELIGIBLE_FOR_SHADOW ?? 0)} · rejetés ${htmlEscape(antiOverfitting.counts?.REJECTED ?? 0)}</div><div>Dernier statut ${htmlEscape(antiOverfitting.lastReport?.status || "NOT_RUN")} · robustesse ${htmlEscape(antiOverfitting.lastReport?.robustnessScore ?? "—")}</div><div class="muted">DSR, nombre d’essais, embargo et folds non chevauchants; aucun ordre et aucune promotion automatique.</div></div>
+    <div class="card" style="margin-top:14px"><h3>Contrôles</h3><a href="/watch">Watch</a> · <a href="/scan">Scan</a> · <a href="/foundation-status">Foundation status</a> · <a href="/data-sources">Data sources</a> · <a href="/provider-health">Provider health</a> · <a href="/technical-summary">Technical summary</a> · <a href="/intelligence-summary">Intelligence summary</a> · <a href="/market-regime">Market regime</a> · <a href="/agent-council">Agent council</a> · <a href="/agent-history">Agent history</a> · <a href="/paper-status">Paper status</a> · <a href="/paper-performance">Paper performance</a> · <a href="/backtest-status">Backtest status</a> · <a href="/strategy-validation">Strategy validation</a> · <a href="/live-preflight?asset=SPY&side=BUY&amount=10">LIVE preflight</a> · <a href="/execution-status">Execution status</a> · <a href="/allocation-status">Allocation status</a> · <a href="/performance-status">Performance status</a> · <a href="/performance-history">Performance history</a> · <a href="/risk-sell-status">Risk/Sell status</a> · <a href="/risk-sell-history">Risk/Sell history</a> · <a href="/macro-regime-status">Macro regime</a> · <a href="/macro-regime-history">Macro history</a> · <a href="/data-quality-status">Data quality</a> · <a href="/scientific-backtest-status">Scientific backtests</a> · <a href="/scientific-backtest?asset=SPY">Scientific SPY</a> · <a href="/research-status">Research status</a> · <a href="/research-sources">Research sources</a> · <a href="/research-hypotheses">Research hypotheses</a> · <a href="/strategy-lab-v2-status">StrategyLab v10.18</a> · <a href="/strategy-lab-experiments">Lab experiments</a> · <a href="/strategy-lab-leaderboard">Lab leaderboard</a> · <a href="/anti-overfitting-status">Anti-overfitting</a> · <a href="/anti-overfitting-reports">Validation reports</a> · <a href="/purged-walk-forward-protocol">Purged protocol</a> · <a href="/memory-status">Memory status</a> · <a href="/auto-trading-check">Auto-trading check</a> · <a href="/portfolio-identity-status">Portfolio identity</a> · <a href="/audit">Audit</a></div>
+  </div><script>if(location.search.includes("secret=")){history.replaceState({},document.title,location.pathname);}</script></body></html>`;
 }
 
 app.get("/", (req, res) => {
@@ -14057,6 +15603,112 @@ app.get("/memory-status", requireSecret, (req, res) => {
   });
 });
 
+app.get("/memory-maintenance", requireSecret, async (req, res) => {
+  if (String(req.query.confirm || "") !== "COMPACT_MEMORY") {
+    return res.status(400).json({
+      version: VERSION,
+      compacted: false,
+      reason: "Ajoute &confirm=COMPACT_MEMORY pour lancer une sauvegarde compacte sans supprimer les preuves d'exécution."
+    });
+  }
+  const before = memoryStatus();
+  const saved = await flushPersistentState();
+  const after = memoryStatus();
+  return res.status(saved ? 200 : 500).json({
+    version: VERSION,
+    time: nowIso(),
+    compacted: saved,
+    before: {
+      bytes: before.last_save_bytes,
+      usagePct: before.memory_usage_pct,
+      pressure: before.memory_pressure
+    },
+    after: {
+      bytes: after.last_save_bytes,
+      targetBytes: after.upstash_target_state_bytes,
+      usagePct: after.memory_usage_pct,
+      pressure: after.memory_pressure,
+      compaction: after.compaction,
+      largestSections: after.largest_persisted_sections
+    }
+  });
+});
+
+app.get("/auto-trading-check", requireSecret, (req, res) => {
+  const memory = memoryStatus();
+  const verifier = executionVerifierStatus();
+  const blockers = [];
+  const warnings = [];
+  const missingEnvironment = [];
+
+  if (!process.env.ETORO_API_KEY) missingEnvironment.push("ETORO_API_KEY");
+  if (!process.env.ETORO_USER_KEY) missingEnvironment.push("ETORO_USER_KEY");
+  if (!process.env.OPENAI_API_KEY) missingEnvironment.push("OPENAI_API_KEY");
+  if (!BOT_SECRET) missingEnvironment.push("BOT_SECRET");
+
+  if (!ENABLE_INTERNAL_TRADE_CRON) warnings.push("Cron interne de scan désactivé : un cron externe doit appeler /scan.");
+  if (TRADING_MODE === "OBSERVE") blockers.push("TRADING_MODE=OBSERVE interdit toute exécution.");
+  if (TRADING_MODE === "PAPER") warnings.push("TRADING_MODE=PAPER : les décisions sont automatiques mais aucun ordre réel n'est envoyé.");
+  if (TRADING_MODE === "LIVE" && !LIVE_EXECUTION_ARMED) blockers.push("LIVE_EXECUTION_ARMED=false : aucun ordre réel ne peut être envoyé.");
+  if (TRADING_MODE === "LIVE" && !EXECUTION_VERIFIER_ENABLED) blockers.push("ExecutionVerifier désactivé en mode LIVE.");
+  if (TRADING_MODE === "LIVE" && LIVE_PORTFOLIO_IDENTITY_REQUIRED && !runtimeState.livePortfolioIdentity) {
+    blockers.push("Identité du portefeuille REAL non confirmée via /portfolio-identity-confirm.");
+  }
+  if (TRADING_MODE === "LIVE" && missingEnvironment.length > 0) {
+    blockers.push(`Variables indispensables absentes : ${missingEnvironment.join(", ")}.`);
+  } else if (missingEnvironment.length > 0) {
+    warnings.push(`Variables absentes : ${missingEnvironment.join(", ")}.`);
+  }
+  if (TRADING_MODE === "LIVE" && !memory.persistent) blockers.push("Mémoire persistante indisponible en mode LIVE.");
+  if (memory.memory_pressure === "CRITICAL") blockers.push("Mémoire Upstash en pression CRITICAL.");
+  if (memory.memory_pressure === "WARNING") warnings.push("Mémoire Upstash au-dessus du seuil d'avertissement.");
+  if (verifier.activeIntentsCount > 0) blockers.push(`${verifier.activeIntentsCount} intent(s) LIVE actif(s) à réconcilier avant un nouvel ordre.`);
+  if (!runtimeState.lastDecision) warnings.push("Aucune décision enregistrée depuis le démarrage.");
+
+  const latestDecision = runtimeState.lastDecision?.decision || runtimeState.lastDecision || null;
+  const latestExecution = runtimeState.lastDecision?.execution || null;
+  const provenExecution = Boolean(
+    runtimeState.executionHistory.some((item) => item?.mode === "LIVE") &&
+    runtimeState.executionVerificationHistory.some((item) => item?.confirmed === true)
+  );
+  const automaticScanAvailable = Boolean(ENABLE_INTERNAL_TRADE_CRON);
+  const liveExecutionConfigured = Boolean(
+    TRADING_MODE === "LIVE" &&
+    LIVE_EXECUTION_ARMED &&
+    EXECUTION_VERIFIER_ENABLED &&
+    (!LIVE_PORTFOLIO_IDENTITY_REQUIRED || runtimeState.livePortfolioIdentity) &&
+    missingEnvironment.length === 0 &&
+    memory.persistent
+  );
+
+  res.json({
+    version: VERSION,
+    time: nowIso(),
+    tradingMode: TRADING_MODE,
+    automaticScanAvailable,
+    liveExecutionArmed: LIVE_EXECUTION_ARMED,
+    liveExecutionConfigured,
+    readyForAutomaticDecisionCycle: blockers.length === 0,
+    realBuySellProven: provenExecution,
+    blockers,
+    warnings,
+    missingEnvironment,
+    portfolioIdentity: runtimeState.livePortfolioIdentity || null,
+    scheduler: schedulerStatus(),
+    automationGuards: runtimeState.automationGuards,
+    lastDecision: latestDecision,
+    lastExecution: latestExecution,
+    counters: {
+      executionHistory: runtimeState.executionHistory.length,
+      orderIntents: Object.keys(runtimeState.orderIntents || {}).length,
+      activeOrderIntents: verifier.activeIntentsCount,
+      executionVerifications: runtimeState.executionVerificationHistory.length
+    },
+    memory: compactMemoryStatus(),
+    proofRule: "La chaîne réelle est prouvée seulement après un ordre LIVE accepté puis confirmé par une relecture du portefeuille eToro."
+  });
+});
+
 app.get("/scheduler-status", requireSecret, (req, res) => {
   res.json({
     version: VERSION,
@@ -14074,6 +15726,51 @@ app.get("/execution-status", requireSecret, (req, res) => {
     time: nowIso(),
     executionVerifier: executionVerifierStatus()
   });
+});
+
+app.get("/portfolio-identity-status", requireSecret, async (req, res) => {
+  try {
+    const portfolio = await getPortfolio({ environment: "REAL" });
+    const validation = validatePortfolioResponse(portfolio, { requireReal: true });
+    const summary = validation.ok ? extractPortfolioSummary(portfolio) : null;
+    const identity = summary
+      ? validateLivePortfolioIdentity(portfolio, summary)
+      : { ok: false, status: "PORTFOLIO_INVALID", reasons: validation.errors };
+    res.status(identity.ok ? 200 : 409).json({
+      version: VERSION,
+      tradingMode: TRADING_MODE,
+      required: LIVE_PORTFOLIO_IDENTITY_REQUIRED,
+      validation,
+      identity,
+      confirmedIdentity: runtimeState.livePortfolioIdentity,
+      executionAttempted: false
+    });
+  } catch (error) {
+    res.status(500).json({ version: VERSION, error: error.message, executionAttempted: false });
+  }
+});
+
+app.get("/portfolio-identity-confirm", requireSecret, async (req, res) => {
+  try {
+    if (req.query.confirm !== PORTFOLIO_IDENTITY_CONFIRMATION) {
+      return res.status(400).json({
+        version: VERSION,
+        confirmed: false,
+        executionAttempted: false,
+        reason: `Ajoute &confirm=${PORTFOLIO_IDENTITY_CONFIRMATION} après avoir vérifié la valeur et les positions du portefeuille REAL.`
+      });
+    }
+    const result = await confirmLivePortfolioIdentity();
+    res.json({
+      version: VERSION,
+      confirmed: true,
+      executionAttempted: false,
+      identity: result.snapshot,
+      portfolioSummary: result.summary
+    });
+  } catch (error) {
+    res.status(500).json({ version: VERSION, confirmed: false, error: error.message, executionAttempted: false });
+  }
 });
 
 app.get("/allocation-status", requireSecret, async (req, res) => {
@@ -14477,6 +16174,90 @@ app.get("/strategy-lab-run-all", requireSecret, async (req, res) => {
       force: String(req.query.force || "") === "true",
       trigger: "manual-http-batch"
     });
+    res.json({ version: VERSION, ...result });
+  } catch (error) {
+    res.status(400).json({ version: VERSION, error: error.message, analysisOnly: true, orderSent: false });
+  }
+});
+
+
+app.get("/anti-overfitting-status", requireSecret, (req, res) => {
+  res.json(antiOverfittingStatus());
+});
+
+app.get("/anti-overfitting-reports", requireSecret, (req, res) => {
+  const limit = Math.max(1, Math.min(ANTI_OVERFITTING_HISTORY_LIMIT, Number(req.query.limit || 50)));
+  const status = String(req.query.status || "").toUpperCase();
+  const reports = (runtimeState.antiOverfittingReports || [])
+    .filter((report) => !status || report.status === status)
+    .slice(0, limit);
+  res.json({
+    version: VERSION,
+    generatedAt: nowIso(),
+    count: reports.length,
+    reports,
+    leaderboard: runtimeState.antiOverfittingLeaderboard.slice(0, Math.min(limit, 25)),
+    governance: { analysisOnly: true, orderSent: false, autoPromotion: false }
+  });
+});
+
+app.get("/purged-walk-forward-protocol", requireSecret, (req, res) => {
+  res.json({
+    version: VERSION,
+    generatedAt: nowIso(),
+    protocol: antiOverfittingStatus().protocol,
+    explanations: {
+      purge: "Les fenêtres de test ne se chevauchent pas et restent strictement postérieures à l'entraînement.",
+      embargo: "Une zone temporelle sans calibration sépare l'entraînement du test.",
+      dsr: "Le Deflated Sharpe Ratio réduit la confiance lorsque de nombreux candidats ont été essayés.",
+      minimumTrackRecord: "La durée minimale estime combien d'observations sont nécessaires pour atteindre le niveau de confiance ciblé."
+    },
+    safety: { analysisOnly: true, canPlaceOrder: false, canPromoteLive: false }
+  });
+});
+
+app.get("/anti-overfitting-validate", requireSecret, async (req, res) => {
+  if (String(req.query.confirm || "") !== ANTI_OVERFITTING_RUN_CONFIRMATION) {
+    return res.status(400).json({
+      version: VERSION,
+      skipped: true,
+      reason: `Ajoute &confirm=${ANTI_OVERFITTING_RUN_CONFIRMATION}`,
+      analysisOnly: true
+    });
+  }
+  try {
+    const candidateId = researchSafeText(req.query.candidateId || runtimeState.strategyLabV2Leaderboard?.[0]?.id, 220);
+    if (!candidateId) throw new Error("Aucun candidat StrategyLab disponible");
+    const report = await runAntiOverfittingValidation(candidateId, {
+      assets: req.query.assets,
+      count: Number(req.query.count || STRATEGY_LAB_V2_CANDLES),
+      force: String(req.query.force || "") === "true",
+      trigger: "manual-http"
+    });
+    await flushPersistentState();
+    res.json(report);
+  } catch (error) {
+    res.status(400).json({ version: VERSION, error: error.message, analysisOnly: true, orderSent: false });
+  }
+});
+
+app.get("/anti-overfitting-validate-all", requireSecret, async (req, res) => {
+  if (String(req.query.confirm || "") !== ANTI_OVERFITTING_BATCH_CONFIRMATION) {
+    return res.status(400).json({
+      version: VERSION,
+      skipped: true,
+      reason: `Ajoute &confirm=${ANTI_OVERFITTING_BATCH_CONFIRMATION}`,
+      analysisOnly: true
+    });
+  }
+  try {
+    const result = await runAntiOverfittingBatch({
+      limit: Number(req.query.limit || ANTI_OVERFITTING_BATCH_LIMIT),
+      count: Number(req.query.count || STRATEGY_LAB_V2_CANDLES),
+      force: String(req.query.force || "") === "true",
+      trigger: "manual-http-batch"
+    });
+    await flushPersistentState();
     res.json({ version: VERSION, ...result });
   } catch (error) {
     res.status(400).json({ version: VERSION, error: error.message, analysisOnly: true, orderSent: false });
@@ -14998,7 +16779,8 @@ app.get("/strategy-lab-status", requireSecret, (req, res) => {
     lastImprovementRun: runtimeState.lastImprovementRun,
     candidates: runtimeState.strategyCandidates.slice(0, 30),
     history: runtimeState.improvementHistory.slice(0, 30),
-    strategyLabV2: strategyLabV2Status()
+    strategyLabV2: strategyLabV2Status(),
+    antiOverfitting: antiOverfittingStatus()
   });
 });
 
@@ -15053,7 +16835,7 @@ app.get("/diagnostic", requireSecret, async (req, res) => {
       version: VERSION,
       time: nowIso(),
       trading_mode: TRADING_MODE,
-      message: "Diagnostic v10.11 : consensus multi-source, portefeuille REAL, ExecutionVerifier, technique, actualités, fondamentaux, risque et exécution.",
+      message: "Diagnostic v10.20 : données, mémoire, automatismes, portefeuille, décision, risque, intent, exécution et vérification.",
       configuration: envConfiguration(),
       portfolioSummary: context.portfolioSummary,
       realPortfolioSummary: PAPER_TRADING_ENABLED ? context.realSummary : undefined,
@@ -15114,9 +16896,7 @@ app.get("/diagnostic", requireSecret, async (req, res) => {
 
 app.get("/watch", requireSecret, async (req, res) => {
   try {
-    const source = req.query.source
-      ? String(req.query.source).slice(0, 50)
-      : "manual-watch";
+    const source = requestAutomationSource(req, "manual-watch");
 
     const result = await watchMarket(source);
     res.json(result);
@@ -15137,8 +16917,7 @@ app.get("/dashboard", requireSecret, async (req, res) => {
       market: context.marketSummary,
       trend: context.trendSummary,
       preferredNextAssets: getPreferredNextAssets(context.portfolioSummary, context.marketSummary),
-      metrics: { executionStats24h: getExecutionStats24h() },
-      secret: req.query.secret
+      metrics: { executionStats24h: getExecutionStats24h() }
     });
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.send(html);
@@ -15188,9 +16967,7 @@ app.get("/portfolio", requireSecret, async (req, res) => {
 
 app.get("/scan", requireSecret, async (req, res) => {
   try {
-    const source = req.query.source
-      ? String(req.query.source).slice(0, 50)
-      : "manual-scan";
+    const source = requestAutomationSource(req, "manual-scan");
 
     const result = await scanMarket(source);
     res.json(result);
@@ -15849,9 +17626,31 @@ async function startServer() {
     analysisOnly: true,
     directLiveInfluence: false
   }));
+  rebuildAntiOverfittingLeaderboard();
+  console.log("ANTI-OVERFITTING V10.19 STARTUP:", JSON.stringify({
+    enabled: ANTI_OVERFITTING_ENABLED,
+    liveAnalysisEnabled: ANTI_OVERFITTING_LIVE_ANALYSIS_ENABLED,
+    reports: runtimeState.antiOverfittingReports.length,
+    leaderboard: runtimeState.antiOverfittingLeaderboard.length,
+    minimumDsr: ANTI_OVERFITTING_MIN_DSR,
+    minimumFolds: ANTI_OVERFITTING_MIN_FOLDS,
+    trainCandles: ANTI_OVERFITTING_TRAIN_CANDLES,
+    testCandles: ANTI_OVERFITTING_TEST_CANDLES,
+    embargoCandles: ANTI_OVERFITTING_EMBARGO_CANDLES,
+    analysisOnly: true,
+    directLiveInfluence: false
+  }));
   loadPointInTimeNdjson();
   prunePointInTimeArchive();
   pruneOrderIntents();
+  const startupMemorySaved = await savePersistentState();
+  console.log("MEMORY GOVERNANCE V10.20 STARTUP:", JSON.stringify({
+    saved: startupMemorySaved,
+    targetPct: UPSTASH_TARGET_STATE_PCT,
+    targetBytes: UPSTASH_TARGET_STATE_BYTES,
+    maxBytes: UPSTASH_MAX_STATE_BYTES,
+    memory: compactMemoryStatus()
+  }));
   if (LIVE_TRADING_ENABLED && EXECUTION_VERIFIER_ENABLED && EXECUTION_RECONCILE_ON_STARTUP) {
     try {
       const startupReconciliation = await reconcileExecutionIntents({
@@ -15870,6 +17669,12 @@ async function startServer() {
     console.log(`Mémoire : ${memoryBackend}`);
     console.log("AUTOMATION STATUS:", JSON.stringify({
       scheduler: schedulerStatus(),
+      portfolioIdentity: {
+        required: LIVE_PORTFOLIO_IDENTITY_REQUIRED,
+        confirmed: Boolean(runtimeState.livePortfolioIdentity),
+        expectedPortfolioIdConfigured: Boolean(ETORO_EXPECTED_PORTFOLIO_ID),
+        expectedAccountValueUsd: ETORO_EXPECTED_ACCOUNT_VALUE_USD
+      },
       executionVerifier: {
         enabled: EXECUTION_VERIFIER_ENABLED,
         activeIntents: executionVerifierStatus().activeIntentsCount,
@@ -15934,6 +17739,22 @@ async function startServer() {
         analysisOnly: true,
         directLiveInfluence: false
       },
+      antiOverfittingValidation: {
+        enabled: ANTI_OVERFITTING_ENABLED,
+        liveAnalysisEnabled: ANTI_OVERFITTING_LIVE_ANALYSIS_ENABLED,
+        reports: runtimeState.antiOverfittingReports.length,
+        leaderboard: runtimeState.antiOverfittingLeaderboard.length,
+        lastStatus: runtimeState.lastAntiOverfittingReport?.status || "NOT_RUN",
+        minimumDsr: ANTI_OVERFITTING_MIN_DSR,
+        analysisOnly: true,
+        directLiveInfluence: false
+      },
+      automationReliability: {
+        duplicateProtectionEnabled: true,
+        scanWindowMinutes: AUTO_SCAN_DEDUP_MINUTES,
+        watchWindowMinutes: AUTO_WATCH_DEDUP_MINUTES,
+        guards: runtimeState.automationGuards
+      },
       memory: compactMemoryStatus()
     }));
   });
@@ -15976,6 +17797,12 @@ module.exports = {
   buildProviderHealthAgent,
   recordProviderResult,
   providerQuarantineStatus,
+  providerAssetQuarantineStatus,
+  recordProviderAssetResult,
+  providerQuoteFreshness,
+  parseProviderDate,
+  buildConsensusCluster,
+  priceDeviationPct,
   normalizeTwelveDataCandles,
   normalizeAlphaVantageCandles,
   compareHistoricalSeries,
@@ -16025,11 +17852,16 @@ module.exports = {
   getEtoroCandles,
   buildFoundationAgents,
   dynamicBuyAmount,
+  combineBuySizingMultipliers,
   calculateAvailableCash,
   buildHealthAgent,
   getPortfolio,
   getEtoroPortfolioEndpoint,
   validatePortfolioResponse,
+  extractPortfolioIdentifier,
+  buildLivePortfolioIdentitySnapshot,
+  validateLivePortfolioIdentity,
+  confirmLivePortfolioIdentity,
   verifyRealPortfolioBeforeExecution,
   verifyPortfolioAfterExecution,
   buildAssetExecutionSnapshot,
@@ -16043,6 +17875,11 @@ module.exports = {
   EXECUTION_STATUS,
   buildPersistentState,
   fitPersistentStateToBudget,
+  persistentSectionSizes,
+  compactOrderIntentsForPersistence,
+  automaticRunDedupCheck,
+  markAutomaticRun,
+  requestAutomationSource,
   serializedByteLength,
   dataIntegrityCheckForAsset,
   riskController,
@@ -16144,6 +17981,19 @@ module.exports = {
   strategyLabV2Status,
   STRATEGY_LAB_V2_FAMILIES,
   STRATEGY_LAB_V2_STATUS,
+  antiOverfittingStatus,
+  runAntiOverfittingValidation,
+  runAntiOverfittingBatch,
+  runPurgedWalkForwardValidation,
+  buildPurgedWalkForwardFolds,
+  returnSeriesStatistics,
+  probabilisticSharpeRatio,
+  deflatedSharpeRatio,
+  minimumTrackRecordLength,
+  expectedMaximumSharpePerPeriod,
+  estimateSelectionBiasRisk,
+  rebuildAntiOverfittingLeaderboard,
+  ANTI_OVERFITTING_STATUS,
   buildRiskSellIntelligenceAgent,
   riskSellCheckForDecision,
   riskSellTrailingThresholdPct,
