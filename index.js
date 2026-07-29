@@ -1,5 +1,5 @@
 /**
- * LEO-AI SENTINEL v10.10.1 — correctif de sécurité
+ * LEO-AI SENTINEL v10.18 — StrategyLab
  * - Prix explicitement issus de l'API publique eToro
  * - Gestion week-end / horaires réguliers du marché US
  * - Cryptomonnaies analysables 24/7
@@ -26,6 +26,70 @@
  * - PointInTimeArchive : collecte progressive propriétaire des actualités, fondamentaux, social et décisions
  * - StrategyLab : génération de paramètres candidats, backtests isolés, walk-forward et rejet des régressions
  * - Promotion limitée au PAPER, explicite et réversible; aucune auto-modification du code de production
+ * - Crons internes watch/trade activables séparément par variables Render
+ * - Watch interne décalé de 5 minutes pour éviter la collision avec le scan de trading
+ * - Identifiant unique, durée et résultat compact pour chaque exécution automatique
+ * - Indicateur de pression mémoire Upstash et alertes de seuil
+ * - Endpoint /scheduler-status pour vérifier la configuration des automatismes
+ * - ExecutionVerifier multi-tentatives après chaque ordre LIVE
+ * - Snapshot portefeuille avant/après, preuve par position ou ordre eToro visible
+ * - Statuts explicites : ORDER_SENT, ORDER_ACCEPTED_BY_ETORO, POSITION_CONFIRMED,
+ *   ORDER_REJECTED, POSITION_NOT_FOUND, EXECUTION_UNCERTAIN et DUPLICATE_BLOCKED
+ * - Réconciliation des intents incertains au démarrage et pendant les watchs
+ * - Aucun renvoi automatique d'un ordre dont l'issue est incertaine
+ * - Endpoints /execution-status et /execution-reconcile
+ * - PortfolioAllocationEngine avec profils CONSERVATIVE / BALANCED / GROWTH
+ * - Cibles explicites de cash, cœur de portefeuille, croissance, défensif, crypto, valeur et spéculatif
+ * - Bandes min/max par poche et plafond dynamique par actif
+ * - Classement des prochains achats selon l'écart réel à l'allocation cible
+ * - Dimensionnement des BUY limité par le cash, les plafonds de risque et le besoin d'allocation
+ * - Aucun SELL automatique uniquement parce qu'une poche est surpondérée
+ * - Endpoint /allocation-status et visibilité dans le tableau de bord
+ * - LivePerformanceAttributionAgent : performance réelle depuis une base persistante
+ * - RiskSellIntelligenceAgent : drawdown courant, perte journalière, high-water marks et validation multi-preuves des ventes.
+ * - Benchmark configurable (SPY par défaut), rendement excédentaire et drawdown
+ * - Volatilité, Sharpe, Sortino, tracking error, Information Ratio, bêta et alpha indicatif
+ * - Attribution prudente des profits latents par actif et par catégorie
+ * - Distinction explicite entre performance du compte et P&L latent des positions ouvertes
+ * - Endpoints /performance-status, /performance-history et /performance-reset
+ * - Aucune décision LIVE n'est déclenchée uniquement par les statistiques de performance
+ * - RiskSellIntelligenceAgent : drawdown courant, perte journalière et stress de portefeuille
+ * - High-water mark persistant par actif et détection d'un recul depuis le sommet observé
+ * - Vente validée uniquement par plusieurs familles de preuves indépendantes
+ * - Une surpondération ou une moins-value isolée ne déclenche jamais une vente
+ * - Blocage des nouveaux achats lors d'un drawdown critique; réduction en zone de prudence
+ * - Historique des revues SELL, circuit breakers et endpoints /risk-sell-status, /risk-sell-history
+ * - MacroCreditFundamentalRegimeAgent fondé sur des proxys de marché disponibles dans la watchlist
+ * - Régimes : EXPANSION_RISK_ON, DISINFLATIONARY_GROWTH, INFLATION_PRESSURE,
+ *   RATE_SHOCK, CREDIT_STRESS, DEFENSIVE_SLOWDOWN, MIXED et UNKNOWN
+ * - Traitement distinct des actifs de croissance, obligations, or, énergie, finance, défensifs et crypto
+ * - Score d’alignement macro/fondamental par actif et multiplicateur prudent de taille des BUY
+ * - Aucun SELL n’est créé par la couche macro seule; les blocages concernent uniquement les nouveaux BUY
+ * - Historique persistant et endpoints /macro-regime-status, /macro-regime-history
+ * - Research Knowledge Layer : sources, preuves, hypothèses et plans d’expériences structurés
+ * - ResearchIngestionAgent : enregistre les métadonnées et résumés sans exécuter les instructions externes
+ * - ResearchQualityAgent : score la traçabilité, la méthodologie, les limites et l’applicabilité
+ * - EvidenceRegistry : déduplique les preuves et conserve les liens entre sources et affirmations
+ * - HypothesisGenerator : transforme les preuves acceptées en hypothèses testables, jamais en ordres
+ * - ExperimentAgent : prépare BACKTEST, WALK_FORWARD et PAPER avec critères d’échec et de rollback
+ * - Bibliothèque initiale issue des documents académiques transmis par l’utilisateur
+ * - Aucune source, preuve ou hypothèse ne peut influencer directement le mode LIVE
+ * - DataQualityAgent : chronologie, doublons, OHLC, trous, prix futurs et valeurs aberrantes
+ * - ScientificBacktestRegistry : holdout temporel, coûts réalistes, stress des coûts et traçabilité des essais
+ * - Tous les backtests historiques passent par un audit de données avant simulation
+ * - Aucun rapport de qualité ou backtest scientifique ne peut envoyer un ordre LIVE
+ * - Endpoints /data-quality-status, /data-quality-audit, /scientific-backtest-status,
+ *   /scientific-backtest, /scientific-portfolio-backtest et /scientific-backtest-registry
+ * - Endpoints /research-status, /research-sources, /research-evidence,
+ *   /research-hypotheses, /research-experiments et /research-export
+ * - StrategyLab v10.18 : compile les hypothèses de recherche en familles de stratégies paramétriques
+ * - Dataset unique audité, holdout temporel, stress des coûts et walk-forward multi-actifs
+ * - Tournoi reproductible avec empreintes, déduplication et pénalité transparente du nombre d'essais
+ * - Leaderboard persistant et lien traçable source → preuve → hypothèse → expérience → candidat
+ * - Les familles RL et quantiques restent des placeholders isolés et ne sont pas simulées comme des stratégies classiques
+ * - Aucun candidat StrategyLab ne peut appeler executeBuy/executeSell, être promu automatiquement ou modifier le LIVE
+ * - Endpoints /strategy-lab-v2-status, /strategy-lab-compile, /strategy-lab-run,
+ *   /strategy-lab-run-all, /strategy-lab-experiments et /strategy-lab-leaderboard
  */
 
 const express = require("express");
@@ -54,7 +118,7 @@ function getOpenAIClient() {
   return openAIClient;
 }
 
-const VERSION = "v10.10.2-safety-hotfix-no-sol-priority";
+const VERSION = "v10.18-strategy-lab";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
@@ -89,6 +153,53 @@ const LIVE_POST_TRADE_VERIFY_DELAY_MS = Math.max(
   0,
   Math.min(10000, Number(process.env.LIVE_POST_TRADE_VERIFY_DELAY_MS || 1500))
 );
+
+// v10.11 — La confirmation d'exécution repose sur plusieurs relectures du portefeuille REAL.
+const EXECUTION_VERIFIER_ENABLED = process.env.EXECUTION_VERIFIER_ENABLED !== "false";
+const EXECUTION_VERIFY_ATTEMPTS = Math.max(
+  1,
+  Math.min(10, Number(process.env.EXECUTION_VERIFY_ATTEMPTS || 4))
+);
+const EXECUTION_VERIFY_RETRY_DELAY_MS = Math.max(
+  500,
+  Math.min(30000, Number(process.env.EXECUTION_VERIFY_RETRY_DELAY_MS || 2500))
+);
+const EXECUTION_VERIFY_HISTORY_LIMIT = Math.max(
+  20,
+  Math.min(500, Number(process.env.EXECUTION_VERIFY_HISTORY_LIMIT || 120))
+);
+const EXECUTION_RECONCILE_ON_STARTUP =
+  process.env.EXECUTION_RECONCILE_ON_STARTUP !== "false";
+const EXECUTION_RECONCILE_ON_WATCH =
+  process.env.EXECUTION_RECONCILE_ON_WATCH !== "false";
+const EXECUTION_RECONCILE_MAX_PER_RUN = Math.max(
+  1,
+  Math.min(50, Number(process.env.EXECUTION_RECONCILE_MAX_PER_RUN || 10))
+);
+const EXECUTION_RECONCILE_CONFIRMATION = "RECONCILE_EXECUTIONS";
+
+const EXECUTION_STATUS = Object.freeze({
+  INTENT_CREATED: "ORDER_INTENT_CREATED",
+  SENT: "ORDER_SENT",
+  ACCEPTED: "ORDER_ACCEPTED_BY_ETORO",
+  CONFIRMED: "POSITION_CONFIRMED",
+  REJECTED: "ORDER_REJECTED",
+  NOT_FOUND: "POSITION_NOT_FOUND",
+  UNCERTAIN: "EXECUTION_UNCERTAIN",
+  DUPLICATE_BLOCKED: "DUPLICATE_BLOCKED"
+});
+
+const ACTIVE_EXECUTION_STATUSES = new Set([
+  EXECUTION_STATUS.INTENT_CREATED,
+  EXECUTION_STATUS.SENT,
+  EXECUTION_STATUS.ACCEPTED,
+  EXECUTION_STATUS.NOT_FOUND,
+  EXECUTION_STATUS.UNCERTAIN,
+  // Compatibilité avec les états enregistrés par les versions antérieures.
+  "PENDING",
+  "UNKNOWN",
+  "CONFIRMED_API_PENDING_PORTFOLIO"
+]);
 
 const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY || "";
 const SECONDARY_DATA_ENABLED =
@@ -262,7 +373,7 @@ const REDDIT_SENTIMENT_ENABLED =
 const REDDIT_CLIENT_ID = process.env.REDDIT_CLIENT_ID || "";
 const REDDIT_CLIENT_SECRET = process.env.REDDIT_CLIENT_SECRET || "";
 const REDDIT_USER_AGENT =
-  process.env.REDDIT_USER_AGENT || "LEO-AI-SENTINEL/10.10 by portfolio-owner";
+  process.env.REDDIT_USER_AGENT || "LEO-AI-SENTINEL/10.12 by portfolio-owner";
 const REDDIT_SEARCH_LIMIT = Math.max(
   5,
   Math.min(100, Number(process.env.REDDIT_SEARCH_LIMIT || 25))
@@ -323,6 +434,7 @@ const AGENT_COUNCIL_WEIGHTS = Object.freeze({
   TrendMemoryAgent: councilWeight("WEIGHT_TREND_MEMORY_AGENT", 0.7),
   TechnicalAnalysisAgent: councilWeight("WEIGHT_TECHNICAL_ANALYSIS_AGENT", 1.45),
   MarketRegimeAgent: councilWeight("WEIGHT_MARKET_REGIME_AGENT", 0.8),
+  MacroCreditFundamentalRegimeAgent: councilWeight("WEIGHT_MACRO_CREDIT_REGIME_AGENT", 1.05),
   NewsAgent: councilWeight("WEIGHT_NEWS_AGENT", 0.8),
   FundamentalAgent: councilWeight("WEIGHT_FUNDAMENTAL_AGENT", 1.0),
   SocialSentimentAgent: councilWeight("WEIGHT_SOCIAL_SENTIMENT_AGENT", 0.35),
@@ -482,6 +594,358 @@ const MAX_SPECULATIVE_WEIGHT_PCT = Number(
 const MAX_DAILY_LOSS_PCT = Number(process.env.MAX_DAILY_LOSS_PCT || 3);
 const MAX_WEEKLY_LOSS_PCT = Number(process.env.MAX_WEEKLY_LOSS_PCT || 6);
 const MAX_DRAWDOWN_PCT = Number(process.env.MAX_DRAWDOWN_PCT || 10);
+
+// v10.12 — Allocation stratégique configurable. Les profils définissent des cibles
+// et des bandes prudentes; ils ne déclenchent jamais à eux seuls une vente LIVE.
+const PORTFOLIO_ALLOCATION_ENGINE_ENABLED =
+  process.env.PORTFOLIO_ALLOCATION_ENGINE_ENABLED !== "false";
+const PORTFOLIO_ALLOCATION_MODE = ["advisory", "enforced"].includes(
+  String(process.env.PORTFOLIO_ALLOCATION_MODE || "enforced").toLowerCase()
+)
+  ? String(process.env.PORTFOLIO_ALLOCATION_MODE || "enforced").toLowerCase()
+  : "enforced";
+const PORTFOLIO_ALLOCATION_PROFILE = ["conservative", "balanced", "growth"].includes(
+  String(process.env.PORTFOLIO_ALLOCATION_PROFILE || "balanced").toLowerCase()
+)
+  ? String(process.env.PORTFOLIO_ALLOCATION_PROFILE || "balanced").toLowerCase()
+  : "balanced";
+const ALLOCATION_REQUIRE_UNDER_TARGET_FOR_NEW_BUY =
+  process.env.ALLOCATION_REQUIRE_UNDER_TARGET_FOR_NEW_BUY !== "false";
+const ALLOCATION_ASSET_BAND_TOLERANCE_PCT = Math.max(
+  1,
+  Math.min(12, Number(process.env.ALLOCATION_ASSET_BAND_TOLERANCE_PCT || 5))
+);
+const ALLOCATION_MIN_GAP_PCT = Math.max(
+  0.1,
+  Math.min(10, Number(process.env.ALLOCATION_MIN_GAP_PCT || 0.75))
+);
+const ALLOCATION_CUSTOM_ASSET_TARGETS_JSON =
+  String(process.env.ALLOCATION_ASSET_TARGETS_JSON || "").trim();
+
+// v10.13 — Mesure de la performance LIVE/PAPER à partir d'une base persistante.
+// Le benchmark est informatif et ne déclenche jamais, à lui seul, un ordre.
+const LIVE_PERFORMANCE_ATTRIBUTION_ENABLED =
+  process.env.LIVE_PERFORMANCE_ATTRIBUTION_ENABLED !== "false";
+const PERFORMANCE_BENCHMARK_ASSET = String(
+  process.env.PERFORMANCE_BENCHMARK_ASSET || "SPY"
+).trim().toUpperCase();
+const PERFORMANCE_SNAPSHOT_MINUTES = Math.max(
+  5,
+  Math.min(1440, Number(process.env.PERFORMANCE_SNAPSHOT_MINUTES || 15))
+);
+const PERFORMANCE_HISTORY_LIMIT = Math.max(
+  30,
+  Math.min(3000, Number(process.env.PERFORMANCE_HISTORY_LIMIT || 750))
+);
+const PERFORMANCE_MIN_DAILY_OBSERVATIONS = Math.max(
+  5,
+  Math.min(252, Number(process.env.PERFORMANCE_MIN_DAILY_OBSERVATIONS || 20))
+);
+const PERFORMANCE_RISK_FREE_ANNUAL_PCT = Number(
+  process.env.PERFORMANCE_RISK_FREE_ANNUAL_PCT || 0
+);
+const PERFORMANCE_ATTRIBUTION_TOP_N = Math.max(
+  3,
+  Math.min(30, Number(process.env.PERFORMANCE_ATTRIBUTION_TOP_N || 10))
+);
+const PERFORMANCE_RESET_CONFIRMATION = "RESET_PERFORMANCE_BASELINE";
+
+// v10.14 — Risk & Sell Intelligence.
+// Cette couche ne crée jamais seule un ordre. Elle valide ou bloque une décision proposée
+// par le StrategyCoordinator et déjà soumise au conseil multi-agents.
+const RISK_SELL_INTELLIGENCE_ENABLED =
+  process.env.RISK_SELL_INTELLIGENCE_ENABLED !== "false";
+const RISK_SELL_MODE = ["advisory", "enforced"].includes(
+  String(process.env.RISK_SELL_MODE || "enforced").toLowerCase()
+)
+  ? String(process.env.RISK_SELL_MODE || "enforced").toLowerCase()
+  : "enforced";
+const RISK_SELL_SOFT_DRAWDOWN_PCT = Math.max(
+  1,
+  Math.min(40, Number(process.env.RISK_SELL_SOFT_DRAWDOWN_PCT || 8))
+);
+const RISK_SELL_HARD_DRAWDOWN_PCT = Math.max(
+  RISK_SELL_SOFT_DRAWDOWN_PCT + 1,
+  Math.min(60, Number(process.env.RISK_SELL_HARD_DRAWDOWN_PCT || 15))
+);
+const RISK_SELL_SOFT_DAILY_LOSS_PCT = Math.max(
+  0.5,
+  Math.min(20, Number(process.env.RISK_SELL_SOFT_DAILY_LOSS_PCT || 4))
+);
+const RISK_SELL_HARD_DAILY_LOSS_PCT = Math.max(
+  RISK_SELL_SOFT_DAILY_LOSS_PCT + 0.5,
+  Math.min(30, Number(process.env.RISK_SELL_HARD_DAILY_LOSS_PCT || 7))
+);
+const RISK_SELL_MIN_EVIDENCE_FAMILIES = Math.max(
+  2,
+  Math.min(5, Number(process.env.RISK_SELL_MIN_EVIDENCE_FAMILIES || 2))
+);
+const RISK_SELL_PROFIT_PROTECT_MIN_PCT = Math.max(
+  1,
+  Math.min(100, Number(process.env.RISK_SELL_PROFIT_PROTECT_MIN_PCT || 6))
+);
+const RISK_SELL_HISTORY_LIMIT = Math.max(
+  30,
+  Math.min(1000, Number(process.env.RISK_SELL_HISTORY_LIMIT || 250))
+);
+const RISK_SELL_TRAILING_PCT_DEFAULT = Math.max(
+  3,
+  Math.min(40, Number(process.env.RISK_SELL_TRAILING_PCT_DEFAULT || 12))
+);
+const RISK_SELL_TRAILING_PCT_CRYPTO = Math.max(
+  5,
+  Math.min(60, Number(process.env.RISK_SELL_TRAILING_PCT_CRYPTO || 18))
+);
+const RISK_SELL_TRAILING_PCT_SPECULATIVE = Math.max(
+  5,
+  Math.min(60, Number(process.env.RISK_SELL_TRAILING_PCT_SPECULATIVE || 16))
+);
+const RISK_SELL_TRAILING_PCT_DEFENSIVE = Math.max(
+  2,
+  Math.min(30, Number(process.env.RISK_SELL_TRAILING_PCT_DEFENSIVE || 9))
+);
+
+// v10.15 — Régime macro, crédit et fondamental construit à partir de proxys
+// observables dans la watchlist. Cette couche ne prétend pas remplacer les
+// statistiques macroéconomiques officielles et ne peut jamais déclencher seule un SELL.
+const MACRO_CREDIT_REGIME_ENABLED =
+  process.env.MACRO_CREDIT_REGIME_ENABLED !== "false";
+const MACRO_CREDIT_REGIME_MODE = ["advisory", "enforced"].includes(
+  String(process.env.MACRO_CREDIT_REGIME_MODE || "advisory").toLowerCase()
+)
+  ? String(process.env.MACRO_CREDIT_REGIME_MODE || "advisory").toLowerCase()
+  : "advisory";
+const MACRO_REGIME_HISTORY_LIMIT = Math.max(
+  30,
+  Math.min(1000, Number(process.env.MACRO_REGIME_HISTORY_LIMIT || 300))
+);
+const MACRO_MIN_BUY_MULTIPLIER = Math.max(
+  0.25,
+  Math.min(0.9, Number(process.env.MACRO_MIN_BUY_MULTIPLIER || 0.45))
+);
+const MACRO_SEVERE_BUY_BLOCK_SCORE = Math.max(
+  5,
+  Math.min(45, Number(process.env.MACRO_SEVERE_BUY_BLOCK_SCORE || 24))
+);
+const MACRO_MIN_PROXY_COVERAGE = Math.max(
+  2,
+  Math.min(12, Number(process.env.MACRO_MIN_PROXY_COVERAGE || 4))
+);
+
+// v10.16 — Research Knowledge Layer.
+// Les documents et affirmations sont des données non fiables jusqu’à validation.
+// Cette couche est strictement advisory-only et n’a aucun chemin direct vers executeBuy/executeSell.
+const RESEARCH_KNOWLEDGE_ENABLED =
+  process.env.RESEARCH_KNOWLEDGE_ENABLED !== "false";
+const RESEARCH_SEED_LIBRARY_ENABLED =
+  process.env.RESEARCH_SEED_LIBRARY_ENABLED !== "false";
+const RESEARCH_MIN_QUALITY_SCORE = Math.max(
+  0,
+  Math.min(100, Number(process.env.RESEARCH_MIN_QUALITY_SCORE || 60))
+);
+const RESEARCH_MAX_SOURCES = Math.max(
+  20,
+  Math.min(1000, Number(process.env.RESEARCH_MAX_SOURCES || 180))
+);
+const RESEARCH_MAX_EVIDENCE = Math.max(
+  20,
+  Math.min(2000, Number(process.env.RESEARCH_MAX_EVIDENCE || 400))
+);
+const RESEARCH_MAX_HYPOTHESES = Math.max(
+  10,
+  Math.min(1000, Number(process.env.RESEARCH_MAX_HYPOTHESES || 200))
+);
+const RESEARCH_MAX_EXPERIMENTS = Math.max(
+  10,
+  Math.min(1000, Number(process.env.RESEARCH_MAX_EXPERIMENTS || 200))
+);
+const RESEARCH_EVENT_HISTORY_LIMIT = Math.max(
+  20,
+  Math.min(1000, Number(process.env.RESEARCH_EVENT_HISTORY_LIMIT || 250))
+);
+const RESEARCH_MAX_TEXT_LENGTH = Math.max(
+  500,
+  Math.min(20000, Number(process.env.RESEARCH_MAX_TEXT_LENGTH || 6000))
+);
+const RESEARCH_REVIEW_CONFIRMATION = "REVIEW_RESEARCH_ITEM";
+const RESEARCH_SEED_CONFIRMATION = "SEED_RESEARCH_LIBRARY";
+const RESEARCH_GENERATE_CONFIRMATION = "GENERATE_RESEARCH_HYPOTHESES";
+
+const RESEARCH_SOURCE_STATUS = Object.freeze({
+  ACTIVE: "ACTIVE",
+  NEEDS_REVIEW: "NEEDS_REVIEW",
+  REJECTED: "REJECTED",
+  ARCHIVED: "ARCHIVED"
+});
+
+const RESEARCH_EVIDENCE_STATUS = Object.freeze({
+  DRAFT: "DRAFT",
+  ACCEPTED: "ACCEPTED",
+  REJECTED: "REJECTED",
+  ARCHIVED: "ARCHIVED"
+});
+
+const RESEARCH_HYPOTHESIS_STATUS = Object.freeze({
+  DRAFT: "DRAFT",
+  READY_FOR_BACKTEST: "READY_FOR_BACKTEST",
+  IN_TEST: "IN_TEST",
+  PAPER_ONLY: "PAPER_ONLY",
+  REJECTED: "REJECTED",
+  ARCHIVED: "ARCHIVED"
+});
+
+const RESEARCH_EXPERIMENT_PHASES = new Set(["BACKTEST", "WALK_FORWARD", "PAPER"]);
+
+
+// v10.17 — Data Quality & Scientific Backtesting.
+// Cette couche est réservée à l'analyse. Elle ne dispose d'aucun chemin vers executeBuy/executeSell.
+const DATA_QUALITY_ENABLED = process.env.DATA_QUALITY_ENABLED !== "false";
+const DATA_QUALITY_ENFORCEMENT_MODE = ["advisory", "required"].includes(
+  String(process.env.DATA_QUALITY_ENFORCEMENT_MODE || "required").toLowerCase()
+)
+  ? String(process.env.DATA_QUALITY_ENFORCEMENT_MODE || "required").toLowerCase()
+  : "required";
+const DATA_QUALITY_MIN_SCORE = Math.max(
+  40,
+  Math.min(100, Number(process.env.DATA_QUALITY_MIN_SCORE || 78))
+);
+const DATA_QUALITY_MIN_CANDLES = Math.max(
+  30,
+  Math.min(1000, Number(process.env.DATA_QUALITY_MIN_CANDLES || 120))
+);
+const DATA_QUALITY_MAX_DUPLICATE_PCT = Math.max(
+  0,
+  Math.min(10, Number(process.env.DATA_QUALITY_MAX_DUPLICATE_PCT || 0.5))
+);
+const DATA_QUALITY_MAX_INVALID_PCT = Math.max(
+  0,
+  Math.min(15, Number(process.env.DATA_QUALITY_MAX_INVALID_PCT || 1))
+);
+const DATA_QUALITY_MAX_GAP_MULTIPLIER = Math.max(
+  2,
+  Math.min(20, Number(process.env.DATA_QUALITY_MAX_GAP_MULTIPLIER || 5))
+);
+const DATA_QUALITY_FUTURE_TOLERANCE_MINUTES = Math.max(
+  0,
+  Math.min(180, Number(process.env.DATA_QUALITY_FUTURE_TOLERANCE_MINUTES || 15))
+);
+const DATA_QUALITY_HISTORY_LIMIT = Math.max(
+  20,
+  Math.min(1000, Number(process.env.DATA_QUALITY_HISTORY_LIMIT || 250))
+);
+
+const SCIENTIFIC_BACKTEST_ENABLED = process.env.SCIENTIFIC_BACKTEST_ENABLED !== "false";
+const SCIENTIFIC_BACKTEST_REQUIRE_WALK_FORWARD =
+  process.env.SCIENTIFIC_BACKTEST_REQUIRE_WALK_FORWARD !== "false";
+const SCIENTIFIC_BACKTEST_TRAIN_PCT = Math.max(
+  50,
+  Math.min(85, Number(process.env.SCIENTIFIC_BACKTEST_TRAIN_PCT || 70))
+);
+const SCIENTIFIC_BACKTEST_EMBARGO_CANDLES = Math.max(
+  0,
+  Math.min(30, Number(process.env.SCIENTIFIC_BACKTEST_EMBARGO_CANDLES || 5))
+);
+const SCIENTIFIC_BACKTEST_MIN_TEST_CANDLES = Math.max(
+  20,
+  Math.min(300, Number(process.env.SCIENTIFIC_BACKTEST_MIN_TEST_CANDLES || 60))
+);
+const SCIENTIFIC_BACKTEST_COST_STRESS_MULTIPLIER = Math.max(
+  1,
+  Math.min(5, Number(process.env.SCIENTIFIC_BACKTEST_COST_STRESS_MULTIPLIER || 1.75))
+);
+const SCIENTIFIC_BACKTEST_REGISTRY_LIMIT = Math.max(
+  20,
+  Math.min(1000, Number(process.env.SCIENTIFIC_BACKTEST_REGISTRY_LIMIT || 250))
+);
+const SCIENTIFIC_BACKTEST_MAX_DRAWDOWN_PCT = Math.max(
+  5,
+  Math.min(80, Number(process.env.SCIENTIFIC_BACKTEST_MAX_DRAWDOWN_PCT || 35))
+);
+const SCIENTIFIC_BACKTEST_MIN_CLOSED_TRADES = Math.max(
+  1,
+  Math.min(100, Number(process.env.SCIENTIFIC_BACKTEST_MIN_CLOSED_TRADES || 5))
+);
+
+
+// v10.18 — StrategyLab fondé sur les hypothèses de la Research Knowledge Layer.
+// Cette couche reste strictement analytique, y compris lorsque le portefeuille est en mode LIVE.
+const STRATEGY_LAB_V2_ENABLED = process.env.STRATEGY_LAB_V2_ENABLED !== "false";
+const STRATEGY_LAB_V2_SCHEDULE_ENABLED = process.env.STRATEGY_LAB_V2_SCHEDULE_ENABLED === "true";
+const STRATEGY_LAB_V2_CRON = process.env.STRATEGY_LAB_V2_CRON || "50 4 * * 0";
+const STRATEGY_LAB_V2_LIVE_ANALYSIS_ENABLED = process.env.STRATEGY_LAB_V2_LIVE_ANALYSIS_ENABLED !== "false";
+const STRATEGY_LAB_V2_DEFAULT_ASSETS = String(
+  process.env.STRATEGY_LAB_V2_DEFAULT_ASSETS || "SPY,QQQ,GLD,BTC,NVDA"
+).toUpperCase().split(",").map((asset) => asset.trim()).filter(Boolean);
+const STRATEGY_LAB_V2_CANDLES = Math.max(
+  240,
+  Math.min(1000, Number(process.env.STRATEGY_LAB_V2_CANDLES || 700))
+);
+const STRATEGY_LAB_V2_MAX_HYPOTHESES_PER_RUN = Math.max(
+  1,
+  Math.min(12, Number(process.env.STRATEGY_LAB_V2_MAX_HYPOTHESES_PER_RUN || 3))
+);
+const STRATEGY_LAB_V2_MAX_CANDIDATES = Math.max(
+  3,
+  Math.min(12, Number(process.env.STRATEGY_LAB_V2_MAX_CANDIDATES || 6))
+);
+const STRATEGY_LAB_V2_MIN_TRADES = Math.max(
+  1,
+  Math.min(100, Number(process.env.STRATEGY_LAB_V2_MIN_TRADES || 5))
+);
+const STRATEGY_LAB_V2_MAX_DRAWDOWN_PCT = Math.max(
+  5,
+  Math.min(80, Number(process.env.STRATEGY_LAB_V2_MAX_DRAWDOWN_PCT || 25))
+);
+const STRATEGY_LAB_V2_MIN_POSITIVE_FOLDS_PCT = Math.max(
+  0,
+  Math.min(100, Number(process.env.STRATEGY_LAB_V2_MIN_POSITIVE_FOLDS_PCT || 50))
+);
+const STRATEGY_LAB_V2_MIN_SCORE = Math.max(
+  0,
+  Math.min(100, Number(process.env.STRATEGY_LAB_V2_MIN_SCORE || 58))
+);
+const STRATEGY_LAB_V2_MIN_SCORE_DELTA = Math.max(
+  0,
+  Math.min(30, Number(process.env.STRATEGY_LAB_V2_MIN_SCORE_DELTA || 1.5))
+);
+const STRATEGY_LAB_V2_TRIAL_PENALTY = Math.max(
+  0,
+  Math.min(10, Number(process.env.STRATEGY_LAB_V2_TRIAL_PENALTY || 1.5))
+);
+const STRATEGY_LAB_V2_HISTORY_LIMIT = Math.max(
+  20,
+  Math.min(1000, Number(process.env.STRATEGY_LAB_V2_HISTORY_LIMIT || 180))
+);
+const STRATEGY_LAB_V2_LEADERBOARD_LIMIT = Math.max(
+  10,
+  Math.min(500, Number(process.env.STRATEGY_LAB_V2_LEADERBOARD_LIMIT || 100))
+);
+const STRATEGY_LAB_V2_COMPILE_CONFIRMATION = "COMPILE_RESEARCH_HYPOTHESES";
+const STRATEGY_LAB_V2_RUN_CONFIRMATION = "RUN_STRATEGY_LAB";
+const STRATEGY_LAB_V2_BATCH_CONFIRMATION = "RUN_STRATEGY_LAB_BATCH";
+
+const STRATEGY_LAB_V2_STATUS = Object.freeze({
+  PLANNED: "PLANNED",
+  RUNNING: "RUNNING",
+  PASSED: "PASSED",
+  INCONCLUSIVE: "INCONCLUSIVE",
+  FAILED: "FAILED",
+  SKIPPED: "SKIPPED",
+  ARCHIVED: "ARCHIVED"
+});
+
+const STRATEGY_LAB_V2_FAMILIES = Object.freeze({
+  STRICT_VALIDATION: "STRICT_VALIDATION",
+  ALLOCATION_BANDS: "ALLOCATION_BANDS",
+  EXECUTION_FILTER: "EXECUTION_FILTER",
+  LOW_TURNOVER: "LOW_TURNOVER",
+  STRESS_DEFENSE: "STRESS_DEFENSE",
+  VOLATILITY_GUARD: "VOLATILITY_GUARD",
+  GENERAL_PARAMETER_SEARCH: "GENERAL_PARAMETER_SEARCH",
+  RL_SANDBOX_PLACEHOLDER: "RL_SANDBOX_PLACEHOLDER",
+  QUANTUM_SANDBOX_PLACEHOLDER: "QUANTUM_SANDBOX_PLACEHOLDER"
+});
+
 const MIN_ORDER_USD = Number(process.env.MIN_ORDER_USD || 1);
 const MAX_CONSECUTIVE_FAILURES = Number(
   process.env.MAX_CONSECUTIVE_FAILURES || 3
@@ -492,7 +956,10 @@ const PAPER_STARTING_CASH_USD = Number(
 );
 const PAPER_SEED_FROM_REAL = process.env.PAPER_SEED_FROM_REAL !== "false";
 const PAPER_FEE_PCT = Number(process.env.PAPER_FEE_PCT || 0);
-const ORDER_INTENT_TTL_HOURS = Number(process.env.ORDER_INTENT_TTL_HOURS || 6);
+const ORDER_INTENT_TTL_HOURS = Math.max(
+  24,
+  Number(process.env.ORDER_INTENT_TTL_HOURS || 168)
+);
 
 
 const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL || "";
@@ -547,8 +1014,30 @@ const MAX_RATE_AGE_MINUTES = 30;
 const MAX_TREND_POINTS_PER_ASSET = 48;
 const MIN_MINUTES_BETWEEN_TREND_POINTS = 10;
 
-const WATCH_CRON_SCHEDULE = "*/15 * * * *";
-const TRADE_CRON_SCHEDULE = "0 */2 * * *";
+// v10.10.3 — Contrôle explicite des déclencheurs internes.
+// Le watch est décalé de 5 minutes afin de ne pas démarrer en même temps
+// que le scan de trading à la minute 0 des heures paires.
+const ENABLE_INTERNAL_WATCH_CRON =
+  process.env.ENABLE_INTERNAL_WATCH_CRON !== "false";
+const ENABLE_INTERNAL_TRADE_CRON =
+  process.env.ENABLE_INTERNAL_TRADE_CRON !== "false";
+const WATCH_CRON_SCHEDULE =
+  process.env.WATCH_CRON_SCHEDULE || "5,20,35,50 * * * *";
+const TRADE_CRON_SCHEDULE =
+  process.env.TRADE_CRON_SCHEDULE || "0 */2 * * *";
+const AUTOMATION_LOG_DETAIL = ["compact", "full"].includes(
+  String(process.env.AUTOMATION_LOG_DETAIL || "compact").toLowerCase()
+)
+  ? String(process.env.AUTOMATION_LOG_DETAIL || "compact").toLowerCase()
+  : "compact";
+const MEMORY_WARNING_PCT = Math.max(
+  50,
+  Math.min(95, Number(process.env.MEMORY_WARNING_PCT || 75))
+);
+const MEMORY_CRITICAL_PCT = Math.max(
+  MEMORY_WARNING_PCT + 1,
+  Math.min(99, Number(process.env.MEMORY_CRITICAL_PCT || 90))
+);
 
 let memoryBackend = "memory-only";
 let lastMemoryLoad = null;
@@ -689,6 +1178,218 @@ const SPECULATIVE_CATEGORIES = new Set([
   "SPACE_SPECULATIVE"
 ]);
 
+const ALLOCATION_BUCKET_BY_ASSET = Object.freeze({
+  SPY: "CORE_EQUITY",
+  "BRK.B": "CORE_EQUITY",
+
+  QQQ: "GROWTH_TECH",
+  NVDA: "GROWTH_TECH",
+  AMD: "GROWTH_TECH",
+  ORCL: "GROWTH_TECH",
+  MSFT: "GROWTH_TECH",
+  GOOG: "GROWTH_TECH",
+  AMZN: "GROWTH_TECH",
+  PANW: "GROWTH_TECH",
+  CRWD: "GROWTH_TECH",
+
+  GLD: "DEFENSIVE_REAL",
+  SHY: "DEFENSIVE_REAL",
+  TLT: "DEFENSIVE_REAL",
+  XLV: "DEFENSIVE_REAL",
+  XLP: "DEFENSIVE_REAL",
+
+  BTC: "CRYPTO_MAJOR",
+  ETH: "CRYPTO_MAJOR",
+
+  JPM: "VALUE_CYCLICAL",
+  XLE: "VALUE_CYCLICAL",
+  BABA: "VALUE_CYCLICAL",
+
+  PLTR: "SPECULATIVE",
+  COIN: "SPECULATIVE",
+  SOL: "SPECULATIVE",
+  RKLB: "SPECULATIVE",
+  IONQ: "SPECULATIVE",
+  ASTS: "SPECULATIVE"
+});
+
+const ALLOCATION_ASSET_SCORES = Object.freeze({
+  SPY: 4,
+  "BRK.B": 1,
+
+  QQQ: 3,
+  GOOG: 2,
+  MSFT: 2,
+  AMZN: 1.5,
+  NVDA: 1.5,
+  AMD: 1,
+  ORCL: 1,
+  PANW: 0.75,
+  CRWD: 0.75,
+
+  GLD: 2,
+  SHY: 2,
+  XLV: 1.5,
+  XLP: 1.5,
+  TLT: 1,
+
+  BTC: 2,
+  ETH: 1,
+
+  JPM: 1.5,
+  XLE: 1,
+  BABA: 0.5,
+
+  PLTR: 1.5,
+  COIN: 1,
+  SOL: 0.5,
+  RKLB: 0.5,
+  IONQ: 0.5,
+  ASTS: 0.5
+});
+
+const ALLOCATION_PROFILE_PRESETS = Object.freeze({
+  conservative: {
+    cashTargetPct: 15,
+    bucketTargetsPct: {
+      CORE_EQUITY: 22,
+      GROWTH_TECH: 15,
+      DEFENSIVE_REAL: 31,
+      CRYPTO_MAJOR: 5,
+      VALUE_CYCLICAL: 10,
+      SPECULATIVE: 2
+    },
+    bucketBandsPct: {
+      CORE_EQUITY: [14, 32],
+      GROWTH_TECH: [5, 25],
+      DEFENSIVE_REAL: [22, 42],
+      CRYPTO_MAJOR: [0, 12],
+      VALUE_CYCLICAL: [2, 18],
+      SPECULATIVE: [0, 6]
+    }
+  },
+  balanced: {
+    cashTargetPct: 12,
+    bucketTargetsPct: {
+      CORE_EQUITY: 22,
+      GROWTH_TECH: 24,
+      DEFENSIVE_REAL: 24,
+      CRYPTO_MAJOR: 9,
+      VALUE_CYCLICAL: 5,
+      SPECULATIVE: 4
+    },
+    bucketBandsPct: {
+      CORE_EQUITY: [14, 32],
+      GROWTH_TECH: [12, 34],
+      DEFENSIVE_REAL: [16, 36],
+      CRYPTO_MAJOR: [0, 18],
+      VALUE_CYCLICAL: [0, 15],
+      SPECULATIVE: [0, 10]
+    }
+  },
+  growth: {
+    cashTargetPct: 10,
+    bucketTargetsPct: {
+      CORE_EQUITY: 18,
+      GROWTH_TECH: 34,
+      DEFENSIVE_REAL: 16,
+      CRYPTO_MAJOR: 12,
+      VALUE_CYCLICAL: 5,
+      SPECULATIVE: 5
+    },
+    bucketBandsPct: {
+      CORE_EQUITY: [10, 28],
+      GROWTH_TECH: [20, 44],
+      DEFENSIVE_REAL: [8, 28],
+      CRYPTO_MAJOR: [2, 22],
+      VALUE_CYCLICAL: [0, 15],
+      SPECULATIVE: [0, 12]
+    }
+  }
+});
+
+function safeAllocationTargetOverrides() {
+  if (!ALLOCATION_CUSTOM_ASSET_TARGETS_JSON) return {};
+  try {
+    const parsed = JSON.parse(ALLOCATION_CUSTOM_ASSET_TARGETS_JSON);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .map(([asset, value]) => [String(asset).toUpperCase(), Number(value)])
+        .filter(([asset, value]) => WATCHLIST[asset] && Number.isFinite(value) && value >= 0)
+    );
+  } catch (error) {
+    console.warn("ALLOCATION_ASSET_TARGETS_JSON invalide, profil par défaut conservé:", error.message);
+    return {};
+  }
+}
+
+function buildPortfolioAllocationPolicy() {
+  const preset = ALLOCATION_PROFILE_PRESETS[PORTFOLIO_ALLOCATION_PROFILE] || ALLOCATION_PROFILE_PRESETS.balanced;
+  const overrides = safeAllocationTargetOverrides();
+  const investableTargetPct = Math.max(0, 100 - Number(preset.cashTargetPct || 0));
+  const assetsByBucket = {};
+  for (const asset of Object.keys(WATCHLIST)) {
+    const bucket = ALLOCATION_BUCKET_BY_ASSET[asset] || "UNCLASSIFIED";
+    if (!assetsByBucket[bucket]) assetsByBucket[bucket] = [];
+    assetsByBucket[bucket].push(asset);
+  }
+
+  const assetTargetsPct = {};
+  if (Object.keys(overrides).length > 0) {
+    const rawTotal = Object.values(overrides).reduce((sum, value) => sum + Number(value || 0), 0);
+    const scale = rawTotal > 0 ? investableTargetPct / rawTotal : 0;
+    for (const asset of Object.keys(WATCHLIST)) {
+      assetTargetsPct[asset] = roundNumber(Number(overrides[asset] || 0) * scale, 4);
+    }
+  } else {
+    for (const [bucket, bucketTarget] of Object.entries(preset.bucketTargetsPct || {})) {
+      const assets = assetsByBucket[bucket] || [];
+      const scoreTotal = assets.reduce((sum, asset) => sum + Number(ALLOCATION_ASSET_SCORES[asset] || 1), 0);
+      for (const asset of assets) {
+        const score = Number(ALLOCATION_ASSET_SCORES[asset] || 1);
+        assetTargetsPct[asset] = scoreTotal > 0
+          ? roundNumber(Number(bucketTarget) * score / scoreTotal, 4)
+          : 0;
+      }
+    }
+  }
+
+  const assetMaxPct = {};
+  for (const asset of Object.keys(WATCHLIST)) {
+    const target = Number(assetTargetsPct[asset] || 0);
+    assetMaxPct[asset] = roundNumber(Math.min(
+      MAX_ASSET_WEIGHT_PCT,
+      Math.max(target * 1.8, target + ALLOCATION_ASSET_BAND_TOLERANCE_PCT)
+    ), 4);
+  }
+
+  return {
+    enabled: PORTFOLIO_ALLOCATION_ENGINE_ENABLED,
+    mode: PORTFOLIO_ALLOCATION_MODE,
+    profile: PORTFOLIO_ALLOCATION_PROFILE,
+    cashTargetPct: Number(preset.cashTargetPct),
+    hardCashMinimumPct: MIN_CASH_RESERVE_PCT,
+    investableTargetPct,
+    requireUnderTargetForNewBuy: ALLOCATION_REQUIRE_UNDER_TARGET_FOR_NEW_BUY,
+    minimumGapPct: ALLOCATION_MIN_GAP_PCT,
+    assetBandTolerancePct: ALLOCATION_ASSET_BAND_TOLERANCE_PCT,
+    bucketTargetsPct: { ...preset.bucketTargetsPct },
+    bucketBandsPct: Object.fromEntries(
+      Object.entries(preset.bucketBandsPct || {}).map(([bucket, band]) => [bucket, {
+        minPct: Number(band?.[0] || 0),
+        maxPct: Number(band?.[1] || 100)
+      }])
+    ),
+    assetTargetsPct,
+    assetMaxPct,
+    customTargetsActive: Object.keys(overrides).length > 0,
+    noAllocationOnlyAutoSell: true
+  };
+}
+
+const PORTFOLIO_ALLOCATION_POLICY = buildPortfolioAllocationPolicy();
+
 const TWELVE_DATA_SYMBOLS = {
   BTC: "BTC/USD",
   ETH: "ETH/USD",
@@ -760,8 +1461,17 @@ const runtimeState = {
   lastMarketData: null,
   trendMemory: {},
   equityHistory: [],
+  performanceHistory: [],
+  performanceBaseline: null,
+  lastPerformanceReport: null,
+  riskSellHighWaterByAsset: {},
+  riskSellHistory: [],
+  lastRiskSellReport: null,
   auditTrail: [],
   orderIntents: {},
+  executionVerificationHistory: [],
+  lastExecutionVerification: null,
+  lastExecutionReconciliation: null,
   paperPortfolio: null,
   secondaryCache: {},
   marketConsensusCache: {},
@@ -774,6 +1484,25 @@ const runtimeState = {
   lastIntelligenceAnalysis: null,
   redditAccessToken: null,
   marketRegimeHistory: [],
+  macroCreditRegimeHistory: [],
+  lastMacroCreditRegime: null,
+  researchSources: [],
+  researchEvidence: [],
+  researchHypotheses: [],
+  researchExperiments: [],
+  researchEvents: [],
+  lastResearchReport: null,
+  dataQualityHistory: [],
+  dataQualityBySeries: {},
+  lastDataQualityReport: null,
+  scientificBacktestRegistry: [],
+  lastScientificBacktestReport: null,
+  strategyLabV2Running: false,
+  strategyLabV2Experiments: [],
+  strategyLabV2Runs: [],
+  strategyLabV2Leaderboard: [],
+  strategyLabV2Events: [],
+  lastStrategyLabV2Run: null,
   lastFoundationAgents: null,
   lastAgentCouncil: null,
   agentCouncilHistory: [],
@@ -805,7 +1534,7 @@ const runtimeState = {
 };
 
 const PROMPT = `
-Tu es LEO-AI SENTINEL v10.10.1, le StrategyCoordinator d'un conseil multi-agents quantitatif, fondamental, informationnel, multi-source et explicable.
+Tu es LEO-AI SENTINEL v10.18, le StrategyCoordinator d'un conseil multi-agents quantitatif, fondamental, informationnel, multi-source et explicable.
 
 MISSION :
 Construire et gérer progressivement un portefeuille diversifié, en protégeant le capital.
@@ -822,6 +1551,7 @@ Tu reçois les conclusions de plusieurs agents déterministes :
 - SocialSentimentAgent : mentions Reddit/Finnhub, sentiment, bruit, doublons et risque de hype/manipulation.
 - AlternativeDataCoordinator : synthèse prudente des actualités, fondamentaux et réseaux sociaux.
 - PortfolioAgent : valeurs, pondérations par actif et par catégorie.
+- PortfolioAllocationEngine : profil de risque, cible de cash, poches stratégiques, bandes min/max et écarts à la cible.
 - RiskBudgetAgent : cash disponible, réserve, concentration, pertes et drawdown.
 - HealthAgent : erreurs consécutives et circuit breaker.
 - ExecutionReadinessAgent : vérifie ordres en attente, cooldowns, capacité d'exécution et limites opérationnelles.
@@ -831,6 +1561,7 @@ Tu reçois les conclusions de plusieurs agents déterministes :
 - PaperPerformanceAgent : mesure les résultats réels du mode PAPER, les frais, le slippage et le benchmark.
 - PointInTimeArchive : conserve ce qui était réellement connu au moment de la collecte pour les futurs replays historiques.
 - StrategyLab : teste des paramètres candidats en environnement isolé et rejette les régressions; il ne modifie jamais directement le code.
+- ResearchKnowledgeLayer : bibliothèque scientifique structurée, advisory-only, sans accès direct aux ordres LIVE.
 - AgentCouncilCoordinator : résout les désaccords sans jamais contourner un hard veto.
 Le RiskController final garde un droit de veto absolu.
 
@@ -847,6 +1578,8 @@ RÈGLES ABSOLUES :
 - Ignorer les actifs MARKET_CLOSED sans bloquer ceux qui restent ouverts.
 - Ne jamais acheter un actif déjà détenu.
 - Éviter la concentration excessive par actif, catégorie, technologie, crypto ou spéculatif.
+- Respecter le PortfolioAllocationEngine : un BUY doit viser une poche sous sa cible et rester sous les bandes maximales.
+- Une surpondération d’allocation ne déclenche jamais seule un SELL; elle interdit surtout de renforcer la poche.
 - Respecter la réserve de cash et les limites du RiskBudgetAgent.
 - Une divergence importante entre fournisseurs impose HOLD sur l'actif concerné.
 - Une source secondaire absente en mode advisory n'est pas une preuve de danger.
@@ -871,6 +1604,8 @@ RÈGLES ABSOLUES :
 - En cas de désaccord élevé, réduis la confiance et préfère HOLD.
 - Dans reason, résume les principaux agents favorables et opposés sans inventer leurs avis.
 - Une stratégie candidate du StrategyLab n'influence le mode LIVE que si elle possède une approbation LIVE explicite; par défaut elle reste limitée à OBSERVE/PAPER.
+- Une source, une preuve académique ou une hypothèse de recherche ne constitue jamais un signal de marché actuel et ne peut jamais déclencher directement BUY ou SELL.
+- Toute règle issue de la recherche doit passer par backtest sans look-ahead, walk-forward, coûts réalistes, PAPER et validation humaine avant toute promotion.
 - L'archive point-in-time ne prouve pas encore plusieurs années d'historique : utilise uniquement sa couverture réellement disponible.
 
 STARTER PORTFOLIO MODE :
@@ -1214,8 +1949,17 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
       executionHistory: runtimeState.executionHistory || [],
       trendMemory: runtimeState.trendMemory || {},
       equityHistory: (runtimeState.equityHistory || []).slice(-1500),
+      performanceHistory: (runtimeState.performanceHistory || []).slice(-PERFORMANCE_HISTORY_LIMIT),
+      performanceBaseline: runtimeState.performanceBaseline || null,
+      lastPerformanceReport: runtimeState.lastPerformanceReport || null,
+      riskSellHighWaterByAsset: runtimeState.riskSellHighWaterByAsset || {},
+      riskSellHistory: (runtimeState.riskSellHistory || []).slice(0, RISK_SELL_HISTORY_LIMIT),
+      lastRiskSellReport: runtimeState.lastRiskSellReport || null,
       auditTrail: (runtimeState.auditTrail || []).slice(0, 500),
       orderIntents: runtimeState.orderIntents || {},
+      executionVerificationHistory: (runtimeState.executionVerificationHistory || []).slice(0, EXECUTION_VERIFY_HISTORY_LIMIT),
+      lastExecutionVerification: runtimeState.lastExecutionVerification || null,
+      lastExecutionReconciliation: runtimeState.lastExecutionReconciliation || null,
       paperPortfolio: runtimeState.paperPortfolio || null,
       systemHealth: runtimeState.systemHealth || {},
       secondaryCache: runtimeState.secondaryCache || {},
@@ -1228,6 +1972,24 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
       intelligenceCache: runtimeState.intelligenceCache || {},
       lastIntelligenceAnalysis: runtimeState.lastIntelligenceAnalysis || null,
       marketRegimeHistory: (runtimeState.marketRegimeHistory || []).slice(-500),
+      macroCreditRegimeHistory: (runtimeState.macroCreditRegimeHistory || []).slice(-MACRO_REGIME_HISTORY_LIMIT),
+      lastMacroCreditRegime: runtimeState.lastMacroCreditRegime || null,
+      researchSources: (runtimeState.researchSources || []).slice(0, RESEARCH_MAX_SOURCES),
+      researchEvidence: (runtimeState.researchEvidence || []).slice(0, RESEARCH_MAX_EVIDENCE),
+      researchHypotheses: (runtimeState.researchHypotheses || []).slice(0, RESEARCH_MAX_HYPOTHESES),
+      researchExperiments: (runtimeState.researchExperiments || []).slice(0, RESEARCH_MAX_EXPERIMENTS),
+      researchEvents: (runtimeState.researchEvents || []).slice(0, RESEARCH_EVENT_HISTORY_LIMIT),
+      lastResearchReport: runtimeState.lastResearchReport || null,
+      dataQualityHistory: (runtimeState.dataQualityHistory || []).slice(0, DATA_QUALITY_HISTORY_LIMIT),
+      dataQualityBySeries: runtimeState.dataQualityBySeries || {},
+      lastDataQualityReport: runtimeState.lastDataQualityReport || null,
+      scientificBacktestRegistry: (runtimeState.scientificBacktestRegistry || []).slice(0, SCIENTIFIC_BACKTEST_REGISTRY_LIMIT),
+      lastScientificBacktestReport: runtimeState.lastScientificBacktestReport || null,
+      strategyLabV2Experiments: (runtimeState.strategyLabV2Experiments || []).slice(0, STRATEGY_LAB_V2_HISTORY_LIMIT),
+      strategyLabV2Runs: (runtimeState.strategyLabV2Runs || []).slice(0, STRATEGY_LAB_V2_HISTORY_LIMIT),
+      strategyLabV2Leaderboard: (runtimeState.strategyLabV2Leaderboard || []).slice(0, STRATEGY_LAB_V2_LEADERBOARD_LIMIT),
+      strategyLabV2Events: (runtimeState.strategyLabV2Events || []).slice(0, STRATEGY_LAB_V2_HISTORY_LIMIT),
+      lastStrategyLabV2Run: runtimeState.lastStrategyLabV2Run || null,
       lastFoundationAgents: runtimeState.lastFoundationAgents || null,
       lastAgentCouncil: runtimeState.lastAgentCouncil || null,
       agentCouncilHistory: (runtimeState.agentCouncilHistory || []).slice(0, COUNCIL_HISTORY_LIMIT),
@@ -1270,15 +2032,42 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
     executionHistory: (runtimeState.executionHistory || []).slice(0, 50),
     trendMemory: compactTrendMemory,
     equityHistory: (runtimeState.equityHistory || []).slice(-500),
+    performanceHistory: (runtimeState.performanceHistory || []).slice(-Math.min(365, PERFORMANCE_HISTORY_LIMIT)),
+    performanceBaseline: runtimeState.performanceBaseline || null,
+    lastPerformanceReport: runtimeState.lastPerformanceReport || null,
+    riskSellHighWaterByAsset: runtimeState.riskSellHighWaterByAsset || {},
+    riskSellHistory: (runtimeState.riskSellHistory || []).slice(0, Math.min(80, RISK_SELL_HISTORY_LIMIT)),
+    lastRiskSellReport: runtimeState.lastRiskSellReport || null,
     auditTrail: (runtimeState.auditTrail || [])
       .slice(0, UPSTASH_PERSISTED_AUDIT_LIMIT)
       .map(compactAuditForPersistence)
       .filter(Boolean),
     orderIntents: runtimeState.orderIntents || {},
+    executionVerificationHistory: (runtimeState.executionVerificationHistory || []).slice(0, Math.min(60, EXECUTION_VERIFY_HISTORY_LIMIT)),
+    lastExecutionVerification: runtimeState.lastExecutionVerification || null,
+    lastExecutionReconciliation: runtimeState.lastExecutionReconciliation || null,
     paperPortfolio: compactPaperPortfolioForPersistence(runtimeState.paperPortfolio),
     systemHealth: runtimeState.systemHealth || {},
     providerHealth: runtimeState.providerHealth || {},
     marketRegimeHistory: (runtimeState.marketRegimeHistory || []).slice(-120),
+    macroCreditRegimeHistory: (runtimeState.macroCreditRegimeHistory || []).slice(-Math.min(120, MACRO_REGIME_HISTORY_LIMIT)),
+    lastMacroCreditRegime: runtimeState.lastMacroCreditRegime || null,
+    researchSources: (runtimeState.researchSources || []).slice(0, Math.min(80, RESEARCH_MAX_SOURCES)),
+    researchEvidence: (runtimeState.researchEvidence || []).slice(0, Math.min(140, RESEARCH_MAX_EVIDENCE)),
+    researchHypotheses: (runtimeState.researchHypotheses || []).slice(0, Math.min(80, RESEARCH_MAX_HYPOTHESES)),
+    researchExperiments: (runtimeState.researchExperiments || []).slice(0, Math.min(80, RESEARCH_MAX_EXPERIMENTS)),
+    researchEvents: (runtimeState.researchEvents || []).slice(0, Math.min(80, RESEARCH_EVENT_HISTORY_LIMIT)),
+    lastResearchReport: runtimeState.lastResearchReport || null,
+    dataQualityHistory: (runtimeState.dataQualityHistory || []).slice(0, Math.min(80, DATA_QUALITY_HISTORY_LIMIT)),
+    dataQualityBySeries: runtimeState.dataQualityBySeries || {},
+    lastDataQualityReport: runtimeState.lastDataQualityReport || null,
+    scientificBacktestRegistry: (runtimeState.scientificBacktestRegistry || []).slice(0, Math.min(80, SCIENTIFIC_BACKTEST_REGISTRY_LIMIT)),
+    lastScientificBacktestReport: runtimeState.lastScientificBacktestReport || null,
+    strategyLabV2Experiments: (runtimeState.strategyLabV2Experiments || []).slice(0, Math.min(50, STRATEGY_LAB_V2_HISTORY_LIMIT)),
+    strategyLabV2Runs: (runtimeState.strategyLabV2Runs || []).slice(0, Math.min(35, STRATEGY_LAB_V2_HISTORY_LIMIT)),
+    strategyLabV2Leaderboard: (runtimeState.strategyLabV2Leaderboard || []).slice(0, Math.min(60, STRATEGY_LAB_V2_LEADERBOARD_LIMIT)),
+    strategyLabV2Events: (runtimeState.strategyLabV2Events || []).slice(0, Math.min(50, STRATEGY_LAB_V2_HISTORY_LIMIT)),
+    lastStrategyLabV2Run: runtimeState.lastStrategyLabV2Run || null,
     agentCouncilHistory: (runtimeState.agentCouncilHistory || []).slice(0, Math.min(80, COUNCIL_HISTORY_LIMIT)),
     backtestHistory: (runtimeState.backtestHistory || []).slice(0, 30),
     lastBacktest: compactBacktestResult(runtimeState.lastBacktest),
@@ -1309,7 +2098,7 @@ function fitPersistentStateToBudget(state, maxBytes = UPSTASH_MAX_STATE_BYTES) {
   const reduceArray = (key, minimum) => {
     if (!Array.isArray(working[key]) || working[key].length <= minimum) return false;
     const nextLength = Math.max(minimum, Math.ceil(working[key].length / 2));
-    working[key] = key === "equityHistory" || key === "paperPerformanceHistory" || key === "pointInTimeArchive"
+    working[key] = key === "equityHistory" || key === "performanceHistory" || key === "paperPerformanceHistory" || key === "pointInTimeArchive"
       ? working[key].slice(-nextLength)
       : working[key].slice(0, nextLength);
     reductions.push(`${key}:${nextLength}`);
@@ -1326,9 +2115,24 @@ function fitPersistentStateToBudget(state, maxBytes = UPSTASH_MAX_STATE_BYTES) {
     changed = reduceArray("auditTrail", 10) || changed;
     changed = reduceArray("agentCouncilHistory", 10) || changed;
     changed = reduceArray("equityHistory", 50) || changed;
+    changed = reduceArray("performanceHistory", 30) || changed;
+    changed = reduceArray("riskSellHistory", 20) || changed;
+    changed = reduceArray("macroCreditRegimeHistory", 20) || changed;
     changed = reduceArray("backtestHistory", 5) || changed;
+    changed = reduceArray("researchEvents", 10) || changed;
+    changed = reduceArray("researchExperiments", 10) || changed;
+    changed = reduceArray("researchHypotheses", 10) || changed;
+    changed = reduceArray("researchEvidence", 20) || changed;
+    changed = reduceArray("researchSources", 20) || changed;
+    changed = reduceArray("dataQualityHistory", 10) || changed;
+    changed = reduceArray("scientificBacktestRegistry", 10) || changed;
+    changed = reduceArray("strategyLabV2Events", 10) || changed;
+    changed = reduceArray("strategyLabV2Runs", 5) || changed;
+    changed = reduceArray("strategyLabV2Experiments", 5) || changed;
+    changed = reduceArray("strategyLabV2Leaderboard", 10) || changed;
     changed = reduceArray("strategyCandidates", 5) || changed;
     changed = reduceArray("improvementHistory", 5) || changed;
+    changed = reduceArray("executionVerificationHistory", 10) || changed;
     if (working.paperPortfolio?.snapshots?.length > 25) {
       working.paperPortfolio.snapshots = working.paperPortfolio.snapshots.slice(-Math.max(25, Math.ceil(working.paperPortfolio.snapshots.length / 2)));
       reductions.push(`paperPortfolio.snapshots:${working.paperPortfolio.snapshots.length}`);
@@ -1349,7 +2153,34 @@ function fitPersistentStateToBudget(state, maxBytes = UPSTASH_MAX_STATE_BYTES) {
       executionHistory: (working.executionHistory || []).slice(0, 20),
       trendMemory: working.trendMemory || {},
       equityHistory: (working.equityHistory || []).slice(-100),
+      performanceHistory: (working.performanceHistory || []).slice(-50),
+      performanceBaseline: working.performanceBaseline || null,
+      lastPerformanceReport: working.lastPerformanceReport || null,
+      riskSellHighWaterByAsset: working.riskSellHighWaterByAsset || {},
+      riskSellHistory: (working.riskSellHistory || []).slice(0, 20),
+      lastRiskSellReport: working.lastRiskSellReport || null,
+      macroCreditRegimeHistory: (working.macroCreditRegimeHistory || []).slice(-20),
+      lastMacroCreditRegime: working.lastMacroCreditRegime || null,
+      researchSources: (working.researchSources || []).slice(0, 20),
+      researchEvidence: (working.researchEvidence || []).slice(0, 20),
+      researchHypotheses: (working.researchHypotheses || []).slice(0, 10),
+      researchExperiments: (working.researchExperiments || []).slice(0, 10),
+      researchEvents: (working.researchEvents || []).slice(0, 10),
+      lastResearchReport: working.lastResearchReport || null,
+      dataQualityHistory: (working.dataQualityHistory || []).slice(0, 10),
+      dataQualityBySeries: working.dataQualityBySeries || {},
+      lastDataQualityReport: working.lastDataQualityReport || null,
+      scientificBacktestRegistry: (working.scientificBacktestRegistry || []).slice(0, 10),
+      lastScientificBacktestReport: working.lastScientificBacktestReport || null,
+      strategyLabV2Experiments: (working.strategyLabV2Experiments || []).slice(0, 5),
+      strategyLabV2Runs: (working.strategyLabV2Runs || []).slice(0, 5),
+      strategyLabV2Leaderboard: (working.strategyLabV2Leaderboard || []).slice(0, 10),
+      strategyLabV2Events: (working.strategyLabV2Events || []).slice(0, 10),
+      lastStrategyLabV2Run: working.lastStrategyLabV2Run || null,
       orderIntents: working.orderIntents || {},
+      executionVerificationHistory: (working.executionVerificationHistory || []).slice(0, 20),
+      lastExecutionVerification: working.lastExecutionVerification || null,
+      lastExecutionReconciliation: working.lastExecutionReconciliation || null,
       paperPortfolio: working.paperPortfolio ? {
         ...working.paperPortfolio,
         orders: (working.paperPortfolio.orders || []).slice(0, 50),
@@ -1410,8 +2241,42 @@ function applyPersistentState(state) {
       .filter((point) => point && Number.isFinite(Number(point.equity)))
       .slice(-1500);
   }
+  if (Array.isArray(state.performanceHistory)) {
+    runtimeState.performanceHistory = state.performanceHistory
+      .filter((point) => point && point.time && Number.isFinite(Number(point.equity)))
+      .slice(-PERFORMANCE_HISTORY_LIMIT);
+  }
+  if (state.performanceBaseline && typeof state.performanceBaseline === "object") {
+    runtimeState.performanceBaseline = state.performanceBaseline;
+  }
+  if (state.lastPerformanceReport && typeof state.lastPerformanceReport === "object") {
+    runtimeState.lastPerformanceReport = state.lastPerformanceReport;
+  }
+  if (state.riskSellHighWaterByAsset && typeof state.riskSellHighWaterByAsset === "object") {
+    runtimeState.riskSellHighWaterByAsset = state.riskSellHighWaterByAsset;
+  }
+  if (Array.isArray(state.riskSellHistory)) {
+    runtimeState.riskSellHistory = state.riskSellHistory.slice(0, RISK_SELL_HISTORY_LIMIT);
+  }
+  if (state.lastRiskSellReport && typeof state.lastRiskSellReport === "object") {
+    runtimeState.lastRiskSellReport = state.lastRiskSellReport;
+  }
   if (Array.isArray(state.auditTrail)) runtimeState.auditTrail = state.auditTrail.slice(0, 500);
-  if (state.orderIntents && typeof state.orderIntents === "object") runtimeState.orderIntents = state.orderIntents;
+  if (state.orderIntents && typeof state.orderIntents === "object") {
+    runtimeState.orderIntents = Object.fromEntries(
+      Object.entries(state.orderIntents).map(([id, intent]) => [id, migrateOrderIntent(intent)])
+    );
+  }
+  if (Array.isArray(state.executionVerificationHistory)) {
+    runtimeState.executionVerificationHistory = state.executionVerificationHistory
+      .slice(0, EXECUTION_VERIFY_HISTORY_LIMIT);
+  }
+  if (state.lastExecutionVerification && typeof state.lastExecutionVerification === "object") {
+    runtimeState.lastExecutionVerification = state.lastExecutionVerification;
+  }
+  if (state.lastExecutionReconciliation && typeof state.lastExecutionReconciliation === "object") {
+    runtimeState.lastExecutionReconciliation = state.lastExecutionReconciliation;
+  }
   if (state.paperPortfolio && typeof state.paperPortfolio === "object") runtimeState.paperPortfolio = state.paperPortfolio;
   if (state.systemHealth && typeof state.systemHealth === "object") {
     runtimeState.systemHealth = { ...runtimeState.systemHealth, ...state.systemHealth };
@@ -1446,6 +2311,28 @@ function applyPersistentState(state) {
   if (Array.isArray(state.marketRegimeHistory)) {
     runtimeState.marketRegimeHistory = state.marketRegimeHistory.slice(-500);
   }
+  if (Array.isArray(state.macroCreditRegimeHistory)) {
+    runtimeState.macroCreditRegimeHistory = state.macroCreditRegimeHistory.slice(-MACRO_REGIME_HISTORY_LIMIT);
+  }
+  if (state.lastMacroCreditRegime && typeof state.lastMacroCreditRegime === "object") {
+    runtimeState.lastMacroCreditRegime = state.lastMacroCreditRegime;
+  }
+  if (Array.isArray(state.researchSources)) runtimeState.researchSources = state.researchSources.slice(0, RESEARCH_MAX_SOURCES);
+  if (Array.isArray(state.researchEvidence)) runtimeState.researchEvidence = state.researchEvidence.slice(0, RESEARCH_MAX_EVIDENCE);
+  if (Array.isArray(state.researchHypotheses)) runtimeState.researchHypotheses = state.researchHypotheses.slice(0, RESEARCH_MAX_HYPOTHESES);
+  if (Array.isArray(state.researchExperiments)) runtimeState.researchExperiments = state.researchExperiments.slice(0, RESEARCH_MAX_EXPERIMENTS);
+  if (Array.isArray(state.researchEvents)) runtimeState.researchEvents = state.researchEvents.slice(0, RESEARCH_EVENT_HISTORY_LIMIT);
+  if (state.lastResearchReport && typeof state.lastResearchReport === "object") runtimeState.lastResearchReport = state.lastResearchReport;
+  if (Array.isArray(state.dataQualityHistory)) runtimeState.dataQualityHistory = state.dataQualityHistory.slice(0, DATA_QUALITY_HISTORY_LIMIT);
+  if (state.dataQualityBySeries && typeof state.dataQualityBySeries === "object") runtimeState.dataQualityBySeries = state.dataQualityBySeries;
+  if (state.lastDataQualityReport && typeof state.lastDataQualityReport === "object") runtimeState.lastDataQualityReport = state.lastDataQualityReport;
+  if (Array.isArray(state.scientificBacktestRegistry)) runtimeState.scientificBacktestRegistry = state.scientificBacktestRegistry.slice(0, SCIENTIFIC_BACKTEST_REGISTRY_LIMIT);
+  if (state.lastScientificBacktestReport && typeof state.lastScientificBacktestReport === "object") runtimeState.lastScientificBacktestReport = state.lastScientificBacktestReport;
+  if (Array.isArray(state.strategyLabV2Experiments)) runtimeState.strategyLabV2Experiments = state.strategyLabV2Experiments.slice(0, STRATEGY_LAB_V2_HISTORY_LIMIT);
+  if (Array.isArray(state.strategyLabV2Runs)) runtimeState.strategyLabV2Runs = state.strategyLabV2Runs.slice(0, STRATEGY_LAB_V2_HISTORY_LIMIT);
+  if (Array.isArray(state.strategyLabV2Leaderboard)) runtimeState.strategyLabV2Leaderboard = state.strategyLabV2Leaderboard.slice(0, STRATEGY_LAB_V2_LEADERBOARD_LIMIT);
+  if (Array.isArray(state.strategyLabV2Events)) runtimeState.strategyLabV2Events = state.strategyLabV2Events.slice(0, STRATEGY_LAB_V2_HISTORY_LIMIT);
+  if (state.lastStrategyLabV2Run && typeof state.lastStrategyLabV2Run === "object") runtimeState.lastStrategyLabV2Run = state.lastStrategyLabV2Run;
   if (state.lastFoundationAgents) runtimeState.lastFoundationAgents = state.lastFoundationAgents;
   if (state.lastAgentCouncil && typeof state.lastAgentCouncil === "object") {
     runtimeState.lastAgentCouncil = state.lastAgentCouncil;
@@ -1588,6 +2475,15 @@ function scheduleSave() {
 
 function memoryStatus() {
   const persistent = hasUpstashMemory() || !STATE_FILE.startsWith("/tmp/");
+  const maxBytes = hasUpstashMemory() ? UPSTASH_MAX_STATE_BYTES : null;
+  const usagePct = maxBytes && Number.isFinite(Number(lastMemorySaveBytes))
+    ? Number(((Number(lastMemorySaveBytes) / maxBytes) * 100).toFixed(2))
+    : null;
+  const pressure = usagePct === null
+    ? "UNKNOWN"
+    : (usagePct >= MEMORY_CRITICAL_PCT
+        ? "CRITICAL"
+        : (usagePct >= MEMORY_WARNING_PCT ? "WARNING" : "OK"));
 
   return {
     backend: memoryBackend,
@@ -1601,11 +2497,22 @@ function memoryStatus() {
     last_load: lastMemoryLoad,
     last_save: lastMemorySave,
     last_save_bytes: lastMemorySaveBytes,
-    upstash_max_state_bytes: hasUpstashMemory() ? UPSTASH_MAX_STATE_BYTES : null,
+    upstash_max_state_bytes: maxBytes,
+    memory_usage_pct: usagePct,
+    memory_pressure: pressure,
+    memory_warning_pct: MEMORY_WARNING_PCT,
+    memory_critical_pct: MEMORY_CRITICAL_PCT,
     compaction: lastMemoryCompaction,
     last_error: lastMemoryError,
     logs_count: runtimeState.logs.length,
     audit_count: runtimeState.auditTrail.length,
+    data_quality_reports_count: runtimeState.dataQualityHistory.length,
+    scientific_backtests_count: runtimeState.scientificBacktestRegistry.length,
+    strategy_lab_v2_experiments_count: runtimeState.strategyLabV2Experiments.length,
+    strategy_lab_v2_runs_count: runtimeState.strategyLabV2Runs.length,
+    strategy_lab_v2_leaderboard_count: runtimeState.strategyLabV2Leaderboard.length,
+    strategy_lab_v2_running: Boolean(runtimeState.strategyLabV2Running),
+    last_strategy_lab_v2_run: runtimeState.lastStrategyLabV2Run?.generatedAt || null,
     trend_assets_count: Object.keys(runtimeState.trendMemory || {}).length,
     technical_cache_entries: Object.keys(runtimeState.technicalCache || {}).length,
     historical_cache_entries: Object.keys(runtimeState.historicalCache || {}).length,
@@ -1613,6 +2520,14 @@ function memoryStatus() {
     provider_health_entries: Object.keys(runtimeState.providerHealth || {}).length,
     technical_assets_count: Object.keys(runtimeState.lastTechnicalAnalysis?.assets || {}).length,
     regime_history_count: runtimeState.marketRegimeHistory.length,
+    macro_regime_history_count: runtimeState.macroCreditRegimeHistory.length,
+    last_macro_regime: runtimeState.lastMacroCreditRegime?.regime || null,
+    research_sources_count: runtimeState.researchSources.length,
+    research_evidence_count: runtimeState.researchEvidence.length,
+    research_hypotheses_count: runtimeState.researchHypotheses.length,
+    research_experiments_count: runtimeState.researchExperiments.length,
+    research_events_count: runtimeState.researchEvents.length,
+    last_research_report: runtimeState.lastResearchReport?.generatedAt || null,
     council_history_count: runtimeState.agentCouncilHistory.length,
     council_assets_count: Object.keys(runtimeState.lastAgentCouncil?.assets || {}).length,
     has_last_agent_council: Boolean(runtimeState.lastAgentCouncil),
@@ -1633,11 +2548,202 @@ function memoryStatus() {
     active_strategy_id: runtimeState.strategyRegistry?.active?.id || null,
     last_improvement_run: runtimeState.lastImprovementRun?.generatedAt || null,
     equity_points_count: runtimeState.equityHistory.length,
+    performance_points_count: runtimeState.performanceHistory.length,
+    has_performance_baseline: Boolean(runtimeState.performanceBaseline),
+    last_performance_report: runtimeState.lastPerformanceReport?.generatedAt || null,
+    risk_sell_history_count: runtimeState.riskSellHistory.length,
+    risk_sell_high_water_assets: Object.keys(runtimeState.riskSellHighWaterByAsset || {}).length,
+    last_risk_sell_report: runtimeState.lastRiskSellReport?.generatedAt || null,
     execution_history_count: runtimeState.executionHistory.length,
     order_intents_count: Object.keys(runtimeState.orderIntents || {}).length,
+    active_order_intents_count: Object.values(runtimeState.orderIntents || {})
+      .filter((intent) => isActiveExecutionStatus(intent?.status)).length,
+    execution_verification_history_count: runtimeState.executionVerificationHistory.length,
+    last_execution_verification: runtimeState.lastExecutionVerification?.time || null,
+    last_execution_reconciliation: runtimeState.lastExecutionReconciliation?.time || null,
     paper_portfolio_initialized: Boolean(runtimeState.paperPortfolio),
     has_last_decision: Boolean(runtimeState.lastDecision),
     has_last_watch: Boolean(runtimeState.lastWatch)
+  };
+}
+
+function schedulerStatus() {
+  return {
+    version: VERSION,
+    internalWatchEnabled: ENABLE_INTERNAL_WATCH_CRON,
+    internalTradeEnabled: ENABLE_INTERNAL_TRADE_CRON,
+    watchSchedule: ENABLE_INTERNAL_WATCH_CRON ? WATCH_CRON_SCHEDULE : null,
+    tradeSchedule: ENABLE_INTERNAL_TRADE_CRON ? TRADE_CRON_SCHEDULE : null,
+    archiveScheduleEnabled: Boolean(
+      POINT_IN_TIME_ARCHIVE_ENABLED && POINT_IN_TIME_ARCHIVE_SCHEDULE_ENABLED
+    ),
+    archiveSchedule: POINT_IN_TIME_ARCHIVE_ENABLED && POINT_IN_TIME_ARCHIVE_SCHEDULE_ENABLED
+      ? POINT_IN_TIME_ARCHIVE_CRON
+      : null,
+    strategyLabScheduleEnabled: Boolean(
+      AUTO_IMPROVEMENT_ENABLED && AUTO_IMPROVEMENT_SCHEDULE_ENABLED && TRADING_MODE !== "LIVE"
+    ),
+    strategyLabSchedule: AUTO_IMPROVEMENT_ENABLED && AUTO_IMPROVEMENT_SCHEDULE_ENABLED
+      ? AUTO_IMPROVEMENT_CRON
+      : null,
+    strategyLabV2ScheduleEnabled: Boolean(
+      STRATEGY_LAB_V2_ENABLED && STRATEGY_LAB_V2_SCHEDULE_ENABLED &&
+      (TRADING_MODE !== "LIVE" || STRATEGY_LAB_V2_LIVE_ANALYSIS_ENABLED)
+    ),
+    strategyLabV2Schedule: STRATEGY_LAB_V2_ENABLED && STRATEGY_LAB_V2_SCHEDULE_ENABLED
+      ? STRATEGY_LAB_V2_CRON
+      : null,
+    automationLogDetail: AUTOMATION_LOG_DETAIL,
+    note: "Si cron-job.org appelle /watch et /scan, désactive les crons internes correspondants pour éviter les doublons."
+  };
+}
+
+function automationRunId(prefix) {
+  return `${prefix}-${Date.now()}-${randomUUID().slice(0, 8)}`;
+}
+
+function compactMemoryStatus() {
+  const memory = memoryStatus();
+  return {
+    backend: memory.backend,
+    persistent: memory.persistent,
+    last_save: memory.last_save,
+    last_save_bytes: memory.last_save_bytes,
+    max_bytes: memory.upstash_max_state_bytes,
+    usage_pct: memory.memory_usage_pct,
+    pressure: memory.memory_pressure,
+    last_error: memory.last_error,
+    execution_history_count: memory.execution_history_count,
+    order_intents_count: memory.order_intents_count,
+    active_order_intents_count: memory.active_order_intents_count,
+    execution_verification_history_count: memory.execution_verification_history_count,
+    last_execution_verification: memory.last_execution_verification,
+    last_execution_reconciliation: memory.last_execution_reconciliation
+  };
+}
+
+function emitMemoryPressureWarning(context, runId) {
+  const memory = memoryStatus();
+  if (memory.memory_pressure === "CRITICAL") {
+    console.error("MEMORY PRESSURE CRITICAL:", JSON.stringify({
+      version: VERSION,
+      context,
+      run_id: runId,
+      bytes: memory.last_save_bytes,
+      max_bytes: memory.upstash_max_state_bytes,
+      usage_pct: memory.memory_usage_pct,
+      reductions: memory.compaction?.reductions || [],
+      last_error: memory.last_error
+    }));
+  } else if (memory.memory_pressure === "WARNING") {
+    console.warn("MEMORY PRESSURE WARNING:", JSON.stringify({
+      version: VERSION,
+      context,
+      run_id: runId,
+      bytes: memory.last_save_bytes,
+      max_bytes: memory.upstash_max_state_bytes,
+      usage_pct: memory.memory_usage_pct,
+      reductions: memory.compaction?.reductions || []
+    }));
+  }
+}
+
+async function flushPersistentState() {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  return savePersistentState();
+}
+
+function summarizeWatchResult(result, runId, durationMs, saved) {
+  const agents = result?.foundationAgents || {};
+  const portfolio = result?.portfolioSummary || {};
+  const council = agents.agentCouncil || runtimeState.lastAgentCouncil || {};
+  const health = agents.healthAgent || {};
+  return {
+    version: VERSION,
+    event: result?.skipped ? "WATCH_SKIPPED" : "WATCH_COMPLETED",
+    run_id: runId,
+    source: result?.source || "auto-watch",
+    trading_mode: result?.trading_mode || TRADING_MODE,
+    duration_ms: durationMs,
+    skipped: Boolean(result?.skipped),
+    skip_reason: result?.reason || null,
+    portfolio: {
+      positions: portfolio.uniquePositionsCount ?? portfolio.positionsCount ?? null,
+      cash: portfolio.availableCash ?? null,
+      tracked_value: portfolio.totalTrackedValue ?? null
+    },
+    allocation: {
+      profile: portfolio.allocationPlan?.profile || PORTFOLIO_ALLOCATION_PROFILE,
+      status: portfolio.allocationPlan?.status || null,
+      cash_weight_pct: portfolio.allocationPlan?.cash?.currentPct ?? null,
+      recommended_buys: (portfolio.allocationPlan?.recommendedBuys || []).slice(0, 3).map((item) => item.asset)
+    },
+    council: {
+      assets: Object.keys(council.assets || {}).length,
+      approved_buys: council.summary?.approvedBuys ?? null,
+      approved_sells: council.summary?.approvedSells ?? null,
+      vetoed: council.summary?.vetoed ?? null
+    },
+    health: {
+      circuit_breaker_open: health.circuitBreakerOpen ?? null,
+      reasons: health.reasons || []
+    },
+    execution_verifier: {
+      active_intents: result?.executionVerifier?.activeIntentsCount ?? executionVerifierStatus().activeIntentsCount,
+      last_status: runtimeState.lastExecutionVerification?.status || null,
+      reconciliation_confirmed: result?.executionReconciliation?.confirmed ?? null,
+      reconciliation_unresolved: result?.executionReconciliation?.unresolved ?? null
+    },
+    state_saved: saved,
+    memory: compactMemoryStatus()
+  };
+}
+
+function summarizeExecution(execution) {
+  if (!execution || typeof execution !== "object") return null;
+  return {
+    mode: execution.mode || TRADING_MODE,
+    skipped: Boolean(execution.skipped),
+    ok: execution.ok ?? execution.success ?? null,
+    confirmed: execution.confirmed ?? execution.positionConfirmed ?? null,
+    status: execution.verification_status || execution.verificationStatus || execution.status || execution.orderStatus || null,
+    intent_id: execution.intentId || null,
+    reason: execution.reason || execution.error || null,
+    order_id: execution.orderId || execution.order_id || execution.positionId || null,
+    request_id: execution.requestId || execution.request_id || null
+  };
+}
+
+function summarizeScanResult(result, runId, durationMs, saved) {
+  const decision = result?.decision || result?.riskController?.finalDecision || {};
+  const risk = result?.riskController || {};
+  return {
+    version: VERSION,
+    event: result?.skipped ? "SCAN_SKIPPED" : (result?.error ? "SCAN_FAILED" : "SCAN_COMPLETED"),
+    run_id: runId,
+    source: result?.source || "auto-trade-cron",
+    trading_mode: result?.trading_mode || TRADING_MODE,
+    duration_ms: durationMs,
+    skipped: Boolean(result?.skipped),
+    skip_reason: result?.reason || null,
+    error: result?.error || null,
+    details: result?.details || null,
+    decision: {
+      action: decision.decision || "UNKNOWN",
+      asset: decision.asset || "NONE",
+      amount_usd: decision.amount_usd ?? 0,
+      confidence: decision.confidence ?? null
+    },
+    risk: {
+      approved: risk.approved ?? false,
+      reason: risk.reason || null
+    },
+    execution: summarizeExecution(result?.execution),
+    state_saved: saved,
+    memory: compactMemoryStatus()
   };
 }
 
@@ -1698,6 +2804,13 @@ function getExecutionStats24h() {
   const total = runtimeState.executionHistory.length;
   const buys = runtimeState.executionHistory.filter((e) => e.type === "BUY").length;
   const sells = runtimeState.executionHistory.filter((e) => e.type === "SELL").length;
+  const confirmed = runtimeState.executionHistory.filter((e) => e.confirmed === true).length;
+  const pendingVerification = runtimeState.executionHistory.filter((e) =>
+    e.confirmed !== true && e.verificationStatus === EXECUTION_STATUS.ACCEPTED
+  ).length;
+  const uncertain = runtimeState.executionHistory.filter((e) =>
+    [EXECUTION_STATUS.NOT_FOUND, EXECUTION_STATUS.UNCERTAIN].includes(e.verificationStatus)
+  ).length;
   const lastExecution = runtimeState.executionHistory[0] || null;
   const hoursSinceLastExecution = lastExecution ? hoursSince(lastExecution.time) : null;
 
@@ -1705,6 +2818,9 @@ function getExecutionStats24h() {
     total,
     buys,
     sells,
+    confirmed,
+    pendingVerification,
+    uncertain,
     lastExecution,
     hoursSinceLastExecution
   };
@@ -1924,6 +3040,7 @@ async function verifyRealPortfolioBeforeExecution({ asset, side, amount = 0 } = 
     return { ok: false, reason: `Portefeuille REAL non vérifié: ${validation.errors.join(", ")}`, validation };
   }
 
+  const summary = extractPortfolioSummary(portfolio);
   const normalizedSide = String(side || "BUY").toUpperCase();
   const safeAsset = String(asset || "").toUpperCase();
   const safeAmount = Number(amount || 0);
@@ -1944,6 +3061,10 @@ async function verifyRealPortfolioBeforeExecution({ asset, side, amount = 0 } = 
     if (Number(validation.availableCash) < safeAmount) {
       return { ok: false, reason: `Cash REAL insuffisant (${validation.availableCash} USD < ${safeAmount} USD)`, validation };
     }
+    const allocationGuard = allocationCheckForBuy(safeAsset, summary, safeAmount);
+    if (PORTFOLIO_ALLOCATION_MODE === "enforced" && !allocationGuard.ok) {
+      return { ok: false, reason: allocationGuard.reason, validation, summary, allocationGuard };
+    }
   }
 
   if (normalizedSide === "SELL") {
@@ -1955,7 +3076,6 @@ async function verifyRealPortfolioBeforeExecution({ asset, side, amount = 0 } = 
     }
   }
 
-  const summary = extractPortfolioSummary(portfolio);
   return {
     ok: true,
     reason: `Portefeuille ${validation.environment} vérifié via ${validation.endpoint}`,
@@ -1963,35 +3083,6 @@ async function verifyRealPortfolioBeforeExecution({ asset, side, amount = 0 } = 
     portfolio,
     summary
   };
-}
-
-async function verifyPortfolioAfterExecution({ asset, side } = {}) {
-  if (!LIVE_TRADING_ENABLED) return { checked: false, reason: "Hors LIVE" };
-  if (LIVE_POST_TRADE_VERIFY_DELAY_MS > 0) await sleep(LIVE_POST_TRADE_VERIFY_DELAY_MS);
-  try {
-    const portfolio = await getPortfolio({ environment: "REAL" });
-    const validation = validatePortfolioResponse(portfolio, { requireReal: true });
-    const normalizedSide = String(side || "BUY").toUpperCase();
-    const observed = normalizedSide === "BUY"
-      ? hasOpenPosition(portfolio, asset) || hasOpenOrder(portfolio, asset)
-      : !hasOpenPosition(portfolio, asset) || hasCloseOrder(portfolio, asset);
-    return {
-      checked: true,
-      observed,
-      validation,
-      summary: validation.ok ? extractPortfolioSummary(portfolio) : null,
-      note: observed
-        ? "Modification visible dans le portefeuille REAL"
-        : "Réponse d'ordre acceptée mais modification pas encore visible; ne pas répéter automatiquement."
-    };
-  } catch (error) {
-    return {
-      checked: true,
-      observed: false,
-      error: error.message,
-      note: "Impossible de relire le portefeuille après l'ordre; ne pas répéter automatiquement."
-    };
-  }
 }
 
 function extractRawRates(data) {
@@ -2648,7 +3739,7 @@ function extractPortfolioSummary(portfolioResponse) {
   const starterMode = uniqueOpenAssets.length < TARGET_STARTER_POSITIONS;
   const diversificationState = buildDiversificationState(uniqueOpenAssets, categoryCounts);
 
-  return {
+  const summary = {
     sourceMode: clientPortfolio.paperMode ? "PAPER" : "ETORO",
     positionsCount: positions.length,
     positionLinesCount: positions.length,
@@ -2684,41 +3775,239 @@ function extractPortfolioSummary(portfolioResponse) {
     concentrationFlags,
     pendingWarnings
   };
+  summary.allocationPlan = buildPortfolioAllocationPlan(summary);
+  return summary;
+}
+
+function allocationBucketForAsset(asset) {
+  return ALLOCATION_BUCKET_BY_ASSET[String(asset || "").toUpperCase()] || "UNCLASSIFIED";
+}
+
+function buildPortfolioAllocationPlan(portfolioSummary) {
+  const policy = PORTFOLIO_ALLOCATION_POLICY;
+  const totalValue = Math.max(0, Number(portfolioSummary?.totalTrackedValue || 0));
+  const availableCash = Math.max(0, Number(portfolioSummary?.availableCash || 0));
+  const cashWeightPct = totalValue > 0 ? roundNumber(availableCash / totalValue * 100, 4) : 0;
+  const currentAssetWeights = portfolioSummary?.assetWeightsPct || {};
+  const currentBucketWeights = {};
+
+  for (const asset of Object.keys(WATCHLIST)) {
+    const bucket = allocationBucketForAsset(asset);
+    currentBucketWeights[bucket] = Number(currentBucketWeights[bucket] || 0) + Number(currentAssetWeights[asset] || 0);
+  }
+  for (const bucket of Object.keys(currentBucketWeights)) {
+    currentBucketWeights[bucket] = roundNumber(currentBucketWeights[bucket], 4);
+  }
+
+  const bucketPlans = {};
+  for (const [bucket, targetPctRaw] of Object.entries(policy.bucketTargetsPct || {})) {
+    const targetPct = Number(targetPctRaw || 0);
+    const currentPct = Number(currentBucketWeights[bucket] || 0);
+    const band = policy.bucketBandsPct?.[bucket] || { minPct: 0, maxPct: 100 };
+    const gapPct = roundNumber(targetPct - currentPct, 4);
+    let status = "IN_BAND";
+    if (currentPct > Number(band.maxPct) + 0.0001) status = "OVER_MAX";
+    else if (currentPct < Number(band.minPct) - 0.0001) status = "UNDER_MIN";
+    else if (gapPct > ALLOCATION_MIN_GAP_PCT) status = "UNDER_TARGET";
+    else if (gapPct < -ALLOCATION_MIN_GAP_PCT) status = "OVER_TARGET";
+    bucketPlans[bucket] = {
+      bucket,
+      currentPct: roundNumber(currentPct, 4),
+      targetPct: roundNumber(targetPct, 4),
+      minPct: roundNumber(Number(band.minPct || 0), 4),
+      maxPct: roundNumber(Number(band.maxPct || 100), 4),
+      gapPct,
+      status,
+      hardRoomUsd: totalValue > 0
+        ? roundNumber(Math.max(0, (Number(band.maxPct || 100) - currentPct) * totalValue / 100), 2)
+        : 0
+    };
+  }
+
+  const assets = [];
+  const openAssets = new Set(portfolioSummary?.uniqueOpenAssets || []);
+  for (const asset of Object.keys(WATCHLIST)) {
+    const bucket = allocationBucketForAsset(asset);
+    const currentPct = Number(currentAssetWeights[asset] || 0);
+    const targetPct = Number(policy.assetTargetsPct?.[asset] || 0);
+    const maxPct = Number(policy.assetMaxPct?.[asset] || MAX_ASSET_WEIGHT_PCT);
+    const gapPct = roundNumber(targetPct - currentPct, 4);
+    const bucketPlan = bucketPlans[bucket] || {
+      currentPct: 0,
+      targetPct: 0,
+      minPct: 0,
+      maxPct: 100,
+      gapPct: 0,
+      status: "UNCLASSIFIED",
+      hardRoomUsd: totalValue
+    };
+    const assetHardRoomUsd = totalValue > 0
+      ? roundNumber(Math.max(0, (maxPct - currentPct) * totalValue / 100), 2)
+      : 0;
+    const targetGapUsd = totalValue > 0
+      ? roundNumber(Math.max(0, gapPct * totalValue / 100), 2)
+      : 0;
+    const priorityScore = gapPct > 0
+      ? roundNumber(gapPct * 10 + Math.max(0, Number(bucketPlan.gapPct || 0)) * 4 + (openAssets.has(asset) ? 0 : 8), 3)
+      : roundNumber(gapPct * 10, 3);
+    let status = "IN_BAND";
+    if (currentPct > maxPct + 0.0001) status = "OVER_MAX";
+    else if (gapPct > ALLOCATION_MIN_GAP_PCT) status = "UNDER_TARGET";
+    else if (gapPct < -ALLOCATION_MIN_GAP_PCT) status = "OVER_TARGET";
+    assets.push({
+      asset,
+      bucket,
+      alreadyOpen: openAssets.has(asset),
+      currentPct: roundNumber(currentPct, 4),
+      targetPct: roundNumber(targetPct, 4),
+      maxPct: roundNumber(maxPct, 4),
+      gapPct,
+      targetGapUsd,
+      hardRoomUsd: assetHardRoomUsd,
+      bucketHardRoomUsd: Number(bucketPlan.hardRoomUsd || 0),
+      priorityScore,
+      status,
+      buyEligibleByAllocation:
+        targetPct > 0 &&
+        currentPct < maxPct &&
+        Number(bucketPlan.currentPct || 0) < Number(bucketPlan.maxPct || 100) &&
+        (!policy.requireUnderTargetForNewBuy || gapPct > ALLOCATION_MIN_GAP_PCT)
+    });
+  }
+
+  assets.sort((a, b) => Number(b.priorityScore) - Number(a.priorityScore));
+  const assetsByAsset = Object.fromEntries(assets.map((item) => [item.asset, item]));
+  const overweightAssets = assets.filter((item) => ["OVER_MAX", "OVER_TARGET"].includes(item.status));
+  const overweightBuckets = Object.values(bucketPlans).filter((item) => ["OVER_MAX", "OVER_TARGET"].includes(item.status));
+  const underweightBuckets = Object.values(bucketPlans).filter((item) => ["UNDER_MIN", "UNDER_TARGET"].includes(item.status));
+  const hardCashMinimumBreached = cashWeightPct + 0.0001 < policy.hardCashMinimumPct;
+  const cashBelowTarget = cashWeightPct + ALLOCATION_MIN_GAP_PCT < policy.cashTargetPct;
+  let status = "BALANCED";
+  if (hardCashMinimumBreached) status = "CASH_MINIMUM_BREACHED";
+  else if (overweightBuckets.some((item) => item.status === "OVER_MAX") || overweightAssets.some((item) => item.status === "OVER_MAX")) status = "OVER_MAX";
+  else if (underweightBuckets.length > 0 || cashBelowTarget) status = "REBALANCE_NEEDED";
+
+  return {
+    name: "PortfolioAllocationEngine",
+    version: VERSION,
+    generatedAt: nowIso(),
+    enabled: policy.enabled,
+    mode: policy.mode,
+    profile: policy.profile,
+    status,
+    totalTrackedValue: roundNumber(totalValue, 4),
+    cash: {
+      currentPct: cashWeightPct,
+      targetPct: policy.cashTargetPct,
+      hardMinimumPct: policy.hardCashMinimumPct,
+      gapPct: roundNumber(policy.cashTargetPct - cashWeightPct, 4),
+      status: hardCashMinimumBreached ? "BELOW_HARD_MINIMUM" : (cashBelowTarget ? "BELOW_TARGET" : "OK")
+    },
+    buckets: bucketPlans,
+    assets,
+    assetsByAsset,
+    recommendedBuys: assets.filter((item) => !item.alreadyOpen && item.buyEligibleByAllocation).slice(0, 12),
+    overweightAssets: overweightAssets.slice(0, 12),
+    overweightBuckets,
+    underweightBuckets,
+    hardCashMinimumBreached,
+    customTargetsActive: policy.customTargetsActive,
+    safeguards: {
+      noAllocationOnlyAutoSell: true,
+      requireUnderTargetForNewBuy: policy.requireUnderTargetForNewBuy,
+      maxAssetWeightPct: MAX_ASSET_WEIGHT_PCT,
+      maxCategoryWeightPct: MAX_CATEGORY_WEIGHT_PCT,
+      maxCryptoWeightPct: MAX_CRYPTO_WEIGHT_PCT,
+      maxSpeculativeWeightPct: MAX_SPECULATIVE_WEIGHT_PCT
+    }
+  };
+}
+
+function getPortfolioAllocationPlan(portfolioSummary) {
+  if (portfolioSummary?.allocationPlan?.name === "PortfolioAllocationEngine") {
+    return portfolioSummary.allocationPlan;
+  }
+  return buildPortfolioAllocationPlan(portfolioSummary || {});
+}
+
+function allocationCheckForBuy(asset, portfolioSummary, wantedUsd = MAX_ORDER_USD) {
+  const safeAsset = String(asset || "").toUpperCase();
+  const wanted = Math.max(0, Math.min(Number(wantedUsd || 0), MAX_ORDER_USD));
+  const plan = getPortfolioAllocationPlan(portfolioSummary);
+  const row = plan.assetsByAsset?.[safeAsset] || null;
+  if (!PORTFOLIO_ALLOCATION_ENGINE_ENABLED) {
+    return { ok: true, enforced: false, reason: "PortfolioAllocationEngine désactivé", roomUsd: wanted, plan, assetPlan: row };
+  }
+  if (!row) {
+    return { ok: PORTFOLIO_ALLOCATION_MODE !== "enforced", enforced: PORTFOLIO_ALLOCATION_MODE === "enforced", reason: `Aucune cible d'allocation pour ${safeAsset}`, roomUsd: PORTFOLIO_ALLOCATION_MODE === "enforced" ? 0 : wanted, plan, assetPlan: null };
+  }
+
+  const total = Math.max(0, Number(portfolioSummary?.totalTrackedValue || 0));
+  const cash = Math.max(0, Number(portfolioSummary?.availableCash || 0));
+  const hardCashReserveUsd = total * MIN_CASH_RESERVE_PCT / 100;
+  const cashRoomUsd = Math.max(0, cash - hardCashReserveUsd);
+  const hardRoomUsd = Math.max(0, Math.min(Number(row.hardRoomUsd || 0), Number(row.bucketHardRoomUsd || 0)));
+  const targetRoomUsd = Math.max(0, Number(row.targetGapUsd || 0));
+  let roomUsd = Math.min(wanted, cashRoomUsd, hardRoomUsd);
+  if (ALLOCATION_REQUIRE_UNDER_TARGET_FOR_NEW_BUY) {
+    roomUsd = Math.min(roomUsd, targetRoomUsd);
+  }
+  roomUsd = roundNumber(Math.max(0, roomUsd), 2);
+
+  const blockers = [];
+  if (plan.hardCashMinimumBreached || cashRoomUsd < MIN_ORDER_USD) blockers.push("réserve de cash minimale");
+  if (Number(row.currentPct) >= Number(row.maxPct) - 0.0001) blockers.push(`plafond actif ${row.maxPct}%`);
+  const bucket = plan.buckets?.[row.bucket];
+  if (bucket && Number(bucket.currentPct) >= Number(bucket.maxPct) - 0.0001) blockers.push(`plafond poche ${row.bucket} ${bucket.maxPct}%`);
+  if (ALLOCATION_REQUIRE_UNDER_TARGET_FOR_NEW_BUY && Number(row.gapPct) <= ALLOCATION_MIN_GAP_PCT) blockers.push(`actif non sous-pondéré (écart ${row.gapPct}%)`);
+  if (roomUsd < MIN_ORDER_USD) blockers.push(`marge allouable ${roomUsd} USD < minimum ${MIN_ORDER_USD} USD`);
+
+  const enforced = PORTFOLIO_ALLOCATION_MODE === "enforced";
+  const ok = !enforced || blockers.length === 0;
+  return {
+    ok,
+    enforced,
+    reason: blockers.length
+      ? `PortfolioAllocationEngine: ${blockers.join(", ")}`
+      : `PortfolioAllocationEngine: ${safeAsset} sous cible de ${row.gapPct}% dans ${row.bucket}; marge ${roomUsd} USD`,
+    roomUsd: enforced ? roomUsd : Math.min(wanted, cashRoomUsd, hardRoomUsd),
+    requestedUsd: wanted,
+    assetPlan: row,
+    bucketPlan: bucket || null,
+    plan
+  };
 }
 
 function getPreferredNextAssets(portfolioSummary, marketSummary) {
   const alreadyOpen = new Set(portfolioSummary.uniqueOpenAssets || []);
   const diversificationState = portfolioSummary.diversificationState || {};
+  const allocationPlan = getPortfolioAllocationPlan(portfolioSummary);
+  const allocationOrder = (allocationPlan.recommendedBuys || []).map((item) => item.asset);
+  const orderedAssets = [...new Set([
+    ...allocationOrder,
+    ...STARTER_PRIORITY,
+    ...Object.keys(WATCHLIST)
+  ])];
 
-  return STARTER_PRIORITY.map((asset, index) => {
+  return orderedAssets.map((asset, index) => {
     const rate = marketSummary?.ratesByAsset?.[asset] || null;
     const rules = ASSET_RULES[asset];
-
+    const allocation = allocationPlan.assetsByAsset?.[asset] || null;
     let diversificationReason = "Priorité générale";
 
-    if (asset === "SPY" && !diversificationState.hasCoreETF) {
+    if (allocation?.buyEligibleByAllocation && Number(allocation.gapPct) > ALLOCATION_MIN_GAP_PCT) {
+      diversificationReason = `Allocation ${allocation.bucket} sous cible: ${allocation.currentPct}% / ${allocation.targetPct}%`;
+    } else if (asset === "SPY" && !diversificationState.hasCoreETF) {
       diversificationReason = "ETF large cœur de portefeuille manquant";
     } else if (asset === "GLD" && !diversificationState.hasGold) {
       diversificationReason = "Or / protection manquant";
-    } else if (
-      (asset === "SHY" || asset === "TLT") &&
-      !diversificationState.hasBonds
-    ) {
+    } else if ((asset === "SHY" || asset === "TLT") && !diversificationState.hasBonds) {
       diversificationReason = "Obligations manquantes";
-    } else if (
-      (asset === "XLV" || asset === "XLP") &&
-      !diversificationState.hasDefensiveSector
-    ) {
+    } else if ((asset === "XLV" || asset === "XLP") && !diversificationState.hasDefensiveSector) {
       diversificationReason = "Secteur défensif manquant";
-    } else if (
-      (asset === "BTC" || asset === "ETH") &&
-      !diversificationState.hasCryptoMajor
-    ) {
+    } else if ((asset === "BTC" || asset === "ETH") && !diversificationState.hasCryptoMajor) {
       diversificationReason = "Crypto majeure manquante";
-    } else if (
-      (asset === "JPM" || asset === "BRK.B") &&
-      !diversificationState.hasFinanceOrValue
-    ) {
+    } else if ((asset === "JPM" || asset === "BRK.B") && !diversificationState.hasFinanceOrValue) {
       diversificationReason = "Finance / valeur manquante";
     }
 
@@ -2726,6 +4015,13 @@ function getPreferredNextAssets(portfolioSummary, marketSummary) {
       priority: index + 1,
       asset,
       category: rules?.category || "UNKNOWN",
+      allocationBucket: allocation?.bucket || allocationBucketForAsset(asset),
+      allocationCurrentPct: allocation?.currentPct ?? 0,
+      allocationTargetPct: allocation?.targetPct ?? 0,
+      allocationGapPct: allocation?.gapPct ?? 0,
+      allocationPriorityScore: allocation?.priorityScore ?? 0,
+      allocationStatus: allocation?.status || "UNKNOWN",
+      allocationBuyEligible: Boolean(allocation?.buyEligibleByAllocation),
       alreadyOpen: alreadyOpen.has(asset),
       provider: rate?.provider || "eToro",
       eligibleForTrade: rate ? Boolean(rate.eligibleForTrade) : false,
@@ -2742,6 +4038,12 @@ function getPreferredNextAssets(portfolioSummary, marketSummary) {
     .sort((a, b) => {
       if (a.eligibleForTrade !== b.eligibleForTrade) {
         return Number(b.eligibleForTrade) - Number(a.eligibleForTrade);
+      }
+      if (a.allocationBuyEligible !== b.allocationBuyEligible) {
+        return Number(b.allocationBuyEligible) - Number(a.allocationBuyEligible);
+      }
+      if (Number(a.allocationPriorityScore) !== Number(b.allocationPriorityScore)) {
+        return Number(b.allocationPriorityScore) - Number(a.allocationPriorityScore);
       }
       return a.priority - b.priority;
     });
@@ -2779,6 +4081,323 @@ function hasCloseOrder(portfolioResponse, asset) {
   return ordersForClose.some((o) => getInstrumentIdFromOrder(o) === wantedId);
 }
 
+function buildAssetExecutionSnapshot(portfolioResponse, asset) {
+  const safeAsset = String(asset || "").toUpperCase();
+  const clientPortfolio = getClientPortfolio(portfolioResponse);
+  const wantedId = WATCHLIST[safeAsset];
+  const positions = (Array.isArray(clientPortfolio.positions) ? clientPortfolio.positions : [])
+    .filter((position) => getInstrumentIdFromPosition(position) === wantedId);
+  const openOrders = (Array.isArray(clientPortfolio.ordersForOpen) ? clientPortfolio.ordersForOpen : [])
+    .filter((order) => getInstrumentIdFromOrder(order) === wantedId);
+  const closeOrders = (Array.isArray(clientPortfolio.ordersForClose) ? clientPortfolio.ordersForClose : [])
+    .filter((order) => getInstrumentIdFromOrder(order) === wantedId);
+
+  const sumField = (items, fields) => {
+    const values = items.map((item) => getFirstNumber(item, fields)).filter(Number.isFinite);
+    return values.length ? roundNumber(values.reduce((sum, value) => sum + value, 0), 6) : null;
+  };
+  const positionIds = positions.map(getPositionId).filter((value) => value !== null).sort((a, b) => a - b);
+  const openOrderIds = openOrders
+    .map((order) => order.orderID ?? order.orderId ?? null)
+    .filter((value) => value !== null)
+    .map(String)
+    .sort();
+  const closeOrderIds = closeOrders
+    .map((order) => order.orderID ?? order.orderId ?? null)
+    .filter((value) => value !== null)
+    .map(String)
+    .sort();
+
+  const snapshot = {
+    asset: safeAsset,
+    instrumentId: wantedId || null,
+    fetchedAt: portfolioResponse?.fetchedAt || nowIso(),
+    accountEnvironment: portfolioResponse?.accountEnvironment || null,
+    positionLineCount: positions.length,
+    positionIds,
+    investedAmount: sumField(positions, ["amount", "Amount", "invested", "Invested"]),
+    positionUnits: sumField(positions, ["units", "Units", "amountInUnits", "AmountInUnits"]),
+    positionProfit: sumField(positions, ["profit", "Profit", "netProfit", "NetProfit"]),
+    openOrderCount: openOrders.length,
+    openOrderIds,
+    closeOrderCount: closeOrders.length,
+    closeOrderIds,
+    availableCash: calculateAvailableCash(clientPortfolio)
+  };
+  snapshot.fingerprint = sha256(canonicalJson(snapshot));
+  return snapshot;
+}
+
+function setDifference(after = [], before = []) {
+  const oldValues = new Set((before || []).map(String));
+  return (after || []).filter((value) => !oldValues.has(String(value)));
+}
+
+function evaluateExecutionEvidence({ side, beforeSnapshot = null, afterSnapshot }) {
+  const normalizedSide = String(side || "BUY").toUpperCase();
+  if (!afterSnapshot) {
+    return { status: EXECUTION_STATUS.UNCERTAIN, confirmed: false, evidence: ["AFTER_SNAPSHOT_MISSING"] };
+  }
+
+  const before = beforeSnapshot || {
+    positionLineCount: normalizedSide === "BUY" ? 0 : null,
+    positionIds: [],
+    openOrderCount: 0,
+    openOrderIds: [],
+    closeOrderCount: 0,
+    closeOrderIds: []
+  };
+  const newPositionIds = setDifference(afterSnapshot.positionIds, before.positionIds);
+  const newOpenOrderIds = setDifference(afterSnapshot.openOrderIds, before.openOrderIds);
+  const newCloseOrderIds = setDifference(afterSnapshot.closeOrderIds, before.closeOrderIds);
+  const evidence = [];
+
+  if (normalizedSide === "BUY") {
+    const positionAppeared = afterSnapshot.positionLineCount > Number(before.positionLineCount || 0) ||
+      newPositionIds.length > 0 ||
+      (!beforeSnapshot && afterSnapshot.positionLineCount > 0);
+    if (positionAppeared) {
+      evidence.push("NEW_POSITION_VISIBLE", ...newPositionIds.map((id) => `POSITION_ID_${id}`));
+      return { status: EXECUTION_STATUS.CONFIRMED, confirmed: true, evidence, confidence: "STRONG" };
+    }
+    const orderAppeared = afterSnapshot.openOrderCount > Number(before.openOrderCount || 0) ||
+      newOpenOrderIds.length > 0 ||
+      (!beforeSnapshot && afterSnapshot.openOrderCount > 0);
+    if (orderAppeared) {
+      evidence.push("OPEN_ORDER_VISIBLE", ...newOpenOrderIds.map((id) => `ORDER_ID_${id}`));
+      return { status: EXECUTION_STATUS.ACCEPTED, confirmed: false, evidence, confidence: "MEDIUM" };
+    }
+  } else if (normalizedSide === "SELL") {
+    const beforeCount = beforeSnapshot ? Number(before.positionLineCount || 0) : null;
+    const positionClosed = beforeSnapshot
+      ? afterSnapshot.positionLineCount < beforeCount ||
+        (beforeCount > 0 && afterSnapshot.positionLineCount === 0)
+      : afterSnapshot.positionLineCount === 0;
+    if (positionClosed) {
+      evidence.push("POSITION_CLOSED_OR_REDUCED");
+      return { status: EXECUTION_STATUS.CONFIRMED, confirmed: true, evidence, confidence: "STRONG" };
+    }
+    const closeOrderAppeared = afterSnapshot.closeOrderCount > Number(before.closeOrderCount || 0) ||
+      newCloseOrderIds.length > 0 ||
+      (!beforeSnapshot && afterSnapshot.closeOrderCount > 0);
+    if (closeOrderAppeared) {
+      evidence.push("CLOSE_ORDER_VISIBLE", ...newCloseOrderIds.map((id) => `ORDER_ID_${id}`));
+      return { status: EXECUTION_STATUS.ACCEPTED, confirmed: false, evidence, confidence: "MEDIUM" };
+    }
+  }
+
+  if (Number.isFinite(Number(before.availableCash)) && Number.isFinite(Number(afterSnapshot.availableCash))) {
+    const cashDelta = roundNumber(Number(afterSnapshot.availableCash) - Number(before.availableCash), 6);
+    if (Math.abs(cashDelta) > 0.0001) evidence.push(`CASH_DELTA_${cashDelta}`);
+  }
+  evidence.push("NO_POSITION_OR_ORDER_PROOF");
+  return { status: EXECUTION_STATUS.NOT_FOUND, confirmed: false, evidence, confidence: "NONE" };
+}
+
+async function verifyPortfolioAfterExecution({
+  asset,
+  side,
+  beforeSnapshot = null,
+  intentId = null,
+  apiAccepted = true,
+  trigger = "post-order"
+} = {}) {
+  if (!LIVE_TRADING_ENABLED) {
+    return { checked: false, status: EXECUTION_STATUS.UNCERTAIN, reason: "Hors LIVE" };
+  }
+  if (!EXECUTION_VERIFIER_ENABLED) {
+    return {
+      checked: false,
+      status: apiAccepted ? EXECUTION_STATUS.ACCEPTED : EXECUTION_STATUS.UNCERTAIN,
+      reason: "ExecutionVerifier désactivé"
+    };
+  }
+
+  const checks = [];
+  let strongest = null;
+  let invalidPortfolioCount = 0;
+  for (let attempt = 1; attempt <= EXECUTION_VERIFY_ATTEMPTS; attempt += 1) {
+    const waitMs = attempt === 1 ? LIVE_POST_TRADE_VERIFY_DELAY_MS : EXECUTION_VERIFY_RETRY_DELAY_MS;
+    if (waitMs > 0) await sleep(waitMs);
+    try {
+      const portfolio = await getPortfolio({ environment: "REAL" });
+      const validation = validatePortfolioResponse(portfolio, { requireReal: true });
+      if (!validation.ok) {
+        invalidPortfolioCount += 1;
+        checks.push({ attempt, time: nowIso(), validation, error: "PORTFOLIO_VALIDATION_FAILED" });
+        continue;
+      }
+      const afterSnapshot = buildAssetExecutionSnapshot(portfolio, asset);
+      const evaluation = evaluateExecutionEvidence({ side, beforeSnapshot, afterSnapshot });
+      checks.push({ attempt, time: nowIso(), validation, afterSnapshot, evaluation });
+      strongest = evaluation.status === EXECUTION_STATUS.CONFIRMED
+        ? { evaluation, afterSnapshot }
+        : (strongest || { evaluation, afterSnapshot });
+      if (evaluation.status === EXECUTION_STATUS.CONFIRMED) break;
+      if (evaluation.status === EXECUTION_STATUS.ACCEPTED) strongest = { evaluation, afterSnapshot };
+    } catch (error) {
+      checks.push({ attempt, time: nowIso(), error: error.message });
+    }
+  }
+
+  let status;
+  let confirmed = false;
+  let evidence = [];
+  let afterSnapshot = strongest?.afterSnapshot || checks.at(-1)?.afterSnapshot || null;
+  if (strongest?.evaluation?.status === EXECUTION_STATUS.CONFIRMED) {
+    status = EXECUTION_STATUS.CONFIRMED;
+    confirmed = true;
+    evidence = strongest.evaluation.evidence || [];
+  } else if (strongest?.evaluation?.status === EXECUTION_STATUS.ACCEPTED) {
+    status = EXECUTION_STATUS.ACCEPTED;
+    evidence = strongest.evaluation.evidence || [];
+  } else if (!apiAccepted || invalidPortfolioCount === checks.length || checks.every((check) => check.error)) {
+    status = EXECUTION_STATUS.UNCERTAIN;
+    evidence = ["PORTFOLIO_COULD_NOT_BE_VERIFIED"];
+  } else {
+    status = EXECUTION_STATUS.NOT_FOUND;
+    evidence = strongest?.evaluation?.evidence || ["NO_POSITION_OR_ORDER_PROOF"];
+  }
+
+  const record = recordExecutionVerification({
+    trigger,
+    intentId,
+    asset: String(asset || "").toUpperCase(),
+    side: String(side || "").toUpperCase(),
+    status,
+    confirmed,
+    evidence,
+    attempts: checks.length,
+    beforeSnapshot,
+    afterSnapshot,
+    checks: checks.map((check) => ({
+      attempt: check.attempt,
+      time: check.time,
+      error: check.error || null,
+      validationErrors: check.validation?.errors || [],
+      status: check.evaluation?.status || null,
+      evidence: check.evaluation?.evidence || []
+    }))
+  });
+
+  return {
+    checked: true,
+    status,
+    confirmed,
+    observed: status === EXECUTION_STATUS.CONFIRMED || status === EXECUTION_STATUS.ACCEPTED,
+    evidence,
+    attempts: checks.length,
+    beforeSnapshot,
+    afterSnapshot,
+    recordId: record.id,
+    note: confirmed
+      ? "Position confirmée dans le portefeuille REAL."
+      : status === EXECUTION_STATUS.ACCEPTED
+        ? "Ordre visible mais position pas encore définitivement confirmée; aucun renvoi automatique."
+        : "Exécution non prouvée; aucun renvoi automatique et réconciliation requise."
+  };
+}
+
+async function reconcileExecutionIntents({ trigger = "manual", limit = EXECUTION_RECONCILE_MAX_PER_RUN } = {}) {
+  pruneOrderIntents();
+  const startedAt = Date.now();
+  const candidates = Object.values(runtimeState.orderIntents || {})
+    .map(migrateOrderIntent)
+    .filter((intent) => intent.mode === "LIVE" && isActiveExecutionStatus(intent.status))
+    .slice(0, Math.max(1, Number(limit || EXECUTION_RECONCILE_MAX_PER_RUN)));
+
+  if (!LIVE_TRADING_ENABLED || !EXECUTION_VERIFIER_ENABLED || candidates.length === 0) {
+    const result = {
+      time: nowIso(), trigger, skipped: true,
+      reason: !LIVE_TRADING_ENABLED ? "Hors LIVE" : !EXECUTION_VERIFIER_ENABLED ? "Verifier désactivé" : "Aucun intent actif",
+      candidates: candidates.length,
+      durationMs: Date.now() - startedAt
+    };
+    runtimeState.lastExecutionReconciliation = result;
+    return result;
+  }
+
+  const results = [];
+  try {
+    const portfolio = await getPortfolio({ environment: "REAL" });
+    const validation = validatePortfolioResponse(portfolio, { requireReal: true });
+    if (!validation.ok) throw new Error(`Portefeuille REAL invalide: ${validation.errors.join(", ")}`);
+
+    for (const intent of candidates) {
+      const afterSnapshot = buildAssetExecutionSnapshot(portfolio, intent.asset);
+      const evaluation = evaluateExecutionEvidence({
+        side: intent.type,
+        beforeSnapshot: intent.beforeSnapshot || null,
+        afterSnapshot
+      });
+      let nextStatus = evaluation.status;
+      if (nextStatus === EXECUTION_STATUS.NOT_FOUND) {
+        nextStatus = [EXECUTION_STATUS.ACCEPTED, EXECUTION_STATUS.NOT_FOUND].includes(normalizeExecutionIntentStatus(intent.status))
+          ? EXECUTION_STATUS.NOT_FOUND
+          : EXECUTION_STATUS.UNCERTAIN;
+      }
+      const updated = updateOrderIntentStatus(intent.id, nextStatus, {
+        reconciliationAttempts: Number(intent.reconciliationAttempts || 0) + 1,
+        lastReconciledAt: nowIso(),
+        lastReconciliationTrigger: trigger,
+        afterSnapshot,
+        verificationEvidence: evaluation.evidence,
+        confirmedAt: nextStatus === EXECUTION_STATUS.CONFIRMED ? nowIso() : intent.confirmedAt || null,
+        note: nextStatus === EXECUTION_STATUS.CONFIRMED
+          ? "Intent confirmé par réconciliation du portefeuille REAL"
+          : "Intent non renvoyé; réconciliation uniquement"
+      });
+      recordExecutionVerification({
+        trigger: `reconcile:${trigger}`,
+        intentId: intent.id,
+        asset: intent.asset,
+        side: intent.type,
+        status: nextStatus,
+        confirmed: nextStatus === EXECUTION_STATUS.CONFIRMED,
+        evidence: evaluation.evidence,
+        attempts: 1,
+        beforeSnapshot: intent.beforeSnapshot || null,
+        afterSnapshot
+      });
+      results.push({
+        intentId: intent.id,
+        asset: intent.asset,
+        side: intent.type,
+        previousStatus: intent.status,
+        status: updated?.status || nextStatus,
+        confirmed: nextStatus === EXECUTION_STATUS.CONFIRMED,
+        evidence: evaluation.evidence
+      });
+    }
+  } catch (error) {
+    for (const intent of candidates) {
+      updateOrderIntentStatus(intent.id, EXECUTION_STATUS.UNCERTAIN, {
+        reconciliationAttempts: Number(intent.reconciliationAttempts || 0) + 1,
+        lastReconciledAt: nowIso(),
+        lastReconciliationTrigger: trigger,
+        reconciliationError: error.message,
+        note: "Réconciliation impossible; ordre non renvoyé"
+      });
+      results.push({ intentId: intent.id, asset: intent.asset, side: intent.type, status: EXECUTION_STATUS.UNCERTAIN, error: error.message });
+    }
+  }
+
+  const reconciliation = {
+    time: nowIso(),
+    trigger,
+    skipped: false,
+    candidates: candidates.length,
+    confirmed: results.filter((item) => item.confirmed).length,
+    unresolved: results.filter((item) => !item.confirmed).length,
+    durationMs: Date.now() - startedAt,
+    results
+  };
+  runtimeState.lastExecutionReconciliation = reconciliation;
+  addAudit("EXECUTION_RECONCILIATION_COMPLETED", reconciliation);
+  scheduleSave();
+  return reconciliation;
+}
+
 function isInCooldown(asset) {
   const lastTime = runtimeState.cooldownMemory[asset];
   if (!lastTime) return false;
@@ -2810,10 +4429,26 @@ function envConfiguration() {
     etoroPortfolioEndpoint: getEtoroPortfolioEndpoint(ETORO_ACCOUNT_ENV),
     livePortfolioPreflightEnabled: LIVE_PORTFOLIO_PREFLIGHT_ENABLED,
     livePortfolioMaxAgeSeconds: LIVE_PORTFOLIO_MAX_AGE_SECONDS,
+    executionVerifier: {
+      enabled: EXECUTION_VERIFIER_ENABLED,
+      attempts: EXECUTION_VERIFY_ATTEMPTS,
+      initialDelayMs: LIVE_POST_TRADE_VERIFY_DELAY_MS,
+      retryDelayMs: EXECUTION_VERIFY_RETRY_DELAY_MS,
+      reconcileOnStartup: EXECUTION_RECONCILE_ON_STARTUP,
+      reconcileOnWatch: EXECUTION_RECONCILE_ON_WATCH,
+      maxPerRun: EXECUTION_RECONCILE_MAX_PER_RUN,
+      noAutomaticRetryOnUncertain: true
+    },
     legacyAutoTradeDetected: AUTO_TRADE,
     legacyAutoTradeAllowed: ALLOW_LEGACY_AUTO_TRADE,
     explicitLiveRequired: true,
     openAiModel: OPENAI_MODEL,
+    scheduler: schedulerStatus(),
+    memoryObservability: {
+      warningPct: MEMORY_WARNING_PCT,
+      criticalPct: MEMORY_CRITICAL_PCT,
+      maxStateBytes: UPSTASH_MAX_STATE_BYTES
+    },
     secondaryProvider: "Twelve Data",
     secondaryConfigured: SECONDARY_DATA_ENABLED,
     secondaryConfirmationMode: SECONDARY_CONFIRMATION_MODE,
@@ -2920,6 +4555,24 @@ function envConfiguration() {
       allowLivePromoted: AUTO_IMPROVEMENT_ALLOW_LIVE_PROMOTED,
       governance: "candidate parameters only; no code rewrite; PAPER promotion requires explicit confirmation by default"
     },
+    strategyLabV2: {
+      enabled: STRATEGY_LAB_V2_ENABLED,
+      scheduleEnabled: STRATEGY_LAB_V2_SCHEDULE_ENABLED,
+      cron: STRATEGY_LAB_V2_CRON,
+      liveAnalysisEnabled: STRATEGY_LAB_V2_LIVE_ANALYSIS_ENABLED,
+      defaultAssets: STRATEGY_LAB_V2_DEFAULT_ASSETS,
+      candles: STRATEGY_LAB_V2_CANDLES,
+      maxHypothesesPerRun: STRATEGY_LAB_V2_MAX_HYPOTHESES_PER_RUN,
+      maxCandidatesPerExperiment: STRATEGY_LAB_V2_MAX_CANDIDATES,
+      minimumTrades: STRATEGY_LAB_V2_MIN_TRADES,
+      maximumDrawdownPct: STRATEGY_LAB_V2_MAX_DRAWDOWN_PCT,
+      minimumPositiveFoldsPct: STRATEGY_LAB_V2_MIN_POSITIVE_FOLDS_PCT,
+      minimumScore: STRATEGY_LAB_V2_MIN_SCORE,
+      trialPenalty: STRATEGY_LAB_V2_TRIAL_PENALTY,
+      analysisOnly: true,
+      canPlaceOrder: false,
+      canPromoteLive: false
+    },
     technicalAnalysis: {
       enabled: TECHNICAL_ANALYSIS_ENABLED,
       confirmationMode: TECHNICAL_CONFIRMATION_MODE,
@@ -2934,6 +4587,79 @@ function envConfiguration() {
       overboughtRsi: TECHNICAL_OVERBOUGHT_RSI,
       maxAtrPctForStandardBuy: MAX_ATR_PCT_FOR_STANDARD_BUY,
       maxPriceExtensionPct: MAX_PRICE_EXTENSION_PCT
+    },
+    portfolioAllocation: {
+      enabled: PORTFOLIO_ALLOCATION_ENGINE_ENABLED,
+      mode: PORTFOLIO_ALLOCATION_MODE,
+      profile: PORTFOLIO_ALLOCATION_PROFILE,
+      cashTargetPct: PORTFOLIO_ALLOCATION_POLICY.cashTargetPct,
+      hardCashMinimumPct: MIN_CASH_RESERVE_PCT,
+      bucketTargetsPct: PORTFOLIO_ALLOCATION_POLICY.bucketTargetsPct,
+      bucketBandsPct: PORTFOLIO_ALLOCATION_POLICY.bucketBandsPct,
+      requireUnderTargetForNewBuy: ALLOCATION_REQUIRE_UNDER_TARGET_FOR_NEW_BUY,
+      customTargetsActive: PORTFOLIO_ALLOCATION_POLICY.customTargetsActive,
+      noAllocationOnlyAutoSell: true
+    },
+    livePerformanceAttribution: {
+      enabled: LIVE_PERFORMANCE_ATTRIBUTION_ENABLED,
+      benchmarkAsset: PERFORMANCE_BENCHMARK_ASSET,
+      snapshotMinutes: PERFORMANCE_SNAPSHOT_MINUTES,
+      historyLimit: PERFORMANCE_HISTORY_LIMIT,
+      minimumDailyObservations: PERFORMANCE_MIN_DAILY_OBSERVATIONS,
+      riskFreeAnnualPct: PERFORMANCE_RISK_FREE_ANNUAL_PCT,
+      advisoryOnly: true
+    },
+    riskSellIntelligence: {
+      enabled: RISK_SELL_INTELLIGENCE_ENABLED,
+      mode: RISK_SELL_MODE,
+      softDrawdownPct: RISK_SELL_SOFT_DRAWDOWN_PCT,
+      hardDrawdownPct: RISK_SELL_HARD_DRAWDOWN_PCT,
+      softDailyLossPct: RISK_SELL_SOFT_DAILY_LOSS_PCT,
+      hardDailyLossPct: RISK_SELL_HARD_DAILY_LOSS_PCT,
+      minimumEvidenceFamilies: RISK_SELL_MIN_EVIDENCE_FAMILIES,
+      trailingDefaultPct: RISK_SELL_TRAILING_PCT_DEFAULT,
+      trailingCryptoPct: RISK_SELL_TRAILING_PCT_CRYPTO,
+      trailingSpeculativePct: RISK_SELL_TRAILING_PCT_SPECULATIVE
+    },
+    macroCreditFundamentalRegime: {
+      enabled: MACRO_CREDIT_REGIME_ENABLED,
+      mode: MACRO_CREDIT_REGIME_MODE,
+      historyLimit: MACRO_REGIME_HISTORY_LIMIT,
+      minimumProxyCoverage: MACRO_MIN_PROXY_COVERAGE,
+      minimumBuyMultiplier: MACRO_MIN_BUY_MULTIPLIER,
+      severeBuyBlockScore: MACRO_SEVERE_BUY_BLOCK_SCORE,
+      source: "market proxies + existing technical/trend/fundamental agents",
+      canTriggerSellAlone: false
+    },
+    researchKnowledgeLayer: {
+      enabled: RESEARCH_KNOWLEDGE_ENABLED,
+      seedLibraryEnabled: RESEARCH_SEED_LIBRARY_ENABLED,
+      minimumQualityScore: RESEARCH_MIN_QUALITY_SCORE,
+      maxSources: RESEARCH_MAX_SOURCES,
+      maxEvidence: RESEARCH_MAX_EVIDENCE,
+      maxHypotheses: RESEARCH_MAX_HYPOTHESES,
+      maxExperiments: RESEARCH_MAX_EXPERIMENTS,
+      advisoryOnly: true,
+      directLiveInfluence: false,
+      allowedExperimentPhases: [...RESEARCH_EXPERIMENT_PHASES]
+    },
+    dataQualityScientificBacktesting: {
+      enabled: DATA_QUALITY_ENABLED && SCIENTIFIC_BACKTEST_ENABLED,
+      dataQualityEnabled: DATA_QUALITY_ENABLED,
+      enforcementMode: DATA_QUALITY_ENFORCEMENT_MODE,
+      minimumScore: DATA_QUALITY_MIN_SCORE,
+      minimumCandles: DATA_QUALITY_MIN_CANDLES,
+      maximumDuplicatePct: DATA_QUALITY_MAX_DUPLICATE_PCT,
+      maximumInvalidPct: DATA_QUALITY_MAX_INVALID_PCT,
+      scientificBacktestEnabled: SCIENTIFIC_BACKTEST_ENABLED,
+      trainPct: SCIENTIFIC_BACKTEST_TRAIN_PCT,
+      embargoCandles: SCIENTIFIC_BACKTEST_EMBARGO_CANDLES,
+      minimumTestCandles: SCIENTIFIC_BACKTEST_MIN_TEST_CANDLES,
+      costStressMultiplier: SCIENTIFIC_BACKTEST_COST_STRESS_MULTIPLIER,
+      requireWalkForward: SCIENTIFIC_BACKTEST_REQUIRE_WALK_FORWARD,
+      registryLimit: SCIENTIFIC_BACKTEST_REGISTRY_LIMIT,
+      analysisOnly: true,
+      directLiveInfluence: false
     },
     riskLimits: {
       maxOrderUsd: MAX_ORDER_USD,
@@ -3045,44 +4771,170 @@ function addAudit(event, details = {}) {
   return entry;
 }
 
+function normalizeExecutionIntentStatus(status) {
+  const value = String(status || "").toUpperCase();
+  const legacy = {
+    PENDING: EXECUTION_STATUS.INTENT_CREATED,
+    UNKNOWN: EXECUTION_STATUS.UNCERTAIN,
+    CONFIRMED: EXECUTION_STATUS.CONFIRMED,
+    CONFIRMED_API_PENDING_PORTFOLIO: EXECUTION_STATUS.ACCEPTED,
+    REJECTED: EXECUTION_STATUS.REJECTED
+  };
+  return legacy[value] || value || EXECUTION_STATUS.UNCERTAIN;
+}
+
+function isActiveExecutionStatus(status) {
+  return ACTIVE_EXECUTION_STATUSES.has(String(status || "").toUpperCase()) ||
+    ACTIVE_EXECUTION_STATUSES.has(normalizeExecutionIntentStatus(status));
+}
+
+function migrateOrderIntent(intent) {
+  const migrated = intent && typeof intent === "object" ? { ...intent } : {};
+  migrated.status = normalizeExecutionIntentStatus(migrated.status);
+  migrated.statusHistory = Array.isArray(migrated.statusHistory)
+    ? migrated.statusHistory.slice(-30)
+    : [{ status: migrated.status, time: migrated.updatedAt || migrated.createdAt || nowIso(), migrated: true }];
+  return migrated;
+}
+
 function pruneOrderIntents() {
   const intents = runtimeState.orderIntents || {};
-  for (const [key, intent] of Object.entries(intents)) {
+  for (const [key, rawIntent] of Object.entries(intents)) {
+    const intent = migrateOrderIntent(rawIntent);
+    intents[key] = intent;
     const age = hoursSince(intent.createdAt);
+    // Un intent incertain reste bloquant jusqu'à réconciliation : il n'est jamais supprimé automatiquement.
+    if (isActiveExecutionStatus(intent.status)) continue;
     if (age === null || age > ORDER_INTENT_TTL_HOURS) delete intents[key];
   }
 }
 
-function createOrderIntent(type, asset, amount = 0) {
+function findActiveOrderIntent(asset, type = null) {
   pruneOrderIntents();
-  const existing = Object.values(runtimeState.orderIntents).find(
-    (intent) => intent.type === type && intent.asset === asset && ["PENDING", "UNKNOWN"].includes(intent.status)
-  );
-  if (existing) return { ok: false, existing };
+  return Object.values(runtimeState.orderIntents || {}).find((intent) => {
+    const sameAsset = String(intent.asset || "").toUpperCase() === String(asset || "").toUpperCase();
+    const sameType = !type || String(intent.type || "").toUpperCase() === String(type || "").toUpperCase();
+    return sameAsset && sameType && isActiveExecutionStatus(intent.status);
+  }) || null;
+}
+
+function createOrderIntent(type, asset, amount = 0, details = {}) {
+  pruneOrderIntents();
+  // Un résultat inconnu sur un actif bloque BUY et SELL sur ce même actif pour éviter toute duplication.
+  const existing = findActiveOrderIntent(asset);
+  if (existing) {
+    addAudit(EXECUTION_STATUS.DUPLICATE_BLOCKED, {
+      asset,
+      requestedType: type,
+      existingIntentId: existing.id,
+      existingStatus: existing.status
+    });
+    return { ok: false, status: EXECUTION_STATUS.DUPLICATE_BLOCKED, existing };
+  }
+
   const id = randomUUID();
+  const createdAt = nowIso();
   runtimeState.orderIntents[id] = {
     id,
-    type,
-    asset,
-    amount,
+    type: String(type || "").toUpperCase(),
+    asset: String(asset || "").toUpperCase(),
+    amount: Number(amount || 0),
     mode: TRADING_MODE,
-    status: "PENDING",
-    createdAt: nowIso(),
-    updatedAt: nowIso()
+    status: EXECUTION_STATUS.INTENT_CREATED,
+    createdAt,
+    updatedAt: createdAt,
+    statusHistory: [{ status: EXECUTION_STATUS.INTENT_CREATED, time: createdAt }],
+    verificationAttempts: 0,
+    reconciliationAttempts: 0,
+    ...details
   };
   scheduleSave();
   return { ok: true, intent: runtimeState.orderIntents[id] };
 }
 
-function finishOrderIntent(id, status, details = {}) {
-  if (!runtimeState.orderIntents[id]) return;
+function updateOrderIntentStatus(id, status, details = {}) {
+  if (!runtimeState.orderIntents[id]) return null;
+  const normalizedStatus = normalizeExecutionIntentStatus(status);
+  const current = migrateOrderIntent(runtimeState.orderIntents[id]);
+  const updatedAt = nowIso();
+  const statusHistory = [
+    ...(current.statusHistory || []),
+    { status: normalizedStatus, time: updatedAt, note: details.note || details.reason || null }
+  ].slice(-30);
   runtimeState.orderIntents[id] = {
-    ...runtimeState.orderIntents[id],
-    status,
-    updatedAt: nowIso(),
-    ...details
+    ...current,
+    ...details,
+    status: normalizedStatus,
+    statusHistory,
+    updatedAt
   };
   scheduleSave();
+  return runtimeState.orderIntents[id];
+}
+
+function finishOrderIntent(id, status, details = {}) {
+  return updateOrderIntentStatus(id, status, details);
+}
+
+function compactEtoroExecutionResponse(data) {
+  if (!data || typeof data !== "object") return data ?? null;
+  const candidate = data.data && typeof data.data === "object" ? data.data : data;
+  const first = Array.isArray(candidate) ? candidate[0] : candidate;
+  return {
+    orderId: first?.orderID ?? first?.orderId ?? first?.OrderID ?? first?.OrderId ?? null,
+    positionId: first?.positionID ?? first?.positionId ?? first?.PositionID ?? first?.PositionId ?? null,
+    statusId: first?.statusID ?? first?.statusId ?? first?.StatusID ?? first?.StatusId ?? null,
+    message: first?.message ?? first?.Message ?? data?.message ?? data?.Message ?? null,
+    errorCode: first?.errorCode ?? first?.ErrorCode ?? data?.errorCode ?? data?.ErrorCode ?? null,
+    success: first?.success ?? first?.Success ?? data?.success ?? data?.Success ?? null
+  };
+}
+
+function recordExecutionVerification(entry = {}) {
+  const record = {
+    id: randomUUID(),
+    time: nowIso(),
+    version: VERSION,
+    ...entry
+  };
+  runtimeState.executionVerificationHistory.unshift(record);
+  runtimeState.executionVerificationHistory = runtimeState.executionVerificationHistory
+    .slice(0, EXECUTION_VERIFY_HISTORY_LIMIT);
+  runtimeState.lastExecutionVerification = record;
+  scheduleSave();
+  return record;
+}
+
+function executionVerifierStatus() {
+  pruneOrderIntents();
+  const intents = Object.values(runtimeState.orderIntents || {})
+    .map(migrateOrderIntent)
+    .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)));
+  const byStatus = intents.reduce((acc, intent) => {
+    const status = normalizeExecutionIntentStatus(intent.status);
+    acc[status] = (acc[status] || 0) + 1;
+    return acc;
+  }, {});
+  const active = intents.filter((intent) => isActiveExecutionStatus(intent.status));
+  return {
+    version: VERSION,
+    enabled: EXECUTION_VERIFIER_ENABLED,
+    mode: TRADING_MODE,
+    attempts: EXECUTION_VERIFY_ATTEMPTS,
+    initialDelayMs: LIVE_POST_TRADE_VERIFY_DELAY_MS,
+    retryDelayMs: EXECUTION_VERIFY_RETRY_DELAY_MS,
+    reconcileOnStartup: EXECUTION_RECONCILE_ON_STARTUP,
+    reconcileOnWatch: EXECUTION_RECONCILE_ON_WATCH,
+    intentsCount: intents.length,
+    activeIntentsCount: active.length,
+    byStatus,
+    activeIntents: active.slice(0, 25),
+    recentIntents: intents.slice(0, 25),
+    lastVerification: runtimeState.lastExecutionVerification,
+    lastReconciliation: runtimeState.lastExecutionReconciliation,
+    verificationHistory: runtimeState.executionVerificationHistory.slice(0, 25),
+    safetyRule: "Aucun ordre n'est renvoyé automatiquement lorsqu'un intent est actif ou incertain."
+  };
 }
 
 function calculateAvailableCash(clientPortfolio) {
@@ -3115,6 +4967,285 @@ function recordEquitySnapshot(portfolioSummary, source) {
   runtimeState.equityHistory = runtimeState.equityHistory.slice(-1500);
   scheduleSave();
   return point;
+}
+
+
+function performanceBenchmarkPrice(marketSummary, asset = PERFORMANCE_BENCHMARK_ASSET) {
+  const rate = marketSummary?.ratesByAsset?.[asset];
+  const price = Number(rate?.mid ?? rate?.last ?? rate?.close);
+  return Number.isFinite(price) && price > 0 ? price : null;
+}
+
+function covariance(valuesA, valuesB) {
+  const length = Math.min(valuesA?.length || 0, valuesB?.length || 0);
+  if (length < 2) return null;
+  const pairs = [];
+  for (let index = 0; index < length; index += 1) {
+    const a = Number(valuesA[index]);
+    const b = Number(valuesB[index]);
+    if (Number.isFinite(a) && Number.isFinite(b)) pairs.push([a, b]);
+  }
+  if (pairs.length < 2) return null;
+  const meanA = pairs.reduce((sum, pair) => sum + pair[0], 0) / pairs.length;
+  const meanB = pairs.reduce((sum, pair) => sum + pair[1], 0) / pairs.length;
+  return pairs.reduce((sum, pair) => sum + (pair[0] - meanA) * (pair[1] - meanB), 0) / pairs.length;
+}
+
+function correlation(valuesA, valuesB) {
+  const cov = covariance(valuesA, valuesB);
+  const sdA = standardDeviation(valuesA);
+  const sdB = standardDeviation(valuesB);
+  if (!Number.isFinite(cov) || !Number.isFinite(sdA) || !Number.isFinite(sdB) || sdA <= 0 || sdB <= 0) return null;
+  return cov / (sdA * sdB);
+}
+
+function performanceAttributionFromOpenPositions(portfolioSummary) {
+  const positions = Array.isArray(portfolioSummary?.aggregatedPositions)
+    ? portfolioSummary.aggregatedPositions
+    : [];
+  const byAsset = positions.map((position) => {
+    const invested = Number(position.totalAmount || 0);
+    const profit = Number(position.totalProfit || 0);
+    const estimatedValue = Number(position.estimatedValue ?? invested + profit);
+    return {
+      asset: position.asset,
+      category: position.category || ASSET_RULES[position.asset]?.category || "UNKNOWN",
+      invested: roundNumber(invested, 4),
+      unrealizedProfit: roundNumber(profit, 4),
+      estimatedValue: Number.isFinite(estimatedValue) ? roundNumber(estimatedValue, 4) : null,
+      returnPctOnInvested: invested > 0 ? roundNumber(profit / invested * 100, 4) : null,
+      contributionPctOfAccount: Number(portfolioSummary?.totalTrackedValue) > 0
+        ? roundNumber(profit / Number(portfolioSummary.totalTrackedValue) * 100, 4)
+        : null
+    };
+  }).sort((a, b) => Number(b.unrealizedProfit || 0) - Number(a.unrealizedProfit || 0));
+
+  const categoryMap = {};
+  for (const item of byAsset) {
+    const key = item.category || "UNKNOWN";
+    if (!categoryMap[key]) categoryMap[key] = { category: key, invested: 0, unrealizedProfit: 0, estimatedValue: 0 };
+    categoryMap[key].invested += Number(item.invested || 0);
+    categoryMap[key].unrealizedProfit += Number(item.unrealizedProfit || 0);
+    categoryMap[key].estimatedValue += Number(item.estimatedValue || 0);
+  }
+  const byCategory = Object.values(categoryMap).map((item) => ({
+    category: item.category,
+    invested: roundNumber(item.invested, 4),
+    unrealizedProfit: roundNumber(item.unrealizedProfit, 4),
+    estimatedValue: roundNumber(item.estimatedValue, 4),
+    returnPctOnInvested: item.invested > 0 ? roundNumber(item.unrealizedProfit / item.invested * 100, 4) : null
+  })).sort((a, b) => Number(b.unrealizedProfit || 0) - Number(a.unrealizedProfit || 0));
+
+  const totalInvested = byAsset.reduce((sum, item) => sum + Number(item.invested || 0), 0);
+  const totalUnrealizedProfit = byAsset.reduce((sum, item) => sum + Number(item.unrealizedProfit || 0), 0);
+  return {
+    methodology: "Approximation fondée sur le P&L latent des positions ouvertes eToro; ce n'est pas une attribution Brinson complète.",
+    totalInvested: roundNumber(totalInvested, 4),
+    totalUnrealizedProfit: roundNumber(totalUnrealizedProfit, 4),
+    openPositionsReturnPct: totalInvested > 0 ? roundNumber(totalUnrealizedProfit / totalInvested * 100, 4) : null,
+    topContributors: byAsset.slice(0, PERFORMANCE_ATTRIBUTION_TOP_N),
+    bottomContributors: [...byAsset].sort((a, b) => Number(a.unrealizedProfit || 0) - Number(b.unrealizedProfit || 0)).slice(0, PERFORMANCE_ATTRIBUTION_TOP_N),
+    byCategory
+  };
+}
+
+function ensurePerformanceBaseline(portfolioSummary, marketSummary, source = "runtime") {
+  if (!LIVE_PERFORMANCE_ATTRIBUTION_ENABLED) return null;
+  const equity = Number(portfolioSummary?.totalTrackedValue);
+  if (!Number.isFinite(equity) || equity <= 0) return runtimeState.performanceBaseline;
+  const benchmarkPrice = performanceBenchmarkPrice(marketSummary);
+  const existing = runtimeState.performanceBaseline;
+  const incompatible = existing && (
+    existing.mode !== TRADING_MODE ||
+    existing.portfolioSource !== portfolioSummary?.sourceMode ||
+    existing.benchmarkAsset !== PERFORMANCE_BENCHMARK_ASSET
+  );
+  if (!existing || incompatible) {
+    runtimeState.performanceHistory = [];
+    runtimeState.performanceBaseline = {
+      createdAt: nowIso(),
+      source,
+      mode: TRADING_MODE,
+      portfolioSource: portfolioSummary?.sourceMode || null,
+      equity: roundNumber(equity, 4),
+      benchmarkAsset: PERFORMANCE_BENCHMARK_ASSET,
+      benchmarkPrice: Number.isFinite(benchmarkPrice) ? roundNumber(benchmarkPrice, 8) : null,
+      note: incompatible
+        ? "Base recréée car le mode, la source du portefeuille ou le benchmark a changé."
+        : "Base initiale v10.13; les métriques antérieures ne sont pas reconstruites rétroactivement."
+    };
+    addAudit("PERFORMANCE_BASELINE_CREATED", runtimeState.performanceBaseline);
+    scheduleSave();
+  } else if (!Number.isFinite(Number(existing.benchmarkPrice)) && Number.isFinite(benchmarkPrice)) {
+    runtimeState.performanceBaseline.benchmarkPrice = roundNumber(benchmarkPrice, 8);
+    runtimeState.performanceBaseline.benchmarkPriceSetAt = nowIso();
+    scheduleSave();
+  }
+  return runtimeState.performanceBaseline;
+}
+
+function recordPerformanceSnapshot(portfolioSummary, marketSummary, source = "runtime") {
+  if (!LIVE_PERFORMANCE_ATTRIBUTION_ENABLED) return null;
+  const equity = Number(portfolioSummary?.totalTrackedValue);
+  if (!Number.isFinite(equity) || equity <= 0) return null;
+  const baseline = ensurePerformanceBaseline(portfolioSummary, marketSummary, source);
+  const benchmarkPrice = performanceBenchmarkPrice(marketSummary);
+  const attribution = performanceAttributionFromOpenPositions(portfolioSummary);
+  const snapshot = {
+    time: nowIso(),
+    source,
+    mode: TRADING_MODE,
+    portfolioSource: portfolioSummary?.sourceMode || null,
+    equity: roundNumber(equity, 4),
+    cash: Number.isFinite(Number(portfolioSummary?.availableCash)) ? roundNumber(Number(portfolioSummary.availableCash), 4) : null,
+    investedValue: Number.isFinite(Number(portfolioSummary?.grossPositionValue)) ? roundNumber(Number(portfolioSummary.grossPositionValue), 4) : null,
+    unrealizedProfit: attribution.totalUnrealizedProfit,
+    benchmarkAsset: PERFORMANCE_BENCHMARK_ASSET,
+    benchmarkPrice: Number.isFinite(benchmarkPrice) ? roundNumber(benchmarkPrice, 8) : null,
+    accountReturnPct: Number(baseline?.equity) > 0 ? roundNumber((equity / Number(baseline.equity) - 1) * 100, 6) : null,
+    benchmarkReturnPct: Number(baseline?.benchmarkPrice) > 0 && Number.isFinite(benchmarkPrice)
+      ? roundNumber((benchmarkPrice / Number(baseline.benchmarkPrice) - 1) * 100, 6)
+      : null,
+    uniquePositionsCount: Number(portfolioSummary?.uniquePositionsCount || 0),
+    allocationStatus: portfolioSummary?.allocationPlan?.status || null
+  };
+  snapshot.excessReturnPct = Number.isFinite(Number(snapshot.accountReturnPct)) && Number.isFinite(Number(snapshot.benchmarkReturnPct))
+    ? roundNumber(Number(snapshot.accountReturnPct) - Number(snapshot.benchmarkReturnPct), 6)
+    : null;
+
+  const history = runtimeState.performanceHistory || [];
+  const last = history[history.length - 1];
+  if (last && minutesSince(last.time) !== null && minutesSince(last.time) < PERFORMANCE_SNAPSHOT_MINUTES) {
+    history[history.length - 1] = snapshot;
+  } else {
+    history.push(snapshot);
+  }
+  runtimeState.performanceHistory = history.slice(-PERFORMANCE_HISTORY_LIMIT);
+  scheduleSave();
+  return snapshot;
+}
+
+function dailyPerformanceSnapshots(history = runtimeState.performanceHistory) {
+  const byDay = new Map();
+  for (const point of history || []) {
+    if (!point?.time || !Number.isFinite(Number(point.equity))) continue;
+    byDay.set(String(point.time).slice(0, 10), point);
+  }
+  return [...byDay.values()].sort((a, b) => new Date(a.time) - new Date(b.time));
+}
+
+function buildLivePerformanceReport(portfolioSummary, marketSummary, { source = "runtime", record = true } = {}) {
+  if (!LIVE_PERFORMANCE_ATTRIBUTION_ENABLED) {
+    return { name: "LivePerformanceAttributionAgent", enabled: false, status: "DISABLED", blockBuy: false };
+  }
+  if (record) recordPerformanceSnapshot(portfolioSummary, marketSummary, source);
+  const baseline = ensurePerformanceBaseline(portfolioSummary, marketSummary, source);
+  const daily = dailyPerformanceSnapshots();
+  const portfolioReturns = [];
+  const benchmarkReturns = [];
+  const activeReturns = [];
+  for (let index = 1; index < daily.length; index += 1) {
+    const previous = daily[index - 1];
+    const current = daily[index];
+    const portfolioReturn = Number(previous.equity) > 0
+      ? Number(current.equity) / Number(previous.equity) - 1
+      : null;
+    const benchmarkReturn = Number(previous.benchmarkPrice) > 0 && Number(current.benchmarkPrice) > 0
+      ? Number(current.benchmarkPrice) / Number(previous.benchmarkPrice) - 1
+      : null;
+    if (Number.isFinite(portfolioReturn)) portfolioReturns.push(portfolioReturn);
+    if (Number.isFinite(portfolioReturn) && Number.isFinite(benchmarkReturn)) {
+      benchmarkReturns.push(benchmarkReturn);
+      activeReturns.push(portfolioReturn - benchmarkReturn);
+    }
+  }
+
+  const latest = runtimeState.performanceHistory[runtimeState.performanceHistory.length - 1] || null;
+  const equities = daily.map((point) => Number(point.equity)).filter(Number.isFinite);
+  const meanPortfolio = average(portfolioReturns);
+  const portfolioVol = standardDeviation(portfolioReturns);
+  const downsideVol = standardDeviation(portfolioReturns.filter((value) => value < 0));
+  const meanActive = average(activeReturns);
+  const activeVol = standardDeviation(activeReturns);
+  const benchmarkVariance = (() => {
+    const sd = standardDeviation(benchmarkReturns);
+    return Number.isFinite(sd) ? sd * sd : null;
+  })();
+  const cov = covariance(portfolioReturns.slice(-benchmarkReturns.length), benchmarkReturns);
+  const beta = Number.isFinite(cov) && Number.isFinite(benchmarkVariance) && benchmarkVariance > 0 ? cov / benchmarkVariance : null;
+  const dailyRiskFree = PERFORMANCE_RISK_FREE_ANNUAL_PCT / 100 / 252;
+  const sharpe = Number.isFinite(meanPortfolio) && Number.isFinite(portfolioVol) && portfolioVol > 0
+    ? (meanPortfolio - dailyRiskFree) / portfolioVol * Math.sqrt(252)
+    : null;
+  const sortino = Number.isFinite(meanPortfolio) && Number.isFinite(downsideVol) && downsideVol > 0
+    ? (meanPortfolio - dailyRiskFree) / downsideVol * Math.sqrt(252)
+    : null;
+  const informationRatio = Number.isFinite(meanActive) && Number.isFinite(activeVol) && activeVol > 0
+    ? meanActive / activeVol * Math.sqrt(252)
+    : null;
+  const alphaAnnualizedPct = Number.isFinite(beta) && portfolioReturns.length && benchmarkReturns.length
+    ? roundNumber((Number(meanPortfolio || 0) - dailyRiskFree - beta * (Number(average(benchmarkReturns) || 0) - dailyRiskFree)) * 252 * 100, 4)
+    : null;
+  const attribution = performanceAttributionFromOpenPositions(portfolioSummary);
+  const enoughHistory = daily.length >= PERFORMANCE_MIN_DAILY_OBSERVATIONS;
+  const report = {
+    name: "LivePerformanceAttributionAgent",
+    generatedAt: nowIso(),
+    enabled: true,
+    mode: TRADING_MODE,
+    status: enoughHistory ? "MEASURED" : "BUILDING_HISTORY",
+    blockBuy: false,
+    benchmarkAsset: PERFORMANCE_BENCHMARK_ASSET,
+    baseline,
+    history: {
+      intradayPoints: runtimeState.performanceHistory.length,
+      dailyObservations: daily.length,
+      minimumDailyObservations: PERFORMANCE_MIN_DAILY_OBSERVATIONS,
+      enoughForStableStatistics: enoughHistory,
+      firstPoint: runtimeState.performanceHistory[0]?.time || null,
+      lastPoint: latest?.time || null
+    },
+    performance: {
+      currentEquity: Number.isFinite(Number(portfolioSummary?.totalTrackedValue)) ? roundNumber(Number(portfolioSummary.totalTrackedValue), 4) : null,
+      accountReturnPct: latest?.accountReturnPct ?? null,
+      benchmarkReturnPct: latest?.benchmarkReturnPct ?? null,
+      excessReturnPct: latest?.excessReturnPct ?? null,
+      maxDrawdownPct: roundNumber(maxDrawdownPct(equities, equities.length || 1), 4),
+      annualizedVolatilityPct: Number.isFinite(portfolioVol) ? roundNumber(portfolioVol * Math.sqrt(252) * 100, 4) : null,
+      sharpe: Number.isFinite(sharpe) ? roundNumber(sharpe, 4) : null,
+      sortino: Number.isFinite(sortino) ? roundNumber(sortino, 4) : null,
+      trackingErrorPct: Number.isFinite(activeVol) ? roundNumber(activeVol * Math.sqrt(252) * 100, 4) : null,
+      informationRatio: Number.isFinite(informationRatio) ? roundNumber(informationRatio, 4) : null,
+      beta: Number.isFinite(beta) ? roundNumber(beta, 4) : null,
+      correlationToBenchmark: (() => {
+        const value = correlation(portfolioReturns.slice(-benchmarkReturns.length), benchmarkReturns);
+        return Number.isFinite(value) ? roundNumber(value, 4) : null;
+      })(),
+      alphaAnnualizedPct,
+      cashFlowAdjusted: false
+    },
+    attribution,
+    cautions: [
+      "La performance du compte est mesurée seulement depuis la base persistante v10.13; elle n'est pas reconstruite rétroactivement.",
+      "L'attribution par actif repose sur le P&L latent des positions ouvertes et ne remplace pas une comptabilité complète des flux, dépôts, retraits et ventes.",
+      "Les dépôts et retraits modifient la valeur du compte et peuvent fausser le rendement brut tant qu'ils ne sont pas identifiés comme flux externes.",
+      "Les statistiques avec peu d'observations sont indicatives et ne prouvent pas l'existence d'un alpha.",
+      "Cet agent est informatif: il ne déclenche jamais seul un achat ou une vente LIVE."
+    ]
+  };
+  runtimeState.lastPerformanceReport = report;
+  scheduleSave();
+  return report;
+}
+
+function resetPerformanceBaseline(reason = "manual-reset") {
+  const previous = runtimeState.performanceBaseline;
+  runtimeState.performanceHistory = [];
+  runtimeState.performanceBaseline = null;
+  runtimeState.lastPerformanceReport = null;
+  addAudit("PERFORMANCE_BASELINE_RESET", { reason, previous });
+  scheduleSave();
+  return { reset: true, previousBaseline: previous || null };
 }
 
 function startOfUtcDay(date = new Date()) {
@@ -4987,8 +7118,12 @@ async function runAssetBacktest(asset, { count = BACKTEST_DEFAULT_CANDLES, force
   if (!BACKTEST_ENABLED) throw new Error("Backtesting désactivé");
   if (!WATCHLIST[asset]) throw new Error(`Actif invalide: ${asset}`);
   const historical = await getHistoricalCandles(asset, "OneDay", Math.min(1000, Math.max(120, Number(count))), force);
-  const result = simulateAssetBacktest(asset, historical.candles, overrides);
-  result.dataSource = { selectedProvider: historical.selectedProvider, selectedSource: historical.selectedSource, divergence: historical.divergence, dataQualityScore: historical.dataQualityScore, candles: historical.candles.length };
+  const quality = auditHistoricalCandles(asset, historical.candles, { interval: "OneDay", selectedProvider: historical.selectedProvider, selectedSource: historical.selectedSource });
+  recordDataQualityReport(quality);
+  enforceDataQualityForBacktest(quality);
+  const result = simulateAssetBacktest(asset, quality.cleanedCandles, overrides);
+  result.dataQuality = compactDataQualityReport(quality);
+  result.dataSource = { selectedProvider: historical.selectedProvider, selectedSource: historical.selectedSource, divergence: historical.divergence, dataQualityScore: quality.score, candles: quality.cleanCount };
   return persistBacktestResult(result);
 }
 
@@ -4999,7 +7134,16 @@ async function runPortfolioBacktest(assets, { count = BACKTEST_DEFAULT_CANDLES, 
   const series = {}; const sources = {}; const failures = [];
   settled.forEach((result, index) => {
     const asset = selected[index];
-    if (result.status === "fulfilled") { series[asset] = result.value.candles; sources[asset] = { provider: result.value.selectedProvider, source: result.value.selectedSource, candles: result.value.candles.length, divergence: result.value.divergence }; }
+    if (result.status === "fulfilled") {
+      const quality = auditHistoricalCandles(asset, result.value.candles, { interval: "OneDay", selectedProvider: result.value.selectedProvider, selectedSource: result.value.selectedSource });
+      recordDataQualityReport(quality);
+      if (DATA_QUALITY_ENFORCEMENT_MODE === "required" && quality.verdict === "FAIL") {
+        failures.push({ asset, error: `DATA_QUALITY_FAIL: ${(quality.blockingReasons || []).join(", ")}` });
+      } else {
+        series[asset] = quality.cleanedCandles;
+        sources[asset] = { provider: result.value.selectedProvider, source: result.value.selectedSource, candles: quality.cleanCount, divergence: result.value.divergence, dataQuality: compactDataQualityReport(quality) };
+      }
+    }
     else failures.push({ asset, error: result.reason?.message || String(result.reason) });
   });
   if (!Object.keys(series).length) throw new Error(`Aucun historique disponible: ${failures.map((f) => f.error).join(" | ")}`);
@@ -5011,8 +7155,12 @@ async function runPortfolioBacktest(assets, { count = BACKTEST_DEFAULT_CANDLES, 
 async function runWalkForwardBacktest(asset, { count = Math.max(BACKTEST_DEFAULT_CANDLES, BACKTEST_WALK_FORWARD_TRAIN + BACKTEST_WALK_FORWARD_TEST * 3), force = false, ...overrides } = {}) {
   if (!BACKTEST_ENABLED) throw new Error("Backtesting désactivé");
   const historical = await getHistoricalCandles(asset, "OneDay", Math.min(1000, Math.max(180, Number(count))), force);
-  const result = simulateWalkForwardBacktest(asset, historical.candles, overrides);
-  result.dataSource = { selectedProvider: historical.selectedProvider, selectedSource: historical.selectedSource, candles: historical.candles.length };
+  const quality = auditHistoricalCandles(asset, historical.candles, { interval: "OneDay", selectedProvider: historical.selectedProvider, selectedSource: historical.selectedSource });
+  recordDataQualityReport(quality);
+  enforceDataQualityForBacktest(quality);
+  const result = simulateWalkForwardBacktest(asset, quality.cleanedCandles, overrides);
+  result.dataQuality = compactDataQualityReport(quality);
+  result.dataSource = { selectedProvider: historical.selectedProvider, selectedSource: historical.selectedSource, candles: quality.cleanCount };
   return persistBacktestResult(result);
 }
 
@@ -6903,10 +9051,7 @@ function chooseCouncilAssets({
 }
 
 function activeOrderIntentForAsset(asset) {
-  pruneOrderIntents();
-  return Object.values(runtimeState.orderIntents || {}).find((intent) =>
-    intent?.asset === asset && ["PENDING", "UNKNOWN"].includes(intent?.status)
-  ) || null;
+  return findActiveOrderIntent(asset);
 }
 
 function buildVotesForAsset({
@@ -6917,6 +9062,7 @@ function buildVotesForAsset({
   dataIntegrityAgent,
   technicalAnalysisAgent,
   marketRegimeAgent,
+  macroCreditRegimeAgent = null,
   intelligenceAnalysisAgent,
   preferredNextAssets,
   riskBudgetAgent,
@@ -7078,6 +9224,56 @@ function buildVotesForAsset({
     votes.push(createCouncilVote({ agent: "MarketRegimeAgent", asset, action: "PASS", confidence: 55, rationale: `Régime ${regime}; aucun veto` }));
   }
 
+
+  // MacroCreditFundamentalRegimeAgent — n'ordonne jamais un SELL seul.
+  const macroAssessment = macroCreditRegimeAgent?.assets?.[asset] || null;
+  if (!macroCreditRegimeAgent?.enabled || !macroAssessment) {
+    votes.push(createCouncilVote({
+      agent: "MacroCreditFundamentalRegimeAgent",
+      asset,
+      action: "ABSTAIN",
+      confidence: 20,
+      rationale: "Régime macro/fondamental indisponible"
+    }));
+  } else if (macroAssessment.hardBlockNewBuy && !held) {
+    votes.push(createCouncilVote({
+      agent: "MacroCreditFundamentalRegimeAgent",
+      asset,
+      action: "VETO",
+      confidence: 92,
+      hardVeto: true,
+      rationale: `${macroCreditRegimeAgent.regime}: contradiction sévère ${macroAssessment.score}/100`,
+      metadata: { regime: macroCreditRegimeAgent.regime, score: macroAssessment.score, multiplier: macroAssessment.buyMultiplier }
+    }));
+  } else if (macroAssessment.status === "FAVORABLE" && !held) {
+    votes.push(createCouncilVote({
+      agent: "MacroCreditFundamentalRegimeAgent",
+      asset,
+      action: "BUY",
+      confidence: Math.round(clampNumber(55 + macroAssessment.score * 0.35, 55, 90)),
+      rationale: `Alignement favorable ${macroAssessment.score}/100 sous ${macroCreditRegimeAgent.regime}`,
+      metadata: { regime: macroCreditRegimeAgent.regime, score: macroAssessment.score, multiplier: macroAssessment.buyMultiplier }
+    }));
+  } else if (["UNFAVORABLE", "SEVERE_CONTRADICTION"].includes(macroAssessment.status)) {
+    votes.push(createCouncilVote({
+      agent: "MacroCreditFundamentalRegimeAgent",
+      asset,
+      action: "HOLD",
+      confidence: Math.round(clampNumber(80 - macroAssessment.score, 45, 80)),
+      rationale: `Alignement ${macroAssessment.status.toLowerCase()} ${macroAssessment.score}/100; aucun SELL automatique`,
+      metadata: { regime: macroCreditRegimeAgent.regime, score: macroAssessment.score, multiplier: macroAssessment.buyMultiplier }
+    }));
+  } else {
+    votes.push(createCouncilVote({
+      agent: "MacroCreditFundamentalRegimeAgent",
+      asset,
+      action: "PASS",
+      confidence: 58,
+      rationale: `Alignement neutre ${macroAssessment.score}/100 sous ${macroCreditRegimeAgent.regime}`,
+      metadata: { regime: macroCreditRegimeAgent.regime, score: macroAssessment.score, multiplier: macroAssessment.buyMultiplier }
+    }));
+  }
+
   // NewsAgent
   const news = intelligence?.newsAgent || null;
   if (!news || Number(news.confidence || 0) <= 0) {
@@ -7148,20 +9344,51 @@ function buildVotesForAsset({
     votes.push(createCouncilVote({ agent: "AlternativeDataCoordinator", asset, action: "HOLD", confidence: 56, rationale: coordinator.summary }));
   }
 
-  // PortfolioAgent
+  // PortfolioAgent + PortfolioAllocationEngine
+  const allocationPlan = getPortfolioAllocationPlan(portfolioSummary);
+  const allocationAsset = allocationPlan.assetsByAsset?.[asset] || null;
   if (held) {
-    votes.push(createCouncilVote({ agent: "PortfolioAgent", asset, action: "HOLD", confidence: 80, rationale: `Actif déjà détenu; poids ${portfolioSummary?.assetWeightsPct?.[asset] ?? "?"}%` }));
+    const overweight = ["OVER_MAX", "OVER_TARGET"].includes(allocationAsset?.status);
+    votes.push(createCouncilVote({
+      agent: "PortfolioAgent",
+      asset,
+      action: "HOLD",
+      confidence: overweight ? 88 : 80,
+      rationale: overweight
+        ? `Actif déjà détenu et au-dessus de la cible (${allocationAsset.currentPct}% / ${allocationAsset.targetPct}%); aucun SELL automatique d'allocation`
+        : `Actif déjà détenu; poids ${portfolioSummary?.assetWeightsPct?.[asset] ?? "?"}% / cible ${allocationAsset?.targetPct ?? "?"}%`
+    }));
   } else {
+    const allocationGuard = allocationCheckForBuy(asset, portfolioSummary, MAX_ORDER_USD);
     const concentration = portfolioSummary?.diversificationState || {};
     const techBlocked = category === "AI_BIG_TECH" && concentration.tooConcentratedInAIBigTech;
     const techLikeBlocked = TECH_LIKE_CATEGORIES.has(category) && concentration.tooConcentratedInTechLike;
-    if (techBlocked || techLikeBlocked) {
+    if (PORTFOLIO_ALLOCATION_MODE === "enforced" && !allocationGuard.ok) {
+      votes.push(createCouncilVote({
+        agent: "PortfolioAgent",
+        asset,
+        action: "VETO",
+        confidence: 96,
+        hardVeto: true,
+        rationale: allocationGuard.reason,
+        metadata: { allocation: allocationAsset, roomUsd: allocationGuard.roomUsd }
+      }));
+    } else if (techBlocked || techLikeBlocked) {
       votes.push(createCouncilVote({ agent: "PortfolioAgent", asset, action: "VETO", confidence: 86, hardVeto: false, rationale: `Concentration existante incompatible avec ${category}` }));
-    } else if (preferred) {
-      const priorityConfidence = Math.max(58, 84 - Math.min(20, Number(preferred.priority || 10) * 2));
-      votes.push(createCouncilVote({ agent: "PortfolioAgent", asset, action: "BUY", confidence: priorityConfidence, rationale: preferred.diversificationReason || "Diversification utile" }));
+    } else if (allocationAsset?.buyEligibleByAllocation || preferred) {
+      const priorityConfidence = Math.max(60, Math.min(90, 62 + Number(allocationAsset?.gapPct || 0) * 2));
+      votes.push(createCouncilVote({
+        agent: "PortfolioAgent",
+        asset,
+        action: "BUY",
+        confidence: Math.round(priorityConfidence),
+        rationale: allocationAsset?.buyEligibleByAllocation
+          ? `Poche ${allocationAsset.bucket} sous cible: ${allocationAsset.currentPct}% / ${allocationAsset.targetPct}%; marge ${allocationGuard.roomUsd} USD`
+          : (preferred?.diversificationReason || "Diversification utile"),
+        metadata: { allocation: allocationAsset, roomUsd: allocationGuard.roomUsd }
+      }));
     } else {
-      votes.push(createCouncilVote({ agent: "PortfolioAgent", asset, action: "HOLD", confidence: 50, rationale: "Pas de besoin de diversification prioritaire identifié" }));
+      votes.push(createCouncilVote({ agent: "PortfolioAgent", asset, action: "HOLD", confidence: 58, rationale: "Pas de besoin d'allocation prioritaire identifié" }));
     }
   }
 
@@ -7228,10 +9455,14 @@ function buildVotesForAsset({
   }
 
   // AuditAgent
-  const unknownIntents = Object.values(runtimeState.orderIntents || {}).filter((intent) => intent?.status === "UNKNOWN");
+  const unresolvedIntents = Object.values(runtimeState.orderIntents || {})
+    .filter((intent) => intent?.mode === "LIVE" && isActiveExecutionStatus(intent?.status));
   const memory = memoryStatus();
-  if (unknownIntents.length > 0) {
-    votes.push(createCouncilVote({ agent: "AuditAgent", asset, action: "VETO", confidence: 98, hardVeto: true, rationale: `${unknownIntents.length} intent(s) d'ordre au statut UNKNOWN; vérification manuelle requise` }));
+  if (unresolvedIntents.length > 0) {
+    votes.push(createCouncilVote({
+      agent: "AuditAgent", asset, action: "VETO", confidence: 100, hardVeto: true,
+      rationale: `${unresolvedIntents.length} intent(s) LIVE à réconcilier; aucun nouvel ordre avant confirmation`
+    }));
   } else if (!memory.persistent && TRADING_MODE === "LIVE") {
     votes.push(createCouncilVote({ agent: "AuditAgent", asset, action: "VETO", confidence: 90, hardVeto: true, rationale: "Mémoire non persistante en mode LIVE" }));
   } else {
@@ -7409,6 +9640,7 @@ function buildAgentCouncil({
   dataIntegrityAgent,
   technicalAnalysisAgent,
   marketRegimeAgent,
+  macroCreditRegimeAgent = null,
   intelligenceAnalysisAgent,
   strategyValidationAgent = null,
   paperPerformanceAgent = null,
@@ -7436,6 +9668,7 @@ function buildAgentCouncil({
       dataIntegrityAgent,
       technicalAnalysisAgent,
       marketRegimeAgent,
+      macroCreditRegimeAgent,
       intelligenceAnalysisAgent,
       preferredNextAssets,
       riskBudgetAgent,
@@ -7568,7 +9801,668 @@ function councilCheckForDecision(council, decision) {
   return { ok: true, reason: `MultiAgentCouncil advisory: ${record.status}, soutien ${support}%`, multiplier: roundNumber(multiplier, 3), record };
 }
 
-function buildFoundationAgents({ portfolioSummary, marketSummary, trendSummary, dataIntegrityAgent, technicalAnalysisAgent = null, marketRegimeAgent = null, intelligenceAnalysisAgent = null, strategyValidationAgent = null, paperPerformanceAgent = null, agentCouncil = null }) {
+
+// -----------------------------------------------------------------------------
+// v10.15 — Macro, Credit & Fundamental Regime
+// -----------------------------------------------------------------------------
+
+const MACRO_REGIME_LABELS = Object.freeze({
+  EXPANSION_RISK_ON: "EXPANSION_RISK_ON",
+  DISINFLATIONARY_GROWTH: "DISINFLATIONARY_GROWTH",
+  INFLATION_PRESSURE: "INFLATION_PRESSURE",
+  RATE_SHOCK: "RATE_SHOCK",
+  CREDIT_STRESS: "CREDIT_STRESS",
+  DEFENSIVE_SLOWDOWN: "DEFENSIVE_SLOWDOWN",
+  MIXED: "MIXED",
+  UNKNOWN: "UNKNOWN"
+});
+
+function macroTrendValue(signal) {
+  const map = {
+    strong_up: 2,
+    up: 1,
+    flat: 0,
+    sideways: 0,
+    down: -1,
+    strong_down: -2,
+    insufficient_history: 0
+  };
+  return Number(map[String(signal || "").toLowerCase()] ?? 0);
+}
+
+function macroAssetPulse(asset, trendSummary, technicalAnalysisAgent) {
+  const trend = trendSummary?.assets?.[asset] || null;
+  const technical = technicalAnalysisAgent?.assets?.[asset] || null;
+  const components = [];
+  if (trend) {
+    components.push(macroTrendValue(trend.trendSignal) * 25);
+    const sinceFirst = Number(trend.changePctSinceFirst);
+    const sinceLast = Number(trend.changePctSinceLast);
+    if (Number.isFinite(sinceFirst)) components.push(clampNumber(sinceFirst * 5, -50, 50));
+    if (Number.isFinite(sinceLast)) components.push(clampNumber(sinceLast * 10, -35, 35));
+  }
+  const technicalScore = Number(technical?.technicalScore);
+  if (Number.isFinite(technicalScore)) components.push(clampNumber((technicalScore - 50) * 2, -100, 100));
+  const return20 = Number(technical?.daily?.returnsPct?.twenty);
+  if (Number.isFinite(return20)) components.push(clampNumber(return20 * 4, -50, 50));
+  const pulse = components.length ? average(components) : null;
+  return {
+    asset,
+    available: components.length > 0,
+    pulse: pulse === null ? null : roundNumber(clampNumber(pulse, -100, 100), 2),
+    trendSignal: trend?.trendSignal || null,
+    technicalScore: Number.isFinite(technicalScore) ? roundNumber(technicalScore, 2) : null,
+    componentCount: components.length
+  };
+}
+
+function macroBasketPulse(assets, pulses) {
+  const values = assets
+    .map((asset) => Number(pulses?.[asset]?.pulse))
+    .filter(Number.isFinite);
+  return {
+    assets,
+    availableCount: values.length,
+    pulse: values.length ? roundNumber(average(values), 2) : null
+  };
+}
+
+function macroFundamentalAdjustment(asset, intelligenceAnalysisAgent) {
+  const fundamental = intelligenceAnalysisAgent?.assets?.[asset]?.fundamentalAgent || null;
+  if (!fundamental) return { adjustment: 0, score: null, critical: false, redFlags: [] };
+  const score = Number(fundamental.score);
+  let adjustment = Number.isFinite(score) ? clampNumber((score - 50) * 0.25, -12.5, 12.5) : 0;
+  const redFlags = Array.isArray(fundamental.redFlags) ? fundamental.redFlags : [];
+  adjustment -= Math.min(15, redFlags.length * 4);
+  if (fundamental.critical) adjustment -= 25;
+  return {
+    adjustment: roundNumber(adjustment, 2),
+    score: Number.isFinite(score) ? roundNumber(score, 2) : null,
+    critical: Boolean(fundamental.critical),
+    redFlags: redFlags.slice(0, 6)
+  };
+}
+
+function macroCategoryTilt(asset, regime) {
+  const category = ASSET_RULES[asset]?.category || "UNKNOWN";
+  const isGrowth = TECH_LIKE_CATEGORIES.has(category) || category === "ETF_GROWTH";
+  const isSpeculative = SPECULATIVE_CATEGORIES.has(category);
+  const isCrypto = CRYPTO_CATEGORIES.has(category) || category === "CRYPTO_EQUITY";
+  const isDefensive = DEFENSIVE_CATEGORIES.has(category);
+  let tilt = 0;
+
+  if (regime === MACRO_REGIME_LABELS.CREDIT_STRESS) {
+    if (asset === "SHY") tilt += 32;
+    if (["GLD", "TLT", "XLP", "XLV"].includes(asset)) tilt += 18;
+    if (asset === "JPM") tilt -= 28;
+    if (isGrowth) tilt -= 24;
+    if (isCrypto) tilt -= 28;
+    if (isSpeculative) tilt -= 35;
+  } else if (regime === MACRO_REGIME_LABELS.RATE_SHOCK) {
+    if (asset === "SHY") tilt += 28;
+    if (asset === "TLT") tilt -= 30;
+    if (isGrowth) tilt -= 24;
+    if (isSpeculative) tilt -= 30;
+    if (isCrypto) tilt -= 18;
+    if (["JPM", "XLE"].includes(asset)) tilt += 6;
+  } else if (regime === MACRO_REGIME_LABELS.INFLATION_PRESSURE) {
+    if (asset === "XLE") tilt += 30;
+    if (asset === "GLD") tilt += 24;
+    if (asset === "SHY") tilt += 8;
+    if (asset === "TLT") tilt -= 25;
+    if (isGrowth) tilt -= 16;
+    if (isSpeculative) tilt -= 18;
+  } else if (regime === MACRO_REGIME_LABELS.DEFENSIVE_SLOWDOWN) {
+    if (["SHY", "TLT", "XLP", "XLV", "GLD"].includes(asset)) tilt += 22;
+    if (["JPM", "XLE"].includes(asset)) tilt -= 15;
+    if (isGrowth) tilt -= 16;
+    if (isSpeculative || isCrypto) tilt -= 22;
+  } else if (regime === MACRO_REGIME_LABELS.DISINFLATIONARY_GROWTH) {
+    if (["SPY", "QQQ", "TLT"].includes(asset)) tilt += 18;
+    if (isGrowth) tilt += 20;
+    if (isCrypto) tilt += 10;
+    if (asset === "XLE") tilt -= 6;
+  } else if (regime === MACRO_REGIME_LABELS.EXPANSION_RISK_ON) {
+    if (["SPY", "QQQ", "JPM", "XLE"].includes(asset)) tilt += 18;
+    if (isGrowth) tilt += 20;
+    if (isCrypto) tilt += 14;
+    if (isSpeculative) tilt += 8;
+    if (isDefensive) tilt -= 5;
+  }
+  return { category, tilt };
+}
+
+function macroAlignmentForAsset(asset, regime, pulses, intelligenceAnalysisAgent, globalRiskMultiplier) {
+  const ownPulse = Number(pulses?.[asset]?.pulse);
+  const { category, tilt } = macroCategoryTilt(asset, regime);
+  const fundamental = macroFundamentalAdjustment(asset, intelligenceAnalysisAgent);
+  let score = 50 + tilt + fundamental.adjustment;
+  if (Number.isFinite(ownPulse)) score += clampNumber(ownPulse * 0.22, -22, 22);
+  score = roundNumber(clampNumber(score, 0, 100), 2);
+  const status = score >= 68
+    ? "FAVORABLE"
+    : score >= 42
+      ? "NEUTRAL"
+      : score > MACRO_SEVERE_BUY_BLOCK_SCORE
+        ? "UNFAVORABLE"
+        : "SEVERE_CONTRADICTION";
+  const scoreMultiplier = MACRO_MIN_BUY_MULTIPLIER + (1 - MACRO_MIN_BUY_MULTIPLIER) * score / 100;
+  const buyMultiplier = roundNumber(
+    clampNumber(scoreMultiplier * Number(globalRiskMultiplier || 1), MACRO_MIN_BUY_MULTIPLIER, 1),
+    3
+  );
+  const severeRegime = [MACRO_REGIME_LABELS.CREDIT_STRESS, MACRO_REGIME_LABELS.RATE_SHOCK].includes(regime);
+  const highBetaCategory = TECH_LIKE_CATEGORIES.has(category) || SPECULATIVE_CATEGORIES.has(category) || CRYPTO_CATEGORIES.has(category) || category === "CRYPTO_EQUITY";
+  const hardBlockNewBuy = MACRO_CREDIT_REGIME_MODE === "enforced" && severeRegime && highBetaCategory && score <= MACRO_SEVERE_BUY_BLOCK_SCORE;
+  const reasons = [
+    `régime ${regime}`,
+    `tilt catégorie ${roundNumber(tilt, 2)}`,
+    Number.isFinite(ownPulse) ? `pulse propre ${roundNumber(ownPulse, 2)}` : "pulse propre indisponible",
+    fundamental.score !== null ? `fondamental ${fundamental.score}/100` : "fondamental indisponible"
+  ];
+  if (fundamental.critical) reasons.push("dégradation fondamentale critique");
+  if (fundamental.redFlags.length) reasons.push(`red flags: ${fundamental.redFlags.join(", ")}`);
+  return {
+    asset,
+    category,
+    score,
+    status,
+    buyMultiplier,
+    hardBlockNewBuy,
+    ownPulse: Number.isFinite(ownPulse) ? roundNumber(ownPulse, 2) : null,
+    fundamental,
+    reasons
+  };
+}
+
+function compactMacroRegimeForHistory(agent) {
+  if (!agent) return null;
+  return {
+    generatedAt: agent.generatedAt,
+    source: agent.source,
+    regime: agent.regime,
+    confidence: agent.confidence,
+    globalRiskMultiplier: agent.globalRiskMultiplier,
+    coverage: agent.coverage,
+    basketPulses: agent.basketPulses,
+    reasons: (agent.reasons || []).slice(0, 8)
+  };
+}
+
+function buildMacroCreditFundamentalRegimeAgent({
+  trendSummary,
+  technicalAnalysisAgent,
+  intelligenceAnalysisAgent,
+  source = "runtime",
+  persist = true
+} = {}) {
+  if (!MACRO_CREDIT_REGIME_ENABLED) {
+    return {
+      name: "MacroCreditFundamentalRegimeAgent",
+      enabled: false,
+      mode: MACRO_CREDIT_REGIME_MODE,
+      regime: MACRO_REGIME_LABELS.UNKNOWN,
+      confidence: 0,
+      globalRiskMultiplier: 1,
+      assets: {},
+      reasons: ["Agent désactivé"],
+      canTriggerSellAlone: false
+    };
+  }
+
+  const proxyAssets = [
+    "SPY", "QQQ", "BTC", "ETH", "SHY", "TLT", "GLD", "XLP", "XLV",
+    "XLE", "JPM", "NVDA", "AMD", "MSFT", "GOOG", "AMZN"
+  ];
+  const allAssets = Object.keys(WATCHLIST);
+  const pulses = Object.fromEntries(allAssets.map((asset) => [
+    asset,
+    macroAssetPulse(asset, trendSummary, technicalAnalysisAgent)
+  ]));
+  const baskets = {
+    risk: macroBasketPulse(["SPY", "QQQ", "BTC", "ETH"], pulses),
+    growth: macroBasketPulse(["QQQ", "NVDA", "AMD", "MSFT", "GOOG", "AMZN"], pulses),
+    defensive: macroBasketPulse(["SHY", "TLT", "GLD", "XLP", "XLV"], pulses),
+    duration: macroBasketPulse(["TLT", "SHY"], pulses),
+    inflation: macroBasketPulse(["XLE", "GLD"], pulses),
+    credit: macroBasketPulse(["JPM", "SPY"], pulses)
+  };
+  const coverage = proxyAssets.filter((asset) => pulses[asset]?.available).length;
+  const basketValue = (basket) => basket?.pulse === null || basket?.pulse === undefined
+    ? null
+    : Number(basket.pulse);
+  const riskPulse = basketValue(baskets.risk);
+  const growthPulse = basketValue(baskets.growth);
+  const defensivePulse = basketValue(baskets.defensive);
+  const durationPulse = basketValue(baskets.duration);
+  const inflationPulse = basketValue(baskets.inflation);
+  const creditPulse = basketValue(baskets.credit);
+
+  let regime = MACRO_REGIME_LABELS.UNKNOWN;
+  let globalRiskMultiplier = 0.7;
+  const reasons = [];
+
+  if (coverage < MACRO_MIN_PROXY_COVERAGE) {
+    reasons.push(`Couverture proxy insuffisante: ${coverage}/${MACRO_MIN_PROXY_COVERAGE}`);
+  } else if (Number.isFinite(creditPulse) && Number.isFinite(riskPulse) && creditPulse <= -32 && riskPulse <= -20) {
+    regime = MACRO_REGIME_LABELS.CREDIT_STRESS;
+    globalRiskMultiplier = 0.45;
+    reasons.push(`Proxy crédit ${creditPulse} et actifs risqués ${riskPulse}`);
+  } else if (Number.isFinite(durationPulse) && Number.isFinite(growthPulse) && durationPulse <= -30 && growthPulse <= -12) {
+    regime = MACRO_REGIME_LABELS.RATE_SHOCK;
+    globalRiskMultiplier = 0.55;
+    reasons.push(`Pression duration ${durationPulse} et croissance ${growthPulse}`);
+  } else if (Number.isFinite(inflationPulse) && Number.isFinite(durationPulse) && inflationPulse >= 22 && durationPulse <= -12) {
+    regime = MACRO_REGIME_LABELS.INFLATION_PRESSURE;
+    globalRiskMultiplier = 0.65;
+    reasons.push(`Énergie/or ${inflationPulse} contre duration ${durationPulse}`);
+  } else if (Number.isFinite(riskPulse) && Number.isFinite(defensivePulse) && riskPulse <= -18 && defensivePulse >= 2) {
+    regime = MACRO_REGIME_LABELS.DEFENSIVE_SLOWDOWN;
+    globalRiskMultiplier = 0.6;
+    reasons.push(`Rotation défensive: risque ${riskPulse}, défensif ${defensivePulse}`);
+  } else if (Number.isFinite(riskPulse) && Number.isFinite(durationPulse) && riskPulse >= 14 && durationPulse >= 8 && (!Number.isFinite(inflationPulse) || inflationPulse <= 20)) {
+    regime = MACRO_REGIME_LABELS.DISINFLATIONARY_GROWTH;
+    globalRiskMultiplier = 0.9;
+    reasons.push(`Croissance constructive ${riskPulse}, duration ${durationPulse}`);
+  } else if (Number.isFinite(riskPulse) && Number.isFinite(growthPulse) && riskPulse >= 22 && growthPulse >= 18) {
+    regime = MACRO_REGIME_LABELS.EXPANSION_RISK_ON;
+    globalRiskMultiplier = 1;
+    reasons.push(`Appétit risque ${riskPulse}, croissance ${growthPulse}`);
+  } else {
+    regime = MACRO_REGIME_LABELS.MIXED;
+    globalRiskMultiplier = 0.75;
+    reasons.push("Signaux macro-proxy contradictoires ou sans domination claire");
+  }
+
+  const dispersionValues = Object.values(baskets)
+    .map((basket) => Number(basket.pulse))
+    .filter(Number.isFinite);
+  const dispersion = dispersionValues.length >= 2 ? standardDeviation(dispersionValues) : null;
+  const coverageScore = clampNumber(coverage / proxyAssets.length * 100, 0, 100);
+  const confidence = roundNumber(clampNumber(
+    coverageScore * 0.7 + (dispersion === null ? 0 : clampNumber(dispersion, 0, 50) * 0.6),
+    0,
+    100
+  ), 2);
+
+  const assets = Object.fromEntries(allAssets.map((asset) => [
+    asset,
+    macroAlignmentForAsset(asset, regime, pulses, intelligenceAnalysisAgent, globalRiskMultiplier)
+  ]));
+  const ranking = Object.values(assets).sort((a, b) => b.score - a.score);
+  const agent = {
+    name: "MacroCreditFundamentalRegimeAgent",
+    version: VERSION,
+    generatedAt: nowIso(),
+    source,
+    enabled: true,
+    mode: MACRO_CREDIT_REGIME_MODE,
+    regime,
+    confidence,
+    globalRiskMultiplier: roundNumber(globalRiskMultiplier, 3),
+    coverage: { availableProxies: coverage, required: MACRO_MIN_PROXY_COVERAGE, total: proxyAssets.length },
+    basketPulses: Object.fromEntries(Object.entries(baskets).map(([key, basket]) => [key, {
+      pulse: basket.pulse,
+      availableCount: basket.availableCount,
+      assets: basket.assets
+    }])),
+    proxyPulses: pulses,
+    assets,
+    ranking,
+    favorableAssets: ranking.filter((item) => item.status === "FAVORABLE").map((item) => item.asset),
+    severeContradictions: ranking.filter((item) => item.status === "SEVERE_CONTRADICTION").map((item) => item.asset),
+    reasons,
+    limitations: [
+      "Régime inféré à partir de proxys de marché, pas de statistiques macro officielles temps réel.",
+      "Les relations économiques peuvent changer; aucun proxy n'est une preuve suffisante isolément.",
+      "Cette couche ne peut jamais créer seule un ordre SELL."
+    ],
+    canTriggerSellAlone: false
+  };
+
+  if (persist) {
+    const previous = runtimeState.macroCreditRegimeHistory[runtimeState.macroCreditRegimeHistory.length - 1] || null;
+    runtimeState.lastMacroCreditRegime = agent;
+    if (!previous || previous.regime !== regime || minutesSince(previous.generatedAt) >= 60) {
+      runtimeState.macroCreditRegimeHistory.push(compactMacroRegimeForHistory(agent));
+      runtimeState.macroCreditRegimeHistory = runtimeState.macroCreditRegimeHistory.slice(-MACRO_REGIME_HISTORY_LIMIT);
+    }
+    scheduleSave();
+  }
+  return agent;
+}
+
+function macroCreditCheckForDecision(agent, decision) {
+  if (!MACRO_CREDIT_REGIME_ENABLED) {
+    return { ok: true, reason: "MacroCreditFundamentalRegimeAgent désactivé", multiplier: 1, record: null };
+  }
+  const d = sanitizeDecision(decision);
+  if (d.decision !== "BUY") {
+    return {
+      ok: true,
+      reason: "La couche macro ne déclenche ni ne bloque seule un SELL",
+      multiplier: 1,
+      record: agent?.assets?.[d.asset] || null
+    };
+  }
+  const record = agent?.assets?.[d.asset] || null;
+  if (!record) {
+    return MACRO_CREDIT_REGIME_MODE === "enforced"
+      ? { ok: false, reason: `MacroCreditFundamentalRegimeAgent: ${d.asset} non analysé`, multiplier: 0, record: null }
+      : { ok: true, reason: `MacroCreditFundamentalRegimeAgent: ${d.asset} non analysé (advisory)`, multiplier: 0.75, record: null };
+  }
+  if (record.hardBlockNewBuy) {
+    return {
+      ok: false,
+      reason: `Blocage macro enforced sur ${d.asset}: ${agent.regime}, score ${record.score}/100`,
+      multiplier: 0,
+      record
+    };
+  }
+  const rawMultiplier = Number(record.buyMultiplier ?? 1);
+  const appliedMultiplier = MACRO_CREDIT_REGIME_MODE === "advisory"
+    ? Math.max(0.75, rawMultiplier)
+    : rawMultiplier;
+  return {
+    ok: true,
+    reason: `Alignement macro ${record.status} ${record.score}/100 sous ${agent.regime}${MACRO_CREDIT_REGIME_MODE === "advisory" ? " (advisory)" : ""}`,
+    multiplier: roundNumber(clampNumber(appliedMultiplier, MACRO_MIN_BUY_MULTIPLIER, 1), 3),
+    record
+  };
+}
+
+function riskSellTrailingThresholdPct(asset) {
+  const category = ASSET_RULES[String(asset || "").toUpperCase()]?.category || "UNKNOWN";
+  if (CRYPTO_CATEGORIES.has(category)) return RISK_SELL_TRAILING_PCT_CRYPTO;
+  if (SPECULATIVE_CATEGORIES.has(category)) return RISK_SELL_TRAILING_PCT_SPECULATIVE;
+  if (DEFENSIVE_CATEGORIES.has(category)) return RISK_SELL_TRAILING_PCT_DEFENSIVE;
+  return RISK_SELL_TRAILING_PCT_DEFAULT;
+}
+
+function currentAccountDrawdownPct() {
+  const values = (runtimeState.performanceHistory || [])
+    .map((point) => Number(point?.equity))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (!values.length) return 0;
+  const peak = Math.max(...values);
+  const latest = values[values.length - 1];
+  return peak > 0 ? roundNumber(Math.max(0, (peak - latest) / peak * 100), 4) : 0;
+}
+
+function currentDailyAccountChangePct() {
+  const today = nowIso().slice(0, 10);
+  const points = (runtimeState.performanceHistory || [])
+    .filter((point) => String(point?.time || "").slice(0, 10) === today)
+    .filter((point) => Number.isFinite(Number(point?.equity)) && Number(point.equity) > 0)
+    .sort((a, b) => new Date(a.time) - new Date(b.time));
+  if (points.length < 2) return 0;
+  const first = Number(points[0].equity);
+  const latest = Number(points[points.length - 1].equity);
+  return first > 0 ? roundNumber((latest / first - 1) * 100, 4) : 0;
+}
+
+function compactRiskSellReportForHistory(report) {
+  return {
+    time: report.generatedAt,
+    source: report.source,
+    globalRisk: report.globalRisk,
+    summary: report.summary,
+    sellCandidates: report.sellCandidates,
+    emergencyReviews: report.emergencyReviews
+  };
+}
+
+function buildRiskSellIntelligenceAgent({
+  portfolioSummary,
+  marketSummary,
+  trendSummary,
+  technicalAnalysisAgent,
+  marketRegimeAgent,
+  intelligenceAnalysisAgent,
+  livePerformanceAgent,
+  source = "runtime",
+  persist = true
+}) {
+  if (!RISK_SELL_INTELLIGENCE_ENABLED) {
+    return {
+      name: "RiskSellIntelligenceAgent",
+      enabled: false,
+      mode: RISK_SELL_MODE,
+      status: "DISABLED",
+      globalRisk: { blockNewBuys: false, buySizeMultiplier: 1 },
+      assets: {},
+      sellCandidates: [],
+      emergencyReviews: []
+    };
+  }
+
+  const heldAssets = new Set(portfolioSummary?.uniqueOpenAssets || []);
+  for (const asset of Object.keys(runtimeState.riskSellHighWaterByAsset || {})) {
+    if (!heldAssets.has(asset)) delete runtimeState.riskSellHighWaterByAsset[asset];
+  }
+
+  const accountDrawdownPct = currentAccountDrawdownPct();
+  const dailyChangePct = currentDailyAccountChangePct();
+  const hardDrawdown = accountDrawdownPct >= RISK_SELL_HARD_DRAWDOWN_PCT;
+  const softDrawdown = accountDrawdownPct >= RISK_SELL_SOFT_DRAWDOWN_PCT;
+  const hardDailyLoss = dailyChangePct <= -RISK_SELL_HARD_DAILY_LOSS_PCT;
+  const softDailyLoss = dailyChangePct <= -RISK_SELL_SOFT_DAILY_LOSS_PCT;
+  const regime = marketRegimeAgent?.regime || "UNKNOWN";
+  const hardCircuit = hardDrawdown || hardDailyLoss;
+  const cautionZone = !hardCircuit && (softDrawdown || softDailyLoss || ["RISK_OFF", "HIGH_VOLATILITY", "CRYPTO_RISK_OFF"].includes(regime));
+  const globalReasons = [];
+  if (hardDrawdown) globalReasons.push(`drawdown courant ${accountDrawdownPct}% >= ${RISK_SELL_HARD_DRAWDOWN_PCT}%`);
+  else if (softDrawdown) globalReasons.push(`drawdown courant ${accountDrawdownPct}% >= ${RISK_SELL_SOFT_DRAWDOWN_PCT}%`);
+  if (hardDailyLoss) globalReasons.push(`variation journalière ${dailyChangePct}% <= -${RISK_SELL_HARD_DAILY_LOSS_PCT}%`);
+  else if (softDailyLoss) globalReasons.push(`variation journalière ${dailyChangePct}% <= -${RISK_SELL_SOFT_DAILY_LOSS_PCT}%`);
+  if (["RISK_OFF", "HIGH_VOLATILITY", "CRYPTO_RISK_OFF"].includes(regime)) globalReasons.push(`régime ${regime}`);
+
+  const assets = {};
+  for (const position of portfolioSummary?.aggregatedPositions || []) {
+    const asset = String(position.asset || "").toUpperCase();
+    if (!WATCHLIST[asset]) continue;
+    const category = ASSET_RULES[asset]?.category || "UNKNOWN";
+    const currentPrice = Number(marketSummary?.ratesByAsset?.[asset]?.mid);
+    const existingHigh = runtimeState.riskSellHighWaterByAsset?.[asset] || null;
+    if (Number.isFinite(currentPrice) && currentPrice > 0 && (!existingHigh || currentPrice > Number(existingHigh.price || 0))) {
+      runtimeState.riskSellHighWaterByAsset[asset] = { price: roundNumber(currentPrice, 8), time: nowIso() };
+    }
+    const highWater = runtimeState.riskSellHighWaterByAsset?.[asset] || null;
+    const trailingDrawdownPct = Number.isFinite(currentPrice) && currentPrice > 0 && Number(highWater?.price) > 0
+      ? roundNumber(Math.max(0, (Number(highWater.price) - currentPrice) / Number(highWater.price) * 100), 4)
+      : null;
+    const invested = Number(position.totalAmount || 0);
+    const profit = Number(position.totalProfit || 0);
+    const pnlPct = invested > 0 && Number.isFinite(profit) ? roundNumber(profit / invested * 100, 4) : null;
+    const technical = technicalAnalysisAgent?.assets?.[asset] || null;
+    const intelligence = intelligenceAnalysisAgent?.assets?.[asset] || null;
+    const news = intelligence?.newsAgent || null;
+    const fundamentals = intelligence?.fundamentalAgent || null;
+    const trend = trendSummary?.assets?.[asset] || null;
+    const allocation = portfolioSummary?.allocationPlan?.assetsByAsset?.[asset] || null;
+    const evidence = [];
+
+    if (technical?.bearishVeto || technical?.fallingKnife || Number(technical?.technicalScore) <= TECHNICAL_AVOID_SCORE_MAX) {
+      evidence.push({ family: "TECHNICAL", severity: technical?.fallingKnife ? "HIGH" : "MEDIUM", reason: `score ${technical?.technicalScore ?? "?"}, signal ${technical?.signal || "UNKNOWN"}` });
+    }
+    if (["strong_down", "down"].includes(trend?.trendSignal)) {
+      evidence.push({ family: "TREND", severity: trend.trendSignal === "strong_down" ? "HIGH" : "MEDIUM", reason: `tendance ${trend.trendSignal}` });
+    }
+    if (news?.severeNegativeVerified || (Number(news?.score) <= 28 && Number(news?.confidence || 0) >= 0.45)) {
+      evidence.push({ family: "NEWS", severity: news?.severeNegativeVerified ? "CRITICAL" : "HIGH", reason: news?.severeNegativeVerified ? `risque vérifié ${(news.confirmedRiskFlags || []).join(", ")}` : `score actualités ${news?.score}` });
+    }
+    if (fundamentals?.critical || ((fundamentals?.redFlags || []).length >= 2 && Number(fundamentals?.score) <= 35)) {
+      evidence.push({ family: "FUNDAMENTAL", severity: fundamentals?.critical ? "CRITICAL" : "HIGH", reason: fundamentals?.critical ? "dégradation fondamentale critique" : `red flags ${(fundamentals?.redFlags || []).join(", ")}` });
+    }
+    const trailingThresholdPct = riskSellTrailingThresholdPct(asset);
+    if (Number.isFinite(trailingDrawdownPct) && trailingDrawdownPct >= trailingThresholdPct) {
+      evidence.push({ family: "TRAILING", severity: trailingDrawdownPct >= trailingThresholdPct * 1.35 ? "HIGH" : "MEDIUM", reason: `recul ${trailingDrawdownPct}% depuis le sommet observé ${highWater?.price}` });
+    }
+    if (Number.isFinite(pnlPct) && pnlPct <= -Math.max(8, trailingThresholdPct * 0.75)) {
+      evidence.push({ family: "POSITION_LOSS", severity: pnlPct <= -20 ? "HIGH" : "MEDIUM", reason: `moins-value ${pnlPct}%` });
+    }
+    if (allocation?.status === "OVER_MAX" || Number(portfolioSummary?.assetWeightsPct?.[asset] || 0) > MAX_ASSET_WEIGHT_PCT) {
+      evidence.push({ family: "ALLOCATION", severity: "LOW", reason: `surpondération ${portfolioSummary?.assetWeightsPct?.[asset] ?? "?"}%` });
+    }
+
+    const criticalEvidence = evidence.filter((item) => item.severity === "CRITICAL");
+    const independentBearishFamilies = [...new Set(
+      evidence
+        .filter((item) => !["ALLOCATION", "POSITION_LOSS"].includes(item.family))
+        .map((item) => item.family)
+    )];
+    const corroboratingFamilies = [...new Set(evidence.map((item) => item.family))];
+    const hasIndependentConfirmation = independentBearishFamilies.length >= RISK_SELL_MIN_EVIDENCE_FAMILIES;
+    const protectProfit = Number.isFinite(pnlPct) && pnlPct >= RISK_SELL_PROFIT_PROTECT_MIN_PCT && evidence.some((item) => item.family === "TRAILING");
+
+    let recommendation = "HOLD";
+    if (criticalEvidence.length && independentBearishFamilies.length >= 1) recommendation = "EMERGENCY_SELL_REVIEW";
+    else if (protectProfit && independentBearishFamilies.length >= 1) recommendation = "PROTECT_PROFIT";
+    else if (hasIndependentConfirmation) recommendation = "SELL_CANDIDATE";
+    else if (evidence.length) recommendation = "HOLD_REVIEW";
+
+    const confidence = roundNumber(clampNumber(
+      35 + independentBearishFamilies.length * 18 + criticalEvidence.length * 18 + (protectProfit ? 8 : 0),
+      0,
+      99
+    ), 2);
+    assets[asset] = {
+      asset,
+      category,
+      recommendation,
+      confidence,
+      pnlPct,
+      currentWeightPct: portfolioSummary?.assetWeightsPct?.[asset] ?? null,
+      currentPrice: Number.isFinite(currentPrice) ? currentPrice : null,
+      highWaterPrice: highWater?.price ?? null,
+      highWaterTime: highWater?.time ?? null,
+      trailingDrawdownPct,
+      trailingThresholdPct,
+      independentBearishFamilies,
+      corroboratingFamilies,
+      evidence,
+      safeguards: {
+        sellNeverTriggeredByOverweightAlone: true,
+        sellNeverTriggeredByLossAlone: true,
+        minimumIndependentEvidenceFamilies: RISK_SELL_MIN_EVIDENCE_FAMILIES,
+        fullCloseOnly: true
+      }
+    };
+  }
+
+  const ranking = Object.values(assets).sort((a, b) => {
+    const order = { EMERGENCY_SELL_REVIEW: 0, PROTECT_PROFIT: 1, SELL_CANDIDATE: 2, HOLD_REVIEW: 3, HOLD: 4 };
+    return (order[a.recommendation] ?? 9) - (order[b.recommendation] ?? 9) || Number(b.confidence || 0) - Number(a.confidence || 0);
+  });
+  const sellCandidates = ranking.filter((item) => ["SELL_CANDIDATE", "PROTECT_PROFIT", "EMERGENCY_SELL_REVIEW"].includes(item.recommendation)).map((item) => item.asset);
+  const emergencyReviews = ranking.filter((item) => item.recommendation === "EMERGENCY_SELL_REVIEW").map((item) => item.asset);
+  const report = {
+    name: "RiskSellIntelligenceAgent",
+    generatedAt: nowIso(),
+    source,
+    enabled: true,
+    mode: RISK_SELL_MODE,
+    status: hardCircuit ? "HARD_CIRCUIT" : (cautionZone ? "CAUTION" : "NORMAL"),
+    globalRisk: {
+      accountDrawdownPct,
+      dailyChangePct,
+      regime,
+      hardCircuit,
+      cautionZone,
+      blockNewBuys: hardCircuit,
+      reduceNewBuys: cautionZone,
+      buySizeMultiplier: hardCircuit ? 0 : (cautionZone ? 0.45 : 1),
+      reasons: globalReasons,
+      thresholds: {
+        softDrawdownPct: RISK_SELL_SOFT_DRAWDOWN_PCT,
+        hardDrawdownPct: RISK_SELL_HARD_DRAWDOWN_PCT,
+        softDailyLossPct: RISK_SELL_SOFT_DAILY_LOSS_PCT,
+        hardDailyLossPct: RISK_SELL_HARD_DAILY_LOSS_PCT
+      }
+    },
+    assets,
+    ranking,
+    sellCandidates,
+    emergencyReviews,
+    summary: {
+      heldAssets: Object.keys(assets).length,
+      sellCandidates: sellCandidates.length,
+      emergencyReviews: emergencyReviews.length,
+      holdReviews: ranking.filter((item) => item.recommendation === "HOLD_REVIEW").length
+    },
+    governance: {
+      canCreateOrderAlone: false,
+      requiresStrategyCoordinatorSell: true,
+      requiresRiskControllerApproval: true,
+      requiresMultipleIndependentEvidence: true,
+      overweightAloneCannotSell: true,
+      lossAloneCannotSell: true,
+      automaticPartialSellSupported: false
+    }
+  };
+
+  if (persist) {
+    const previous = runtimeState.lastRiskSellReport;
+    const changed = previous?.status !== report.status ||
+      JSON.stringify(previous?.sellCandidates || []) !== JSON.stringify(report.sellCandidates) ||
+      !previous || minutesSince(previous.generatedAt) === null || minutesSince(previous.generatedAt) >= 30;
+    runtimeState.lastRiskSellReport = report;
+    if (changed) {
+      runtimeState.riskSellHistory.unshift(compactRiskSellReportForHistory(report));
+      runtimeState.riskSellHistory = runtimeState.riskSellHistory.slice(0, RISK_SELL_HISTORY_LIMIT);
+      addAudit("RISK_SELL_REVIEW_UPDATED", {
+        status: report.status,
+        globalRisk: report.globalRisk,
+        sellCandidates: report.sellCandidates,
+        emergencyReviews: report.emergencyReviews
+      });
+    }
+    scheduleSave();
+  }
+  return report;
+}
+
+function riskSellCheckForDecision(agent, decision) {
+  if (!RISK_SELL_INTELLIGENCE_ENABLED || !agent?.enabled) {
+    return { ok: true, reason: "RiskSellIntelligenceAgent désactivé", multiplier: 1, record: null };
+  }
+  const d = sanitizeDecision(decision);
+  if (d.decision === "HOLD") return { ok: true, reason: "HOLD sans contrôle SELL", multiplier: 1, record: null };
+  if (d.decision === "BUY") {
+    if (agent.globalRisk?.blockNewBuys) {
+      return { ok: false, reason: `Circuit risque: nouveaux achats bloqués (${(agent.globalRisk.reasons || []).join(", ")})`, multiplier: 0, record: null };
+    }
+    const category = ASSET_RULES[d.asset]?.category || "UNKNOWN";
+    if (agent.globalRisk?.cautionZone && SPECULATIVE_CATEGORIES.has(category) && RISK_SELL_MODE === "enforced") {
+      return { ok: false, reason: `Zone de prudence: achat spéculatif ${d.asset} bloqué`, multiplier: 0, record: null };
+    }
+    return {
+      ok: true,
+      reason: agent.globalRisk?.cautionZone ? `Zone de prudence: taille réduite (${(agent.globalRisk.reasons || []).join(", ")})` : "Risque portefeuille normal",
+      multiplier: Number(agent.globalRisk?.buySizeMultiplier ?? 1),
+      record: null
+    };
+  }
+  if (d.decision === "SELL") {
+    const record = agent.assets?.[d.asset] || null;
+    if (!record) {
+      return RISK_SELL_MODE === "enforced"
+        ? { ok: false, reason: `RiskSellIntelligenceAgent: aucune revue pour ${d.asset}`, multiplier: 0, record: null }
+        : { ok: true, reason: `Aucune revue SELL pour ${d.asset} (advisory)`, multiplier: 1, record: null };
+    }
+    const accepted = ["SELL_CANDIDATE", "PROTECT_PROFIT", "EMERGENCY_SELL_REVIEW"].includes(record.recommendation);
+    if (accepted) {
+      return { ok: true, reason: `${record.recommendation}: preuves ${record.independentBearishFamilies.join(", ")}`, multiplier: 1, record };
+    }
+    if (RISK_SELL_MODE === "enforced") {
+      return { ok: false, reason: `Vente non corroborée: ${record.recommendation}, ${record.independentBearishFamilies.length}/${RISK_SELL_MIN_EVIDENCE_FAMILIES} familles indépendantes`, multiplier: 0, record };
+    }
+    return { ok: true, reason: `Vente non corroborée mais mode advisory: ${record.recommendation}`, multiplier: 1, record };
+  }
+  return { ok: true, reason: "Décision non concernée", multiplier: 1, record: null };
+}
+
+function buildFoundationAgents({ portfolioSummary, marketSummary, trendSummary, dataIntegrityAgent, technicalAnalysisAgent = null, marketRegimeAgent = null, macroCreditRegimeAgent = null, intelligenceAnalysisAgent = null, strategyValidationAgent = null, paperPerformanceAgent = null, livePerformanceAgent = null, riskSellIntelligenceAgent = null, agentCouncil = null }) {
   const riskBudgetAgent = buildRiskBudgetState(portfolioSummary);
   const healthAgent = buildHealthAgent();
   const providerHealthAgent = dataIntegrityAgent?.providerHealthAgent || buildProviderHealthAgent();
@@ -7582,8 +10476,10 @@ function buildFoundationAgents({ portfolioSummary, marketSummary, trendSummary, 
     cryptoWeightPct: portfolioSummary.cryptoWeightPct,
     speculativeWeightPct: portfolioSummary.speculativeWeightPct,
     concentrationFlags: portfolioSummary.concentrationFlags,
-    diversificationState: portfolioSummary.diversificationState
+    diversificationState: portfolioSummary.diversificationState,
+    allocationPlan: getPortfolioAllocationPlan(portfolioSummary)
   };
+  const portfolioAllocationAgent = getPortfolioAllocationPlan(portfolioSummary);
   const marketDataAgent = {
     name: "MarketDataAgent",
     provider: marketSummary?.provider || "eToro",
@@ -7616,6 +10512,24 @@ function buildFoundationAgents({ portfolioSummary, marketSummary, trendSummary, 
     assets: {}, ranking: [], failures: [],
     note: "Couche intelligence non fournie à ce contexte"
   };
+  const resolvedMacroCreditAgent = macroCreditRegimeAgent || runtimeState.lastMacroCreditRegime || {
+    name: "MacroCreditFundamentalRegimeAgent",
+    enabled: MACRO_CREDIT_REGIME_ENABLED,
+    mode: MACRO_CREDIT_REGIME_MODE,
+    regime: MACRO_REGIME_LABELS.UNKNOWN,
+    globalRiskMultiplier: 0.7,
+    assets: {},
+    ranking: [],
+    canTriggerSellAlone: false
+  };
+  const resolvedRiskSellAgent = riskSellIntelligenceAgent || runtimeState.lastRiskSellReport || {
+    name: "RiskSellIntelligenceAgent",
+    enabled: RISK_SELL_INTELLIGENCE_ENABLED,
+    mode: RISK_SELL_MODE,
+    status: "NOT_MEASURED",
+    globalRisk: { blockNewBuys: false, buySizeMultiplier: 1 },
+    assets: {}, sellCandidates: [], emergencyReviews: []
+  };
   const agents = {
     marketDataAgent,
     dataIntegrityAgent,
@@ -7624,7 +10538,9 @@ function buildFoundationAgents({ portfolioSummary, marketSummary, trendSummary, 
     trendMemoryAgent: trendSummary,
     technicalAnalysisAgent: resolvedTechnicalAgent,
     marketRegimeAgent: resolvedRegimeAgent,
+    macroCreditFundamentalRegimeAgent: resolvedMacroCreditAgent,
     intelligenceAnalysisAgent: resolvedIntelligenceAgent,
+    riskSellIntelligenceAgent: resolvedRiskSellAgent,
     newsAgent: {
       name: "NewsAgent",
       assets: Object.fromEntries(Object.entries(resolvedIntelligenceAgent.assets || {}).map(([asset, snapshot]) => [asset, {
@@ -7651,7 +10567,14 @@ function buildFoundationAgents({ portfolioSummary, marketSummary, trendSummary, 
     agentCouncil: agentCouncil || null,
     strategyValidationAgent: strategyValidationAgent || buildStrategyValidationAgent(),
     paperPerformanceAgent: paperPerformanceAgent || calculatePaperPerformance(),
+    livePerformanceAgent: livePerformanceAgent || runtimeState.lastPerformanceReport || {
+      name: "LivePerformanceAttributionAgent",
+      enabled: LIVE_PERFORMANCE_ATTRIBUTION_ENABLED,
+      status: "NOT_MEASURED",
+      blockBuy: false
+    },
     portfolioAgent,
+    portfolioAllocationAgent,
     riskBudgetAgent,
     healthAgent,
     strategyCoordinator: {
@@ -7666,17 +10589,20 @@ function buildFoundationAgents({ portfolioSummary, marketSummary, trendSummary, 
         (INTELLIGENCE_CONFIRMATION_MODE !== "required" || resolvedIntelligenceAgent.healthy) &&
         (MULTI_AGENT_COUNCIL_MODE !== "required" || Boolean(agentCouncil?.approvedBuyAssets?.length)) &&
         (BACKTEST_VALIDATION_MODE !== "required" || !strategyValidationAgent?.blockBuy) &&
-        (PAPER_PERFORMANCE_MODE !== "required" || !paperPerformanceAgent?.blockBuy),
+        (PAPER_PERFORMANCE_MODE !== "required" || !paperPerformanceAgent?.blockBuy) &&
+        !resolvedRiskSellAgent?.globalRisk?.blockNewBuys,
       councilRecommendation: agentCouncil?.coordinatorRecommendation || null,
       councilMode: MULTI_AGENT_COUNCIL_MODE,
       vetoOwners: [
         "RiskController",
+        "PortfolioAllocationEngine",
         "HealthAgent",
         "MarketDataFusionAgent",
         "ProviderHealthAgent",
         "HistoricalDataAgent",
         "TechnicalAnalysisAgent",
         "MarketRegimeAgent",
+        "MacroCreditFundamentalRegimeAgent",
         "NewsAgent",
         "FundamentalAgent",
         "SocialSentimentAgent",
@@ -7685,7 +10611,9 @@ function buildFoundationAgents({ portfolioSummary, marketSummary, trendSummary, 
         "ExecutionReadinessAgent",
         "AuditAgent",
         "BacktestValidationAgent",
-        "PaperPerformanceAgent"
+        "PaperPerformanceAgent",
+        "LivePerformanceAttributionAgent",
+        "RiskSellIntelligenceAgent"
       ]
     }
   };
@@ -7733,6 +10661,10 @@ function dynamicBuyAmount(decision, portfolioSummary) {
   }
   if (SPECULATIVE_CATEGORIES.has(category)) {
     room = Math.min(room, Math.max(0, total * MAX_SPECULATIVE_WEIGHT_PCT / 100 - Number(portfolioSummary.speculativeValue || 0)));
+  }
+  if (PORTFOLIO_ALLOCATION_ENGINE_ENABLED && PORTFOLIO_ALLOCATION_MODE === "enforced") {
+    const allocationGuard = allocationCheckForBuy(decision.asset, portfolioSummary, room);
+    room = Math.min(room, Number(allocationGuard.roomUsd || 0));
   }
   return roundNumber(Math.max(0, room), 2);
 }
@@ -7819,6 +10751,11 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
   });
 
   if (d.decision === "HOLD") return hold("HOLD choisi", "passed");
+  const unresolvedLiveIntents = Object.values(runtimeState.orderIntents || {})
+    .filter((intent) => intent?.mode === "LIVE" && isActiveExecutionStatus(intent?.status));
+  if (LIVE_TRADING_ENABLED && unresolvedLiveIntents.length > 0) {
+    return hold(`ExecutionVerifier bloque tout nouvel ordre: ${unresolvedLiveIntents.length} intent(s) LIVE à réconcilier`);
+  }
   if (d.risk_check !== "passed") return hold("Risk check IA non validé");
   if (!WATCHLIST[d.asset]) return hold("Actif hors watchlist");
   if (agents.healthAgent?.circuitBreakerOpen) return hold(`Circuit breaker ouvert: ${agents.healthAgent.reasons.join(", ")}`);
@@ -7839,8 +10776,14 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
     agents.intelligenceAnalysisAgent, d.asset, d.decision, d.confidence
   );
   if (!intelligenceCheck.ok) return hold(intelligenceCheck.reason);
+  const macroCheck = macroCreditCheckForDecision(
+    agents.macroCreditFundamentalRegimeAgent, d
+  );
+  if (!macroCheck.ok) return hold(macroCheck.reason);
   const councilCheck = councilCheckForDecision(agents.agentCouncil, d);
   if (!councilCheck.ok) return hold(councilCheck.reason);
+  const riskSellCheck = riskSellCheckForDecision(agents.riskSellIntelligenceAgent, d);
+  if (!riskSellCheck.ok) return hold(riskSellCheck.reason);
 
   const trend = getTrendForAsset(trendSummary, d.asset);
   if (d.decision === "BUY" && trend?.trendSignal === "strong_down" && d.confidence < 85) return hold(`TrendMemoryAgent bloque : tendance forte baissière sur ${d.asset}`);
@@ -7852,6 +10795,8 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
   if (d.decision === "BUY") {
     if (agents.riskBudgetAgent?.newBuyBlocked) return hold(`RiskBudgetAgent bloque les achats: ${agents.riskBudgetAgent.blocks.join(", ")}`);
     if (executionStats.buys >= MAX_BUYS_24H) return hold(`Limite BUY 24h atteinte (${executionStats.buys}/${MAX_BUYS_24H})`);
+    const allocationGuard = allocationCheckForBuy(d.asset, summary, d.amount_usd || MAX_ORDER_USD);
+    if (PORTFOLIO_ALLOCATION_MODE === "enforced" && !allocationGuard.ok) return hold(allocationGuard.reason);
     const category = rules.category;
     const diversificationState = summary.diversificationState || {};
     if (category === "AI_BIG_TECH" && diversificationState.tooConcentratedInAIBigTech && d.confidence < 90) return hold(`Surconcentration AI_BIG_TECH avant ${d.asset}`);
@@ -7880,8 +10825,10 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
     const intelligenceMultiplier = intelligenceSizingMultiplier(
       agents.intelligenceAnalysisAgent, d.asset
     );
+    const macroMultiplier = Number(macroCheck.multiplier ?? 1);
     const councilMultiplier = Number(councilCheck.multiplier ?? 1);
-    const dynamicAmount = roundNumber(baseDynamicAmount * technicalMultiplier * intelligenceMultiplier * councilMultiplier, 2);
+    const riskSellMultiplier = Number(riskSellCheck.multiplier ?? 1);
+    const dynamicAmount = roundNumber(baseDynamicAmount * technicalMultiplier * intelligenceMultiplier * macroMultiplier * councilMultiplier * riskSellMultiplier, 2);
     if (!Number.isFinite(dynamicAmount) || dynamicAmount < MIN_ORDER_USD) {
       return hold(`Budget ajusté insuffisant après réserve, régime, volatilité et conseil (${dynamicAmount || 0} USD)`);
     }
@@ -7897,11 +10844,16 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
     return {
       approved: true,
       finalDecision,
-      reason: `BUY approuvé; ${marketCheck.reason}; ${integrityCheck.reason}; ${technicalCheck.reason}; ${intelligenceCheck.reason}; ${councilCheck.reason}; multiplicateurs technique ${technicalMultiplier}, intelligence ${intelligenceMultiplier} et conseil ${councilMultiplier}; montant ${dynamicAmount} USD`,
+      reason: `BUY approuvé; ${allocationGuard.reason}; ${marketCheck.reason}; ${integrityCheck.reason}; ${technicalCheck.reason}; ${intelligenceCheck.reason}; ${macroCheck.reason}; ${councilCheck.reason}; ${riskSellCheck.reason}; multiplicateurs technique ${technicalMultiplier}, intelligence ${intelligenceMultiplier}, macro ${macroMultiplier}, conseil ${councilMultiplier} et risque ${riskSellMultiplier}; montant ${dynamicAmount} USD`,
+      allocationGuard,
       riskBudget: agents.riskBudgetAgent,
       technicalSizingMultiplier: technicalMultiplier,
       intelligenceSizingMultiplier: intelligenceMultiplier,
+      macroSizingMultiplier: macroMultiplier,
+      macroRecord: macroCheck.record,
       councilSizingMultiplier: councilMultiplier,
+      riskSellSizingMultiplier: riskSellMultiplier,
+      riskSellRecord: riskSellCheck.record,
       agentCouncilRecord: councilCheck.record,
       marketRegime: agents.marketRegimeAgent
     };
@@ -7916,7 +10868,9 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
     return {
       approved: true,
       finalDecision: { ...d, risk_check: "passed" },
-      reason: `SELL approuvé; ${marketCheck.reason}; ${integrityCheck.reason}; ${technicalCheck.reason}; ${intelligenceCheck.reason}; ${councilCheck.reason}`,
+      reason: `SELL approuvé; ${marketCheck.reason}; ${integrityCheck.reason}; ${technicalCheck.reason}; ${intelligenceCheck.reason}; ${macroCheck.reason}; ${councilCheck.reason}; ${riskSellCheck.reason}`,
+      macroRecord: macroCheck.record,
+      riskSellRecord: riskSellCheck.record,
       agentCouncilRecord: councilCheck.record
     };
   }
@@ -7935,32 +10889,53 @@ async function executeBuy(asset, amount, marketData = null) {
   const instrumentId = WATCHLIST[asset];
   const safeAmount = Math.min(Number(amount || MAX_ORDER_USD), MAX_ORDER_USD);
   if (!instrumentId || safeAmount < MIN_ORDER_USD) return { skipped: true, reason: "Actif ou montant invalide" };
-
   if (!LIVE_PORTFOLIO_PREFLIGHT_ENABLED) {
-    return {
-      skipped: true,
-      mode: "LIVE",
-      reason: "LIVE_PORTFOLIO_PREFLIGHT_ENABLED=false : exécution bloquée par sécurité"
-    };
+    return { skipped: true, mode: "LIVE", reason: "LIVE_PORTFOLIO_PREFLIGHT_ENABLED=false : exécution bloquée par sécurité" };
   }
+
   const preflight = await verifyRealPortfolioBeforeExecution({ asset, side: "BUY", amount: safeAmount });
   if (!preflight.ok) {
     addAudit("LIVE_BUY_PREFLIGHT_BLOCKED", { asset, amount: safeAmount, reason: preflight.reason, validation: preflight.validation || null });
     return { skipped: true, mode: "LIVE", reason: preflight.reason, preflight: preflight.validation || null };
   }
 
-  // Relire aussi le prix juste avant l'ordre pour éviter d'utiliser le snapshot du scan.
   const executionMarketData = await getMarketRates();
   const marketCheck = isMarketRateTradable(executionMarketData, asset);
   if (!marketCheck.ok) {
     return { skipped: true, mode: "LIVE", reason: `Préflight prix: ${marketCheck.reason}`, marketCheck };
   }
 
-  const intentResult = createOrderIntent("BUY", asset, safeAmount);
-  if (!intentResult.ok) return { skipped: true, reason: "Intent d'ordre déjà actif", existingIntent: intentResult.existing };
+  const beforeSnapshot = buildAssetExecutionSnapshot(preflight.portfolio, asset);
+  const intentResult = createOrderIntent("BUY", asset, safeAmount, {
+    beforeSnapshot,
+    preflightValidation: preflight.validation || null,
+    marketRateAtIntent: {
+      mid: marketCheck.rate?.mid ?? null,
+      bid: marketCheck.rate?.bid ?? null,
+      ask: marketCheck.rate?.ask ?? null,
+      spreadPct: marketCheck.rate?.spreadPct ?? null,
+      date: marketCheck.rate?.date ?? null
+    }
+  });
+  if (!intentResult.ok) {
+    return {
+      skipped: true,
+      mode: "LIVE",
+      status: EXECUTION_STATUS.DUPLICATE_BLOCKED,
+      reason: "Intent actif ou incertain déjà présent sur cet actif",
+      existingIntent: intentResult.existing
+    };
+  }
+
   const intent = intentResult.intent;
+  const headers = etoroHeaders();
+  updateOrderIntentStatus(intent.id, EXECUTION_STATUS.SENT, {
+    requestId: headers["x-request-id"],
+    sentAt: nowIso(),
+    note: "Requête BUY envoyée une seule fois à eToro"
+  });
+
   try {
-    const headers = etoroHeaders();
     const { response, data } = await fetchJsonWithRetry(
       "https://public-api.etoro.com/api/v1/trading/execution/market-open-orders/by-amount",
       {
@@ -7970,34 +10945,89 @@ async function executeBuy(asset, amount, marketData = null) {
       },
       { label: `eToro LIVE BUY ${asset}`, retries: 0 }
     );
-    const postflight = response.ok
-      ? await verifyPortfolioAfterExecution({ asset, side: "BUY" })
-      : { checked: false, observed: false, reason: "Ordre refusé" };
-    const intentStatus = response.ok
-      ? (postflight.observed ? "CONFIRMED" : "CONFIRMED_API_PENDING_PORTFOLIO")
-      : "REJECTED";
-    finishOrderIntent(intent.id, intentStatus, {
-      httpStatus: response.status,
-      response: data,
-      requestId: headers["x-request-id"],
-      postflight
-    });
-    if (response.ok) {
-      setCooldown(asset);
-      addExecutionHistory({ type: "BUY", asset, amount: safeAmount, instrumentId, mode: "LIVE", intentId: intent.id });
-      addAudit("LIVE_BUY_EXECUTED", {
-        asset,
-        amount: safeAmount,
-        instrumentId,
-        intentId: intent.id,
-        status: response.status,
-        preflight: preflight?.validation || null,
-        postflight
+
+    const compactResponse = compactEtoroExecutionResponse(data);
+    if (!response.ok) {
+      updateOrderIntentStatus(intent.id, EXECUTION_STATUS.REJECTED, {
+        httpStatus: response.status,
+        response: compactResponse,
+        requestId: headers["x-request-id"],
+        rejectedAt: nowIso(),
+        note: "Requête refusée par eToro"
       });
+      addAudit("LIVE_BUY_REJECTED", { asset, amount: safeAmount, intentId: intent.id, status: response.status, response: compactResponse });
+      return {
+        status: response.status,
+        ok: false,
+        confirmed: false,
+        verification_status: EXECUTION_STATUS.REJECTED,
+        type: "BUY",
+        mode: "LIVE",
+        asset,
+        instrumentId,
+        amount: safeAmount,
+        intentId: intent.id,
+        requestId: headers["x-request-id"],
+        preflight: preflight.validation || null,
+        data: compactResponse
+      };
     }
+
+    updateOrderIntentStatus(intent.id, EXECUTION_STATUS.ACCEPTED, {
+      httpStatus: response.status,
+      response: compactResponse,
+      requestId: headers["x-request-id"],
+      acceptedAt: nowIso(),
+      note: "Réponse HTTP acceptée; confirmation portefeuille en cours"
+    });
+
+    const verification = await verifyPortfolioAfterExecution({
+      asset,
+      side: "BUY",
+      beforeSnapshot,
+      intentId: intent.id,
+      apiAccepted: true,
+      trigger: "live-buy-post-order"
+    });
+    updateOrderIntentStatus(intent.id, verification.status, {
+      verificationAttempts: verification.attempts,
+      verificationEvidence: verification.evidence,
+      afterSnapshot: verification.afterSnapshot,
+      verificationRecordId: verification.recordId,
+      confirmedAt: verification.confirmed ? nowIso() : null,
+      note: verification.note
+    });
+
+    // Dès qu'eToro a accepté la requête, on compte l'essai et on bloque tout renvoi automatique.
+    setCooldown(asset);
+    addExecutionHistory({
+      type: "BUY",
+      asset,
+      amount: safeAmount,
+      instrumentId,
+      mode: "LIVE",
+      intentId: intent.id,
+      requestId: headers["x-request-id"],
+      verificationStatus: verification.status,
+      confirmed: verification.confirmed
+    });
+    addAudit(verification.confirmed ? "LIVE_BUY_POSITION_CONFIRMED" : "LIVE_BUY_ACCEPTED_NOT_CONFIRMED", {
+      asset,
+      amount: safeAmount,
+      instrumentId,
+      intentId: intent.id,
+      status: response.status,
+      verificationStatus: verification.status,
+      evidence: verification.evidence,
+      preflight: preflight.validation || null
+    });
+
     return {
       status: response.status,
-      ok: response.ok,
+      ok: true,
+      confirmed: verification.confirmed,
+      verification_status: verification.status,
+      uncertain: [EXECUTION_STATUS.NOT_FOUND, EXECUTION_STATUS.UNCERTAIN].includes(verification.status),
       type: "BUY",
       mode: "LIVE",
       asset,
@@ -8005,14 +11035,43 @@ async function executeBuy(asset, amount, marketData = null) {
       amount: safeAmount,
       intentId: intent.id,
       requestId: headers["x-request-id"],
-      preflight: preflight?.validation || null,
-      postflight,
-      data
+      preflight: preflight.validation || null,
+      verification,
+      data: compactResponse,
+      action: verification.confirmed ? null : "Ne pas répéter l'ordre; laisser ExecutionVerifier réconcilier le portefeuille."
     };
   } catch (error) {
-    finishOrderIntent(intent.id, "UNKNOWN", { error: error.message });
-    addAudit("LIVE_BUY_UNKNOWN", { asset, amount: safeAmount, intentId: intent.id, error: error.message });
-    return { ok: false, uncertain: true, type: "BUY", mode: "LIVE", asset, intentId: intent.id, error: error.message, action: "Ne pas répéter automatiquement; vérifier le portefeuille eToro." };
+    updateOrderIntentStatus(intent.id, EXECUTION_STATUS.UNCERTAIN, {
+      error: error.message,
+      requestId: headers["x-request-id"],
+      note: "Issue réseau/API inconnue; ordre non renvoyé"
+    });
+    recordExecutionVerification({
+      trigger: "live-buy-exception",
+      intentId: intent.id,
+      asset,
+      side: "BUY",
+      status: EXECUTION_STATUS.UNCERTAIN,
+      confirmed: false,
+      evidence: ["REQUEST_EXCEPTION"],
+      attempts: 0,
+      beforeSnapshot,
+      error: error.message
+    });
+    addAudit("LIVE_BUY_EXECUTION_UNCERTAIN", { asset, amount: safeAmount, intentId: intent.id, requestId: headers["x-request-id"], error: error.message });
+    return {
+      ok: false,
+      confirmed: false,
+      uncertain: true,
+      verification_status: EXECUTION_STATUS.UNCERTAIN,
+      type: "BUY",
+      mode: "LIVE",
+      asset,
+      intentId: intent.id,
+      requestId: headers["x-request-id"],
+      error: error.message,
+      action: "Ne pas répéter automatiquement; vérifier le portefeuille eToro ou lancer /execution-reconcile."
+    };
   }
 }
 
@@ -8036,11 +11095,32 @@ async function executeSell(asset, marketData = null) {
   const positionId = getPositionId(position);
   const instrumentId = WATCHLIST[asset];
   if (!positionId) return { skipped: true, reason: `positionId introuvable pour ${asset}` };
-  const intentResult = createOrderIntent("SELL", asset, 0);
-  if (!intentResult.ok) return { skipped: true, reason: "Intent d'ordre déjà actif", existingIntent: intentResult.existing };
+
+  const beforeSnapshot = buildAssetExecutionSnapshot(portfolio, asset);
+  const intentResult = createOrderIntent("SELL", asset, 0, {
+    beforeSnapshot,
+    positionId,
+    preflightValidation: preflight.validation || null
+  });
+  if (!intentResult.ok) {
+    return {
+      skipped: true,
+      mode: "LIVE",
+      status: EXECUTION_STATUS.DUPLICATE_BLOCKED,
+      reason: "Intent actif ou incertain déjà présent sur cet actif",
+      existingIntent: intentResult.existing
+    };
+  }
+
   const intent = intentResult.intent;
+  const headers = etoroHeaders();
+  updateOrderIntentStatus(intent.id, EXECUTION_STATUS.SENT, {
+    requestId: headers["x-request-id"],
+    sentAt: nowIso(),
+    note: "Requête SELL envoyée une seule fois à eToro"
+  });
+
   try {
-    const headers = etoroHeaders();
     const { response, data } = await fetchJsonWithRetry(
       `https://public-api.etoro.com/api/v1/trading/execution/market-close-orders/positions/${positionId}`,
       {
@@ -8050,33 +11130,87 @@ async function executeSell(asset, marketData = null) {
       },
       { label: `eToro LIVE SELL ${asset}`, retries: 0 }
     );
-    const postflight = response.ok
-      ? await verifyPortfolioAfterExecution({ asset, side: "SELL" })
-      : { checked: false, observed: false, reason: "Ordre refusé" };
-    const intentStatus = response.ok
-      ? (postflight.observed ? "CONFIRMED" : "CONFIRMED_API_PENDING_PORTFOLIO")
-      : "REJECTED";
-    finishOrderIntent(intent.id, intentStatus, {
-      httpStatus: response.status,
-      response: data,
-      requestId: headers["x-request-id"],
-      postflight
-    });
-    if (response.ok) {
-      addExecutionHistory({ type: "SELL", asset, instrumentId, positionId, mode: "LIVE", intentId: intent.id });
-      addAudit("LIVE_SELL_EXECUTED", {
+
+    const compactResponse = compactEtoroExecutionResponse(data);
+    if (!response.ok) {
+      updateOrderIntentStatus(intent.id, EXECUTION_STATUS.REJECTED, {
+        httpStatus: response.status,
+        response: compactResponse,
+        requestId: headers["x-request-id"],
+        rejectedAt: nowIso(),
+        note: "Requête refusée par eToro"
+      });
+      addAudit("LIVE_SELL_REJECTED", { asset, positionId, intentId: intent.id, status: response.status, response: compactResponse });
+      return {
+        status: response.status,
+        ok: false,
+        confirmed: false,
+        verification_status: EXECUTION_STATUS.REJECTED,
+        type: "SELL",
+        mode: "LIVE",
         asset,
         instrumentId,
         positionId,
         intentId: intent.id,
-        status: response.status,
+        requestId: headers["x-request-id"],
         preflight: preflight.validation,
-        postflight
-      });
+        data: compactResponse
+      };
     }
+
+    updateOrderIntentStatus(intent.id, EXECUTION_STATUS.ACCEPTED, {
+      httpStatus: response.status,
+      response: compactResponse,
+      requestId: headers["x-request-id"],
+      acceptedAt: nowIso(),
+      note: "Réponse HTTP acceptée; confirmation portefeuille en cours"
+    });
+
+    const verification = await verifyPortfolioAfterExecution({
+      asset,
+      side: "SELL",
+      beforeSnapshot,
+      intentId: intent.id,
+      apiAccepted: true,
+      trigger: "live-sell-post-order"
+    });
+    updateOrderIntentStatus(intent.id, verification.status, {
+      verificationAttempts: verification.attempts,
+      verificationEvidence: verification.evidence,
+      afterSnapshot: verification.afterSnapshot,
+      verificationRecordId: verification.recordId,
+      confirmedAt: verification.confirmed ? nowIso() : null,
+      note: verification.note
+    });
+
+    addExecutionHistory({
+      type: "SELL",
+      asset,
+      instrumentId,
+      positionId,
+      mode: "LIVE",
+      intentId: intent.id,
+      requestId: headers["x-request-id"],
+      verificationStatus: verification.status,
+      confirmed: verification.confirmed
+    });
+    addAudit(verification.confirmed ? "LIVE_SELL_POSITION_CONFIRMED" : "LIVE_SELL_ACCEPTED_NOT_CONFIRMED", {
+      asset,
+      instrumentId,
+      positionId,
+      intentId: intent.id,
+      status: response.status,
+      verificationStatus: verification.status,
+      evidence: verification.evidence,
+      preflight: preflight.validation
+    });
+
     return {
       status: response.status,
-      ok: response.ok,
+      ok: true,
+      confirmed: verification.confirmed,
+      verification_status: verification.status,
+      uncertain: [EXECUTION_STATUS.NOT_FOUND, EXECUTION_STATUS.UNCERTAIN].includes(verification.status),
       type: "SELL",
       mode: "LIVE",
       asset,
@@ -8085,13 +11219,42 @@ async function executeSell(asset, marketData = null) {
       intentId: intent.id,
       requestId: headers["x-request-id"],
       preflight: preflight.validation,
-      postflight,
-      data
+      verification,
+      data: compactResponse,
+      action: verification.confirmed ? null : "Ne pas répéter l'ordre; laisser ExecutionVerifier réconcilier le portefeuille."
     };
   } catch (error) {
-    finishOrderIntent(intent.id, "UNKNOWN", { error: error.message });
-    addAudit("LIVE_SELL_UNKNOWN", { asset, positionId, intentId: intent.id, error: error.message });
-    return { ok: false, uncertain: true, type: "SELL", mode: "LIVE", asset, intentId: intent.id, error: error.message, action: "Ne pas répéter automatiquement; vérifier le portefeuille eToro." };
+    updateOrderIntentStatus(intent.id, EXECUTION_STATUS.UNCERTAIN, {
+      error: error.message,
+      requestId: headers["x-request-id"],
+      note: "Issue réseau/API inconnue; ordre non renvoyé"
+    });
+    recordExecutionVerification({
+      trigger: "live-sell-exception",
+      intentId: intent.id,
+      asset,
+      side: "SELL",
+      status: EXECUTION_STATUS.UNCERTAIN,
+      confirmed: false,
+      evidence: ["REQUEST_EXCEPTION"],
+      attempts: 0,
+      beforeSnapshot,
+      error: error.message
+    });
+    addAudit("LIVE_SELL_EXECUTION_UNCERTAIN", { asset, positionId, intentId: intent.id, requestId: headers["x-request-id"], error: error.message });
+    return {
+      ok: false,
+      confirmed: false,
+      uncertain: true,
+      verification_status: EXECUTION_STATUS.UNCERTAIN,
+      type: "SELL",
+      mode: "LIVE",
+      asset,
+      intentId: intent.id,
+      requestId: headers["x-request-id"],
+      error: error.message,
+      action: "Ne pas répéter automatiquement; vérifier le portefeuille eToro ou lancer /execution-reconcile."
+    };
   }
 }
 
@@ -8202,6 +11365,10 @@ async function buildRuntimeContext(source) {
   }
 
   recordEquitySnapshot(portfolioSummary, source);
+  const livePerformanceAgent = buildLivePerformanceReport(portfolioSummary, marketSummary, {
+    source,
+    record: true
+  });
   const preferredNextAssets = getPreferredNextAssets(portfolioSummary, marketSummary);
   const candidates = preferredNextAssets
     .filter((item) => item.eligibleForTrade)
@@ -8223,8 +11390,26 @@ async function buildRuntimeContext(source) {
   const intelligenceAnalysisAgent = await buildIntelligenceAnalysisReport({
     portfolioSummary, marketSummary, preferredNextAssets
   });
+  const macroCreditRegimeAgent = buildMacroCreditFundamentalRegimeAgent({
+    trendSummary,
+    technicalAnalysisAgent,
+    intelligenceAnalysisAgent,
+    source,
+    persist: true
+  });
   const paperPerformanceAgent = calculatePaperPerformance();
   const strategyValidationAgent = buildStrategyValidationAgent(runtimeState.lastBacktest, paperPerformanceAgent);
+  const riskSellIntelligenceAgent = buildRiskSellIntelligenceAgent({
+    portfolioSummary,
+    marketSummary,
+    trendSummary,
+    technicalAnalysisAgent,
+    marketRegimeAgent,
+    intelligenceAnalysisAgent,
+    livePerformanceAgent,
+    source,
+    persist: true
+  });
   const agentCouncil = buildAgentCouncil({
     portfolioSummary,
     marketSummary,
@@ -8232,6 +11417,7 @@ async function buildRuntimeContext(source) {
     dataIntegrityAgent,
     technicalAnalysisAgent,
     marketRegimeAgent,
+    macroCreditRegimeAgent,
     intelligenceAnalysisAgent,
     strategyValidationAgent,
     paperPerformanceAgent,
@@ -8244,9 +11430,12 @@ async function buildRuntimeContext(source) {
     dataIntegrityAgent,
     technicalAnalysisAgent,
     marketRegimeAgent,
+    macroCreditRegimeAgent,
     intelligenceAnalysisAgent,
     strategyValidationAgent,
     paperPerformanceAgent,
+    livePerformanceAgent,
+    riskSellIntelligenceAgent,
     agentCouncil
   });
 
@@ -8261,9 +11450,12 @@ async function buildRuntimeContext(source) {
     dataIntegrityAgent,
     technicalAnalysisAgent,
     marketRegimeAgent,
+    macroCreditRegimeAgent,
     intelligenceAnalysisAgent,
     strategyValidationAgent,
     paperPerformanceAgent,
+    livePerformanceAgent,
+    riskSellIntelligenceAgent,
     agentCouncil,
     foundationAgents
   };
@@ -8273,6 +11465,9 @@ async function watchMarket(source = "manual-watch") {
   if (runtimeState.watchRunning) return { version: VERSION, skipped: true, reason: "Un watch est déjà en cours" };
   runtimeState.watchRunning = true;
   try {
+    const executionReconciliation = LIVE_TRADING_ENABLED && EXECUTION_RECONCILE_ON_WATCH
+      ? await reconcileExecutionIntents({ trigger: source, limit: EXECUTION_RECONCILE_MAX_PER_RUN })
+      : null;
     const context = await buildRuntimeContext(source);
     const result = {
       version: VERSION,
@@ -8284,6 +11479,11 @@ async function watchMarket(source = "manual-watch") {
       foundationAgents: context.foundationAgents,
       preferredNextAssets: getPreferredNextAssets(context.portfolioSummary, context.marketSummary),
       executionStats24h: getExecutionStats24h(),
+      executionVerifier: executionVerifierStatus(),
+      livePerformanceAgent: context.livePerformanceAgent,
+      macroCreditRegimeAgent: context.macroCreditRegimeAgent,
+      riskSellIntelligenceAgent: context.riskSellIntelligenceAgent,
+      executionReconciliation,
       memory: memoryStatus()
     };
     addWatchLog({
@@ -8382,6 +11582,25 @@ async function scanMarket(source = "manual-scan") {
           ]
         };
       }
+      context.macroCreditRegimeAgent = buildMacroCreditFundamentalRegimeAgent({
+        trendSummary: context.trendSummary,
+        technicalAnalysisAgent: context.technicalAnalysisAgent,
+        intelligenceAnalysisAgent: context.intelligenceAnalysisAgent,
+        source: `${source}-decision-refresh`,
+        persist: true
+      });
+      context.riskSellIntelligenceAgent = buildRiskSellIntelligenceAgent({
+        portfolioSummary: context.portfolioSummary,
+        marketSummary: context.marketSummary,
+        trendSummary: context.trendSummary,
+        technicalAnalysisAgent: context.technicalAnalysisAgent,
+        marketRegimeAgent: context.marketRegimeAgent,
+        macroCreditRegimeAgent: context.macroCreditRegimeAgent,
+        intelligenceAnalysisAgent: context.intelligenceAnalysisAgent,
+        livePerformanceAgent: context.livePerformanceAgent,
+        source: `${source}-decision-refresh`,
+        persist: true
+      });
       context.agentCouncil = buildAgentCouncil({
         portfolioSummary: context.portfolioSummary,
         marketSummary: context.marketSummary,
@@ -8389,6 +11608,7 @@ async function scanMarket(source = "manual-scan") {
         dataIntegrityAgent: context.dataIntegrityAgent,
         technicalAnalysisAgent: context.technicalAnalysisAgent,
         marketRegimeAgent: context.marketRegimeAgent,
+        macroCreditRegimeAgent: context.macroCreditRegimeAgent,
         intelligenceAnalysisAgent: context.intelligenceAnalysisAgent,
         strategyValidationAgent: context.strategyValidationAgent,
         paperPerformanceAgent: context.paperPerformanceAgent,
@@ -8402,9 +11622,12 @@ async function scanMarket(source = "manual-scan") {
         dataIntegrityAgent: context.dataIntegrityAgent,
         technicalAnalysisAgent: context.technicalAnalysisAgent,
         marketRegimeAgent: context.marketRegimeAgent,
+        macroCreditRegimeAgent: context.macroCreditRegimeAgent,
         intelligenceAnalysisAgent: context.intelligenceAnalysisAgent,
         strategyValidationAgent: context.strategyValidationAgent,
         paperPerformanceAgent: context.paperPerformanceAgent,
+        livePerformanceAgent: context.livePerformanceAgent,
+        riskSellIntelligenceAgent: context.riskSellIntelligenceAgent,
         agentCouncil: context.agentCouncil
       });
     }
@@ -8433,6 +11656,8 @@ async function scanMarket(source = "manual-scan") {
       paper_trading_enabled: PAPER_TRADING_ENABLED,
       agents: context.foundationAgents,
       agentCouncil: context.agentCouncil || context.foundationAgents?.agentCouncil || null,
+      macroCreditRegimeAgent: context.macroCreditRegimeAgent,
+      riskSellIntelligenceAgent: context.riskSellIntelligenceAgent,
       portfolioSummary: context.portfolioSummary,
       decisionAgentRaw: decisionRaw,
       riskController: control,
@@ -8459,6 +11684,2241 @@ async function scanMarket(source = "manual-scan") {
   }
 }
 
+
+// -----------------------------------------------------------------------------
+// v10.16 — Research Knowledge Layer
+// -----------------------------------------------------------------------------
+
+function researchSafeText(value, maxLength = RESEARCH_MAX_TEXT_LENGTH) {
+  return String(value ?? "")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function normalizeResearchList(value, maxItems = 30, itemLength = 120) {
+  const input = Array.isArray(value)
+    ? value
+    : String(value || "").split(",");
+  return [...new Set(input
+    .map((item) => researchSafeText(item, itemLength))
+    .filter(Boolean)
+  )].slice(0, maxItems);
+}
+
+function researchFingerprint(parts) {
+  return createHash("sha256")
+    .update(parts.map((part) => researchSafeText(part, 2000).toLowerCase()).join("|"))
+    .digest("hex");
+}
+
+function researchId(prefix, fingerprint) {
+  return `${prefix}-${String(fingerprint || randomUUID()).slice(0, 16)}`;
+}
+
+function scoreResearchSource(source = {}) {
+  let score = 10;
+  const components = {};
+  const add = (name, value) => {
+    const numeric = Number(value || 0);
+    components[name] = numeric;
+    score += numeric;
+  };
+
+  add("traceability", source.title && (source.authors?.length || source.organization) && source.year ? 18 : 5);
+  add("primaryOrOfficial", source.primarySource || source.officialCourse ? 14 : 4);
+  add("peerReview", source.peerReviewed ? 14 : 0);
+  add("methodology", source.methodology ? 12 : 3);
+  add("limitations", source.limitations ? 10 : 0);
+  add("reproducibility", source.reproducibility ? 10 : 2);
+  add("dataDescription", source.dataDescription ? 8 : 1);
+  add("directApplicability", Math.max(0, Math.min(14, Number(source.directApplicability || 0))));
+
+  return {
+    score: Math.max(0, Math.min(100, Math.round(score))),
+    components,
+    threshold: RESEARCH_MIN_QUALITY_SCORE,
+    passesThreshold: score >= RESEARCH_MIN_QUALITY_SCORE
+  };
+}
+
+function normalizeResearchSource(input = {}, { seeded = false } = {}) {
+  const title = researchSafeText(input.title, 300);
+  if (!title) throw new Error("Titre de source obligatoire");
+  const authors = normalizeResearchList(input.authors, 20, 160);
+  const year = Number.isFinite(Number(input.year))
+    ? Math.max(1800, Math.min(2200, Math.round(Number(input.year))))
+    : null;
+  const fingerprint = researchFingerprint([
+    title,
+    authors.join(","),
+    year || "",
+    input.organization || "",
+    input.sourceRef || input.fileName || ""
+  ]);
+  const base = {
+    id: researchId("research-source", fingerprint),
+    fingerprint,
+    title,
+    authors,
+    organization: researchSafeText(input.organization, 240) || null,
+    year,
+    sourceType: researchSafeText(input.sourceType || "DOCUMENT", 80).toUpperCase(),
+    sourceRef: researchSafeText(input.sourceRef || input.fileName, 500) || null,
+    domains: normalizeResearchList(input.domains, 20, 100),
+    tags: normalizeResearchList(input.tags, 30, 100),
+    summary: researchSafeText(input.summary, 2000) || null,
+    methodology: researchSafeText(input.methodology, 1200) || null,
+    limitations: researchSafeText(input.limitations, 1200) || null,
+    dataDescription: researchSafeText(input.dataDescription, 800) || null,
+    primarySource: Boolean(input.primarySource),
+    officialCourse: Boolean(input.officialCourse),
+    peerReviewed: Boolean(input.peerReviewed),
+    reproducibility: Boolean(input.reproducibility),
+    directApplicability: Math.max(0, Math.min(14, Number(input.directApplicability || 0))),
+    status: seeded || input.seeded
+      ? RESEARCH_SOURCE_STATUS.ACTIVE
+      : RESEARCH_SOURCE_STATUS.NEEDS_REVIEW,
+    seeded: Boolean(seeded || input.seeded),
+    untrustedExternalContent: true,
+    advisoryOnly: true,
+    directLiveInfluence: false,
+    createdAt: input.createdAt || nowIso(),
+    updatedAt: nowIso()
+  };
+  return { ...base, quality: scoreResearchSource(base) };
+}
+
+function addResearchEvent(type, details = {}) {
+  const event = {
+    id: researchId("research-event", researchFingerprint([type, nowIso(), JSON.stringify(details)])),
+    time: nowIso(),
+    type: researchSafeText(type, 100),
+    details
+  };
+  runtimeState.researchEvents.unshift(event);
+  runtimeState.researchEvents = runtimeState.researchEvents.slice(0, RESEARCH_EVENT_HISTORY_LIMIT);
+  return event;
+}
+
+function upsertResearchSource(input, options = {}) {
+  if (!RESEARCH_KNOWLEDGE_ENABLED) throw new Error("Research Knowledge Layer désactivée");
+  const source = normalizeResearchSource(input, options);
+  const existingIndex = runtimeState.researchSources.findIndex((item) =>
+    item.id === source.id || item.fingerprint === source.fingerprint
+  );
+  if (existingIndex >= 0) {
+    const existing = runtimeState.researchSources[existingIndex];
+    const merged = {
+      ...existing,
+      ...source,
+      id: existing.id,
+      createdAt: existing.createdAt || source.createdAt,
+      updatedAt: nowIso()
+    };
+    runtimeState.researchSources[existingIndex] = merged;
+    addResearchEvent("SOURCE_UPDATED", { sourceId: merged.id, title: merged.title });
+    return { source: merged, created: false, duplicate: true };
+  }
+  runtimeState.researchSources.unshift(source);
+  runtimeState.researchSources = runtimeState.researchSources.slice(0, RESEARCH_MAX_SOURCES);
+  addResearchEvent("SOURCE_CREATED", { sourceId: source.id, title: source.title, seeded: source.seeded });
+  return { source, created: true, duplicate: false };
+}
+
+function normalizeResearchEvidence(input = {}, { seeded = false } = {}) {
+  const claim = researchSafeText(input.claim, 2500);
+  if (!claim) throw new Error("Affirmation de preuve obligatoire");
+  const sourceIds = normalizeResearchList(input.sourceIds || input.sourceId, 20, 120);
+  if (!sourceIds.length) throw new Error("Au moins une source est obligatoire");
+  const missing = sourceIds.filter((id) => !runtimeState.researchSources.some((source) => source.id === id));
+  if (missing.length) throw new Error(`Source(s) inconnue(s): ${missing.join(", ")}`);
+  const fingerprint = researchFingerprint([claim, sourceIds.sort().join(","), input.domain || ""]);
+  const sourceQualities = sourceIds
+    .map((id) => runtimeState.researchSources.find((source) => source.id === id)?.quality?.score)
+    .filter(Number.isFinite);
+  const sourceQualityAverage = sourceQualities.length
+    ? Math.round(sourceQualities.reduce((sum, value) => sum + value, 0) / sourceQualities.length)
+    : 0;
+  const corroborationBonus = Math.min(15, Math.max(0, (sourceIds.length - 1) * 5));
+  const limitationsPresent = Boolean(researchSafeText(input.limitations, 1200));
+  const evidenceQuality = Math.max(0, Math.min(100,
+    Math.round(sourceQualityAverage * 0.75 + corroborationBonus + (limitationsPresent ? 10 : 0))
+  ));
+  return {
+    id: researchId("research-evidence", fingerprint),
+    fingerprint,
+    claim,
+    sourceIds,
+    domain: researchSafeText(input.domain || "GENERAL", 100).toUpperCase(),
+    applicability: researchSafeText(input.applicability, 1200) || null,
+    limitations: researchSafeText(input.limitations, 1200) || null,
+    targetAssets: normalizeResearchList(input.targetAssets, 30, 30)
+      .map((asset) => asset.toUpperCase())
+      .filter((asset) => WATCHLIST[asset]),
+    tags: normalizeResearchList(input.tags, 30, 100),
+    qualityScore: evidenceQuality,
+    status: seeded || input.seeded
+      ? RESEARCH_EVIDENCE_STATUS.ACCEPTED
+      : RESEARCH_EVIDENCE_STATUS.DRAFT,
+    seeded: Boolean(seeded || input.seeded),
+    qualityThresholdPassed: evidenceQuality >= RESEARCH_MIN_QUALITY_SCORE,
+    untrustedExternalContent: true,
+    advisoryOnly: true,
+    directLiveInfluence: false,
+    createdAt: input.createdAt || nowIso(),
+    updatedAt: nowIso()
+  };
+}
+
+function upsertResearchEvidence(input, options = {}) {
+  if (!RESEARCH_KNOWLEDGE_ENABLED) throw new Error("Research Knowledge Layer désactivée");
+  const evidence = normalizeResearchEvidence(input, options);
+  const existingIndex = runtimeState.researchEvidence.findIndex((item) =>
+    item.id === evidence.id || item.fingerprint === evidence.fingerprint
+  );
+  if (existingIndex >= 0) {
+    const existing = runtimeState.researchEvidence[existingIndex];
+    const merged = { ...existing, ...evidence, id: existing.id, createdAt: existing.createdAt, updatedAt: nowIso() };
+    runtimeState.researchEvidence[existingIndex] = merged;
+    addResearchEvent("EVIDENCE_UPDATED", { evidenceId: merged.id, status: merged.status });
+    return { evidence: merged, created: false, duplicate: true };
+  }
+  runtimeState.researchEvidence.unshift(evidence);
+  runtimeState.researchEvidence = runtimeState.researchEvidence.slice(0, RESEARCH_MAX_EVIDENCE);
+  addResearchEvent("EVIDENCE_CREATED", { evidenceId: evidence.id, status: evidence.status });
+  return { evidence, created: true, duplicate: false };
+}
+
+function normalizeResearchHypothesis(input = {}) {
+  const title = researchSafeText(input.title, 300);
+  const statement = researchSafeText(input.statement, 2500);
+  if (!title || !statement) throw new Error("Titre et hypothèse obligatoires");
+  const evidenceIds = normalizeResearchList(input.evidenceIds, 40, 120);
+  const validEvidence = evidenceIds.filter((id) => runtimeState.researchEvidence.some((item) => item.id === id));
+  if (!validEvidence.length) throw new Error("Au moins une preuve enregistrée est obligatoire");
+  const acceptedEvidence = validEvidence.filter((id) =>
+    runtimeState.researchEvidence.find((item) => item.id === id)?.status === RESEARCH_EVIDENCE_STATUS.ACCEPTED
+  );
+  const fingerprint = researchFingerprint([title, statement, validEvidence.sort().join(",")]);
+  return {
+    id: researchId("research-hypothesis", fingerprint),
+    fingerprint,
+    title,
+    statement,
+    evidenceIds: validEvidence,
+    acceptedEvidenceCount: acceptedEvidence.length,
+    targetAssets: normalizeResearchList(input.targetAssets, 30, 30)
+      .map((asset) => asset.toUpperCase())
+      .filter((asset) => WATCHLIST[asset]),
+    expectedEffect: researchSafeText(input.expectedEffect, 1000) || null,
+    failureCriteria: normalizeResearchList(input.failureCriteria, 20, 400),
+    validationRequirements: normalizeResearchList(input.validationRequirements, 20, 400),
+    status: acceptedEvidence.length > 0
+      ? RESEARCH_HYPOTHESIS_STATUS.READY_FOR_BACKTEST
+      : RESEARCH_HYPOTHESIS_STATUS.DRAFT,
+    liveEligible: false,
+    requiresHumanPromotion: true,
+    advisoryOnly: true,
+    createdAt: input.createdAt || nowIso(),
+    updatedAt: nowIso()
+  };
+}
+
+function upsertResearchHypothesis(input) {
+  const hypothesis = normalizeResearchHypothesis(input);
+  const existingIndex = runtimeState.researchHypotheses.findIndex((item) =>
+    item.id === hypothesis.id || item.fingerprint === hypothesis.fingerprint
+  );
+  if (existingIndex >= 0) {
+    const existing = runtimeState.researchHypotheses[existingIndex];
+    const merged = { ...existing, ...hypothesis, id: existing.id, createdAt: existing.createdAt, updatedAt: nowIso() };
+    runtimeState.researchHypotheses[existingIndex] = merged;
+    addResearchEvent("HYPOTHESIS_UPDATED", { hypothesisId: merged.id, status: merged.status });
+    return { hypothesis: merged, created: false, duplicate: true };
+  }
+  runtimeState.researchHypotheses.unshift(hypothesis);
+  runtimeState.researchHypotheses = runtimeState.researchHypotheses.slice(0, RESEARCH_MAX_HYPOTHESES);
+  addResearchEvent("HYPOTHESIS_CREATED", { hypothesisId: hypothesis.id, status: hypothesis.status });
+  return { hypothesis, created: true, duplicate: false };
+}
+
+function buildExperimentProtocol(hypothesis, phase = "BACKTEST", overrides = {}) {
+  const normalizedPhase = String(phase || "BACKTEST").toUpperCase();
+  if (!RESEARCH_EXPERIMENT_PHASES.has(normalizedPhase)) {
+    throw new Error(`Phase invalide: ${normalizedPhase}`);
+  }
+  const defaultRequirements = {
+    BACKTEST: [
+      "Aucun look-ahead",
+      "Frais et slippage inclus",
+      "Benchmark explicite",
+      "Périodes de marché multiples",
+      "Journal de toutes les variantes testées"
+    ],
+    WALK_FORWARD: [
+      "Séparation stricte entraînement/test",
+      "Fenêtres glissantes",
+      "Embargo ou purge lorsque nécessaire",
+      "Stabilité des paramètres",
+      "Deflated Sharpe ou correction du multiple testing"
+    ],
+    PAPER: [
+      "Aucun ordre LIVE",
+      "Exécution simulée avec slippage",
+      "Durée minimale prédéfinie",
+      "Critères de rollback",
+      "Comparaison à la stratégie active"
+    ]
+  };
+  return {
+    hypothesisId: hypothesis.id,
+    phase: normalizedPhase,
+    assets: normalizeResearchList(overrides.assets || hypothesis.targetAssets, 30, 30)
+      .map((asset) => asset.toUpperCase())
+      .filter((asset) => WATCHLIST[asset]),
+    requirements: normalizeResearchList(
+      overrides.requirements || [...defaultRequirements[normalizedPhase], ...(hypothesis.validationRequirements || [])],
+      30,
+      500
+    ),
+    failureCriteria: normalizeResearchList(
+      overrides.failureCriteria || hypothesis.failureCriteria || [
+        "Sous-performance nette face au benchmark",
+        "Drawdown supérieur à la stratégie de référence",
+        "Instabilité hors échantillon",
+        "Résultat dépendant d’une seule période"
+      ],
+      30,
+      500
+    ),
+    metrics: normalizeResearchList(overrides.metrics || [
+      "return_net",
+      "max_drawdown",
+      "sharpe",
+      "deflated_sharpe",
+      "turnover",
+      "hit_rate",
+      "tracking_error",
+      "information_ratio"
+    ], 30, 100),
+    liveAllowed: false,
+    autoPromotionAllowed: false
+  };
+}
+
+function createResearchExperiment(input = {}) {
+  const hypothesisId = researchSafeText(input.hypothesisId, 120);
+  const hypothesis = runtimeState.researchHypotheses.find((item) => item.id === hypothesisId);
+  if (!hypothesis) throw new Error("Hypothèse inconnue");
+  const protocol = buildExperimentProtocol(hypothesis, input.phase, input);
+  const fingerprint = researchFingerprint([hypothesisId, protocol.phase, JSON.stringify(protocol.assets), JSON.stringify(protocol.requirements)]);
+  const existing = runtimeState.researchExperiments.find((item) => item.fingerprint === fingerprint);
+  if (existing) return { experiment: existing, created: false, duplicate: true };
+  const experiment = {
+    id: researchId("research-experiment", fingerprint),
+    fingerprint,
+    title: researchSafeText(input.title || `${protocol.phase} — ${hypothesis.title}`, 300),
+    hypothesisId,
+    phase: protocol.phase,
+    status: "PLANNED",
+    protocol,
+    results: null,
+    conclusion: null,
+    liveEligible: false,
+    requiresHumanReview: true,
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  };
+  runtimeState.researchExperiments.unshift(experiment);
+  runtimeState.researchExperiments = runtimeState.researchExperiments.slice(0, RESEARCH_MAX_EXPERIMENTS);
+  hypothesis.status = RESEARCH_HYPOTHESIS_STATUS.IN_TEST;
+  hypothesis.updatedAt = nowIso();
+  addResearchEvent("EXPERIMENT_PLANNED", { experimentId: experiment.id, hypothesisId, phase: experiment.phase });
+  return { experiment, created: true, duplicate: false };
+}
+
+function reviewResearchItem({ itemType, itemId, decision, note, reviewer }) {
+  const type = researchSafeText(itemType, 40).toUpperCase();
+  const id = researchSafeText(itemId, 140);
+  const normalizedDecision = researchSafeText(decision, 80).toUpperCase();
+  const collections = {
+    SOURCE: runtimeState.researchSources,
+    EVIDENCE: runtimeState.researchEvidence,
+    HYPOTHESIS: runtimeState.researchHypotheses,
+    EXPERIMENT: runtimeState.researchExperiments
+  };
+  const collection = collections[type];
+  if (!collection) throw new Error("Type de recherche invalide");
+  const item = collection.find((entry) => entry.id === id);
+  if (!item) throw new Error("Élément de recherche introuvable");
+
+  const allowed = {
+    SOURCE: ["ACTIVE", "NEEDS_REVIEW", "REJECTED", "ARCHIVED"],
+    EVIDENCE: ["DRAFT", "ACCEPTED", "REJECTED", "ARCHIVED"],
+    HYPOTHESIS: ["DRAFT", "READY_FOR_BACKTEST", "PAPER_ONLY", "REJECTED", "ARCHIVED"],
+    EXPERIMENT: ["PLANNED", "RUNNING", "PASSED", "FAILED", "REJECTED", "ARCHIVED"]
+  };
+  if (!allowed[type].includes(normalizedDecision)) {
+    throw new Error(`Décision invalide pour ${type}: ${normalizedDecision}`);
+  }
+  item.status = normalizedDecision;
+  item.review = {
+    reviewer: researchSafeText(reviewer || "human", 120),
+    note: researchSafeText(note, 1000) || null,
+    reviewedAt: nowIso()
+  };
+  item.updatedAt = nowIso();
+  item.liveEligible = false;
+  addResearchEvent("ITEM_REVIEWED", { itemType: type, itemId: id, decision: normalizedDecision });
+  return item;
+}
+
+function buildResearchKnowledgeReport() {
+  const sources = runtimeState.researchSources || [];
+  const evidence = runtimeState.researchEvidence || [];
+  const hypotheses = runtimeState.researchHypotheses || [];
+  const experiments = runtimeState.researchExperiments || [];
+  const qualityScores = sources.map((source) => Number(source.quality?.score)).filter(Number.isFinite);
+  const domainCounts = {};
+  for (const item of evidence) {
+    domainCounts[item.domain || "GENERAL"] = (domainCounts[item.domain || "GENERAL"] || 0) + 1;
+  }
+  const report = {
+    name: "ResearchKnowledgeLayer",
+    version: VERSION,
+    generatedAt: nowIso(),
+    enabled: RESEARCH_KNOWLEDGE_ENABLED,
+    status: !RESEARCH_KNOWLEDGE_ENABLED
+      ? "DISABLED"
+      : (sources.length ? "READY" : "EMPTY"),
+    agents: {
+      ResearchIngestionAgent: { status: "READY", acceptedFormat: "structured metadata and summaries" },
+      ResearchQualityAgent: { status: "READY", minimumQualityScore: RESEARCH_MIN_QUALITY_SCORE },
+      EvidenceRegistry: { status: "READY", deduplication: "sha256 fingerprint" },
+      HypothesisGenerator: { status: "READY", output: "testable hypotheses only" },
+      ExperimentAgent: { status: "READY", phases: [...RESEARCH_EXPERIMENT_PHASES] }
+    },
+    counts: {
+      sources: sources.length,
+      activeSources: sources.filter((item) => item.status === RESEARCH_SOURCE_STATUS.ACTIVE).length,
+      seededSources: sources.filter((item) => item.seeded).length,
+      evidence: evidence.length,
+      acceptedEvidence: evidence.filter((item) => item.status === RESEARCH_EVIDENCE_STATUS.ACCEPTED).length,
+      hypotheses: hypotheses.length,
+      readyHypotheses: hypotheses.filter((item) => item.status === RESEARCH_HYPOTHESIS_STATUS.READY_FOR_BACKTEST).length,
+      experiments: experiments.length,
+      plannedExperiments: experiments.filter((item) => item.status === "PLANNED").length
+    },
+    quality: {
+      averageSourceScore: qualityScores.length
+        ? Number((qualityScores.reduce((sum, value) => sum + value, 0) / qualityScores.length).toFixed(2))
+        : null,
+      belowThreshold: sources.filter((item) => Number(item.quality?.score || 0) < RESEARCH_MIN_QUALITY_SCORE).length
+    },
+    domains: Object.entries(domainCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([domain, count]) => ({ domain, count })),
+    guardrails: {
+      advisoryOnly: true,
+      directLiveInfluence: false,
+      directOrderCreation: false,
+      sourceTextIsUntrusted: true,
+      requiredPath: ["EVIDENCE", "HYPOTHESIS", "BACKTEST", "WALK_FORWARD", "PAPER", "HUMAN_REVIEW"],
+      livePromotionImplemented: false
+    }
+  };
+  runtimeState.lastResearchReport = report;
+  return report;
+}
+
+function generateResearchHypothesesFromEvidence({ limit = 8 } = {}) {
+  const accepted = runtimeState.researchEvidence
+    .filter((item) => item.status === RESEARCH_EVIDENCE_STATUS.ACCEPTED)
+    .sort((a, b) => Number(b.qualityScore || 0) - Number(a.qualityScore || 0));
+  const templates = [
+    {
+      match: ["BACKTEST", "VALIDATION", "MACHINE_LEARNING"],
+      title: "Validation purgée et correction du multiple testing",
+      statement: "Une procédure de validation avec séparation temporelle stricte, coûts réalistes et correction du multiple testing réduit les promotions de stratégies faussement performantes.",
+      expectedEffect: "Moins de faux positifs et meilleure stabilité hors échantillon."
+    },
+    {
+      match: ["PORTFOLIO", "ALLOCATION", "RISK"],
+      title: "Bandes d’allocation et volatilité cible",
+      statement: "Des bandes par actif et par poche, combinées à une volatilité cible, réduisent la concentration et le drawdown sans dégrader excessivement le rendement net.",
+      expectedEffect: "Drawdown et concentration réduits face à une allocation sans bandes."
+    },
+    {
+      match: ["MICROSTRUCTURE", "EXECUTION"],
+      title: "Filtre de coût d’exécution renforcé",
+      statement: "Bloquer les ordres lorsque spread, fraîcheur ou divergence de fournisseurs dépassent des seuils prudents améliore la performance nette et réduit le slippage extrême.",
+      expectedEffect: "Réduction du coût moyen d’exécution et des mauvaises entrées."
+    },
+    {
+      match: ["MARKET_EFFICIENCY", "TRADING"],
+      title: "Réduction du sur-trading",
+      statement: "Un seuil de preuve plus élevé et un cooldown plus long réduisent le turnover sans diminuer la performance nette ajustée du risque.",
+      expectedEffect: "Moins d’ordres, moins de frais et meilleur Information Ratio."
+    },
+    {
+      match: ["RISK", "LIQUIDITY", "HEDGE_FUNDS"],
+      title: "Stress de corrélation et liquidité",
+      statement: "Un circuit breaker fondé sur la hausse simultanée des corrélations, de la volatilité et des spreads réduit les pertes lors des régimes de stress.",
+      expectedEffect: "Drawdown de crise inférieur à la stratégie de référence."
+    },
+    {
+      match: ["OPTIONS", "VOLATILITY"],
+      title: "Volatilité implicite comme capteur de stress",
+      statement: "L’ajout futur d’un indicateur de volatilité implicite et de skew améliore la détection des régimes de risque extrême sans servir de signal directionnel isolé.",
+      expectedEffect: "Détection plus précoce des périodes de stress."
+    },
+    {
+      match: ["REINFORCEMENT_LEARNING", "RL"],
+      title: "RL isolé avec récompense ajustée du risque",
+      statement: "Dans un environnement PAPER isolé, une récompense pénalisant inventaire, drawdown et turnover est plus stable qu’une récompense fondée uniquement sur le P&L.",
+      expectedEffect: "Politique plus stable et moins sensible au surapprentissage."
+    },
+    {
+      match: ["QUANTUM"],
+      title: "Formulation QUBO classique sous contraintes",
+      statement: "La formulation QUBO des bandes d’investissement et de la volatilité cible peut être comparée à des solveurs classiques avant toute expérimentation quantique.",
+      expectedEffect: "Benchmark classique reproductible et absence de revendication quantique prématurée."
+    }
+  ];
+
+  const created = [];
+  for (const template of templates) {
+    if (created.length >= Math.max(1, Math.min(20, Number(limit || 8)))) break;
+    const matched = accepted.filter((item) => template.match.some((token) =>
+      String(item.domain || "").includes(token) ||
+      (item.tags || []).some((tag) => String(tag).toUpperCase().includes(token))
+    ));
+    if (!matched.length) continue;
+    const result = upsertResearchHypothesis({
+      title: template.title,
+      statement: template.statement,
+      evidenceIds: matched.slice(0, 6).map((item) => item.id),
+      targetAssets: [...new Set(matched.flatMap((item) => item.targetAssets || []))].slice(0, 20),
+      expectedEffect: template.expectedEffect,
+      failureCriteria: [
+        "Sous-performance nette face au benchmark",
+        "Résultat instable hors échantillon",
+        "Drawdown supérieur à la référence",
+        "Dépendance excessive à une seule période"
+      ],
+      validationRequirements: [
+        "Backtest sans look-ahead",
+        "Frais et slippage réalistes",
+        "Walk-forward",
+        "Comparaison au benchmark",
+        "Passage PAPER avant toute revue de promotion"
+      ]
+    });
+    created.push(result.hypothesis);
+  }
+  addResearchEvent("HYPOTHESES_GENERATED", { created: created.length });
+  return created;
+}
+
+const BUILTIN_RESEARCH_SOURCES = Object.freeze([
+  {
+    title: "Market Microstructure and Algorithmic Trading",
+    authors: ["Fayçal Drissi"], year: 2024, organization: "University of Oxford",
+    sourceType: "LECTURE_NOTES", officialCourse: true, primarySource: true,
+    methodology: "Order books, execution, market impact and optimal trading models.",
+    limitations: "Designed for market microstructure and not directly for retail eToro execution.",
+    dataDescription: "Models and empirical examples on limit order books.", directApplicability: 12,
+    domains: ["MICROSTRUCTURE", "EXECUTION"], tags: ["spread", "slippage", "market impact"],
+    summary: "Execution quality, liquidity, order flow and market impact principles."
+  },
+  {
+    title: "Advances in Financial Machine Learning",
+    authors: ["Marcos López de Prado"], year: 2018, sourceType: "BOOK", primarySource: true,
+    methodology: "Financial labels, purged cross-validation, embargo, feature importance and portfolio construction.",
+    limitations: "Methods require careful implementation and cannot guarantee future performance.",
+    dataDescription: "Financial time series and event-based samples.", reproducibility: true, directApplicability: 14,
+    domains: ["MACHINE_LEARNING", "BACKTEST", "VALIDATION"], tags: ["purged CV", "embargo", "HRP"],
+    summary: "Framework for reducing leakage, overfitting and false discoveries in financial ML."
+  },
+  {
+    title: "The Deflated Sharpe Ratio",
+    authors: ["David H. Bailey", "Marcos López de Prado"], year: 2014, sourceType: "PAPER",
+    peerReviewed: true, primarySource: true, methodology: "Adjustment of Sharpe ratio for multiple testing and non-normal returns.",
+    limitations: "Requires an honest estimate of the number and dependence of trials.",
+    dataDescription: "Analytical and simulation-based evaluation.", reproducibility: true, directApplicability: 14,
+    domains: ["BACKTEST", "VALIDATION"], tags: ["Deflated Sharpe", "multiple testing"],
+    summary: "Corrects inflated performance estimates after repeated strategy searches."
+  },
+  {
+    title: "Pseudo-Mathematics and Financial Charlatanism",
+    authors: ["David H. Bailey", "Marcos López de Prado"], year: 2014, sourceType: "PAPER",
+    peerReviewed: true, primarySource: true, methodology: "Analysis of backtest overfitting and minimum track record length.",
+    limitations: "Diagnostic principles do not replace strategy-specific validation.",
+    dataDescription: "Statistical analysis of strategy selection.", reproducibility: true, directApplicability: 13,
+    domains: ["BACKTEST", "VALIDATION"], tags: ["overfitting", "minimum backtest length"],
+    summary: "Warnings against selecting impressive backtests from many hidden trials."
+  },
+  {
+    title: "15.433 Risk Management",
+    organization: "MIT Sloan", year: 2003, sourceType: "LECTURE_NOTES", officialCourse: true,
+    methodology: "Taxonomy and quantitative treatment of market, credit, liquidity and operational risk.",
+    limitations: "Historical examples and regulation are dated; principles remain educational.",
+    dataDescription: "Case studies and hedge-ratio examples.", directApplicability: 13,
+    domains: ["RISK", "LIQUIDITY", "OPERATIONAL_RISK"], tags: ["circuit breaker", "basis risk"],
+    summary: "Prioritizes extreme losses, liquidity and operational controls."
+  },
+  {
+    title: "15.433 Active Portfolio Management",
+    organization: "MIT Sloan", year: 2003, sourceType: "LECTURE_NOTES", officialCourse: true,
+    methodology: "CAPM/APT, Black-Litterman, tracking error, Information Ratio and attribution.",
+    limitations: "Examples are historical and some notation is simplified.",
+    dataDescription: "Portfolio and pension-fund attribution examples.", directApplicability: 14,
+    domains: ["PORTFOLIO", "ALLOCATION", "PERFORMANCE"], tags: ["Black-Litterman", "attribution"],
+    summary: "Separates strategic allocation, timing, selection and benchmark-relative risk."
+  },
+  {
+    title: "15.433 Market Efficiency",
+    organization: "MIT Sloan", year: 2003, sourceType: "LECTURE_NOTES", officialCourse: true,
+    methodology: "Efficient-market hypotheses, event studies, limits of arbitrage and anomalies.",
+    limitations: "Educational overview; empirical references need modern replication.",
+    dataDescription: "Fund-performance and anomaly examples.", directApplicability: 11,
+    domains: ["MARKET_EFFICIENCY", "TRADING"], tags: ["overtrading", "limits of arbitrage"],
+    summary: "Raises the evidence threshold for supposedly easy and persistent alpha."
+  },
+  {
+    title: "15.433 Security Analysis",
+    organization: "MIT Sloan", year: 2003, sourceType: "LECTURE_NOTES", officialCourse: true,
+    methodology: "Macro, industry and firm-level analysis with valuation and financial statements.",
+    limitations: "Valuation examples are simplified and date-specific.",
+    dataDescription: "Dividend models, earnings and leverage formulas.", directApplicability: 11,
+    domains: ["FUNDAMENTAL", "MACRO"], tags: ["earnings", "cash flow", "leverage"],
+    summary: "Structures analysis from the economy to the sector and the company."
+  },
+  {
+    title: "15.433 Commodities",
+    organization: "MIT Sloan", year: 2003, sourceType: "LECTURE_NOTES", officialCourse: true,
+    methodology: "Cost of carry, storage, convenience yield, basis, contango and backwardation.",
+    limitations: "Examples are historical and focused on forwards/futures theory.",
+    dataDescription: "Commodity carry and hedge examples.", directApplicability: 10,
+    domains: ["COMMODITIES", "RISK"], tags: ["contango", "backwardation", "basis"],
+    summary: "Explains why commodity exposures require asset-class-specific treatment."
+  },
+  {
+    title: "15.433 Equity Options Part 2: Empirical Evidence",
+    organization: "MIT Sloan", year: 2003, sourceType: "LECTURE_NOTES", officialCourse: true,
+    methodology: "Comparison of Black-Scholes assumptions with implied-volatility smiles, stochastic volatility and jumps.",
+    limitations: "Historical option-market examples and simplified models require modern data before use.",
+    dataDescription: "Implied and realized volatility examples on equity-index options.", directApplicability: 8,
+    domains: ["OPTIONS", "VOLATILITY", "RISK"], tags: ["implied volatility", "skew", "jumps"],
+    summary: "Supports a future options-based stress sensor without requiring options trading."
+  },
+  {
+    title: "15.433 Hedge Funds",
+    organization: "MIT Sloan", year: 2003, sourceType: "LECTURE_NOTES", officialCourse: true,
+    methodology: "Strategy taxonomy and LTCM case study focused on leverage, convergence and liquidity.",
+    limitations: "Industry statistics are historical; the risk lessons are educational rather than predictive.",
+    dataDescription: "Historical hedge-fund and LTCM performance and loss examples.", directApplicability: 12,
+    domains: ["RISK", "LIQUIDITY", "HEDGE_FUNDS"], tags: ["LTCM", "leverage", "correlation stress"],
+    summary: "Shows how leverage and liquidity shocks can defeat apparent diversification."
+  },
+  {
+    title: "High-frequency trading in a limit order book",
+    authors: ["Marco Avellaneda", "Sasha Stoikov"], year: 2008, sourceType: "PAPER",
+    peerReviewed: true, primarySource: true, methodology: "Stochastic control of inventory and quote placement.",
+    limitations: "Market-making model is not directly applicable to a retail directional bot.",
+    dataDescription: "Analytical model and numerical examples.", reproducibility: true, directApplicability: 7,
+    domains: ["MICROSTRUCTURE", "EXECUTION"], tags: ["inventory risk", "market making"],
+    summary: "Useful inventory-risk principles, not a direct eToro trading strategy."
+  },
+  {
+    title: "Market Making via Reinforcement Learning",
+    authors: ["Thomas Spooner", "John Fearnley", "Rahul Savani", "Andreas Koukorinis"], year: 2018,
+    sourceType: "PAPER", peerReviewed: true, primarySource: true,
+    methodology: "TD learning with inventory-aware reward in a limit-order-book simulator.",
+    limitations: "Market-making setting and simulator assumptions differ from eToro execution.",
+    dataDescription: "Ten equities and five levels of order-book depth.", reproducibility: true, directApplicability: 7,
+    domains: ["REINFORCEMENT_LEARNING", "MICROSTRUCTURE"], tags: ["reward shaping", "inventory"],
+    summary: "Shows that risk-aware reward shaping can be more stable than raw incremental P&L."
+  },
+  {
+    title: "FinRL: A Deep Reinforcement Learning Library for Automated Stock Trading",
+    year: 2021, sourceType: "PAPER", primarySource: true,
+    methodology: "Environment-agent-application architecture with market frictions and DRL algorithms.",
+    limitations: "Research framework; simulated success does not imply safe LIVE deployment.",
+    dataDescription: "Historical financial datasets and backtests.", reproducibility: true, directApplicability: 8,
+    domains: ["REINFORCEMENT_LEARNING", "BACKTEST"], tags: ["PPO", "SAC", "paper sandbox"],
+    summary: "Architecture inspiration for a strictly isolated RL laboratory."
+  },
+  {
+    title: "Soft Actor-Critic Algorithms and Applications",
+    authors: ["Tuomas Haarnoja", "Aurick Zhou", "Kristian Hartikainen", "George Tucker", "Sehoon Ha", "Jie Tan", "Vikash Kumar", "Henry Zhu", "Abhishek Gupta", "Pieter Abbeel", "Sergey Levine"],
+    year: 2018, sourceType: "PAPER", peerReviewed: true, primarySource: true,
+    methodology: "Off-policy maximum-entropy actor-critic with automatic temperature tuning.",
+    limitations: "General control algorithm; financial use requires a validated environment and reward.",
+    dataDescription: "Continuous-control benchmark experiments.", reproducibility: true, directApplicability: 5,
+    domains: ["REINFORCEMENT_LEARNING"], tags: ["SAC", "entropy"],
+    summary: "Potential RL algorithm for a future sandbox, never direct LIVE learning."
+  },
+  {
+    title: "Proximal Policy Optimization Algorithms",
+    authors: ["John Schulman", "Filip Wolski", "Prafulla Dhariwal", "Alec Radford", "Oleg Klimov"],
+    year: 2017, sourceType: "PAPER", primarySource: true,
+    methodology: "Clipped surrogate objective and repeated minibatch optimization.",
+    limitations: "General RL algorithm and sensitive to environment design.",
+    dataDescription: "Simulated control benchmarks.", reproducibility: true, directApplicability: 5,
+    domains: ["REINFORCEMENT_LEARNING"], tags: ["PPO", "clipped objective"],
+    summary: "Candidate algorithm for controlled experiments only."
+  },
+  {
+    title: "Consistent Time Travel for Realistic Interactions with Historical Data",
+    authors: ["Vincent Ragel", "Damien Challet"], year: 2024, sourceType: "PAPER", primarySource: true,
+    methodology: "Event-level historical replay designed to preserve interaction and market-impact consistency.",
+    limitations: "Requires detailed event data unavailable in the current eToro setup.",
+    dataDescription: "Historical limit-order-book events.", reproducibility: true, directApplicability: 6,
+    domains: ["BACKTEST", "MICROSTRUCTURE", "REINFORCEMENT_LEARNING"], tags: ["offline RL", "market impact"],
+    summary: "Highlights why naive historical replay can create unrealistic fills and look-ahead."
+  },
+  {
+    title: "Quantum Portfolio Optimization with Investment Bands and Target Volatility",
+    authors: ["Samuel Palmer", "Serkan Sahin", "Rodrigo Hernández", "Samuel Mugel", "Román Orús"],
+    year: 2021, sourceType: "PAPER", primarySource: true,
+    methodology: "QUBO formulation of portfolio bands and target volatility with hybrid annealing.",
+    limitations: "Quantum advantage is not established; historical period and constraints influence results.",
+    dataDescription: "S&P 100 and S&P 500 historical data.", reproducibility: true, directApplicability: 9,
+    domains: ["QUANTUM", "PORTFOLIO", "ALLOCATION"], tags: ["QUBO", "investment bands", "target volatility"],
+    summary: "Classical constraint formulation is useful now; quantum claims remain experimental."
+  },
+  {
+    title: "A Structured Survey of Quantum Computing for the Financial Industry",
+    authors: ["Franco D. Albareti", "Thomas Ankenbrand", "Denis Bieri", "Esther Hänggi", "Damian Lötscher", "Stefan Stettler", "Marcel Schöngens"],
+    year: 2022, sourceType: "SURVEY", peerReviewed: true,
+    methodology: "Layered review of finance use cases, algorithms and quantum hardware.",
+    limitations: "Most practical advantages remain unproven and hardware-constrained.",
+    dataDescription: "Structured review of published use cases.", directApplicability: 4,
+    domains: ["QUANTUM"], tags: ["QAOA", "VQE", "QAE"],
+    summary: "Places quantum finance in a long-term research track, not current production."
+  }
+]);
+
+const BUILTIN_RESEARCH_EVIDENCE = Object.freeze([
+  {
+    sourceTitle: "The Deflated Sharpe Ratio",
+    claim: "Selecting the best result after many strategy trials inflates the observed Sharpe ratio; validation must account for multiple testing and non-normal returns.",
+    domain: "BACKTEST_VALIDATION", tags: ["Deflated Sharpe", "multiple testing"],
+    applicability: "Require trial registry and adjusted performance before strategy promotion.",
+    limitations: "The correction depends on the estimated number and dependence of trials."
+  },
+  {
+    sourceTitle: "Advances in Financial Machine Learning",
+    claim: "Temporal leakage can be reduced with purged cross-validation, embargo and event-aware sampling rather than ordinary random cross-validation.",
+    domain: "BACKTEST_VALIDATION", tags: ["purged CV", "embargo"],
+    applicability: "Use in StrategyLab and future Research Experiment Agent.",
+    limitations: "Implementation must reflect the actual label horizon and overlapping samples."
+  },
+  {
+    sourceTitle: "15.433 Active Portfolio Management",
+    claim: "Portfolio performance should be decomposed into strategic allocation, timing, security selection and interaction effects against an explicit benchmark.",
+    domain: "PORTFOLIO_PERFORMANCE", tags: ["attribution", "benchmark"],
+    applicability: "Use in LivePerformanceAttributionAgent and allocation reviews.",
+    limitations: "Attribution does not prove that future active decisions will add value."
+  },
+  {
+    sourceTitle: "15.433 Risk Management",
+    claim: "Market, credit, liquidity, operational and systemic risks require distinct controls, with special attention to extreme losses and funding/liquidity discontinuities.",
+    domain: "RISK_LIQUIDITY", tags: ["operational risk", "circuit breaker"],
+    applicability: "Map API failures, duplicate orders and stale state to operational-risk controls.",
+    limitations: "Thresholds must be calibrated to the current portfolio and broker environment."
+  },
+  {
+    sourceTitle: "Market Microstructure and Algorithmic Trading",
+    claim: "Spread, market impact, order flow and execution timing can materially change net strategy performance even when the directional signal is unchanged.",
+    domain: "MICROSTRUCTURE_EXECUTION", tags: ["spread", "slippage", "market impact"],
+    applicability: "Keep fresh-price, spread and provider-consensus preflight checks.",
+    limitations: "The current system does not observe a full limit order book."
+  },
+  {
+    sourceTitle: "15.433 Market Efficiency",
+    claim: "Apparent anomalies are only useful when they remain exploitable systematically after risk and costs; easy historical predictability should be treated skeptically.",
+    domain: "MARKET_EFFICIENCY_TRADING", tags: ["overtrading", "anomalies"],
+    applicability: "Favor HOLD and high evidence thresholds over activity for its own sake.",
+    limitations: "Market efficiency varies by asset, horizon and implementation constraints."
+  },
+  {
+    sourceTitle: "15.433 Equity Options Part 2: Empirical Evidence",
+    claim: "Implied volatility varies across strikes and maturities, while negative-jump risk and investor aversion are especially visible in out-of-the-money puts.",
+    domain: "OPTIONS_VOLATILITY", tags: ["implied volatility", "skew", "jump risk"],
+    applicability: "Future stress indicator only; it must not become an isolated directional trade signal.",
+    limitations: "Requires reliable and current option-chain data that the present eToro setup does not provide."
+  },
+  {
+    sourceTitle: "15.433 Hedge Funds",
+    claim: "LTCM illustrates that leverage, crowded convergence trades and disappearing liquidity can make many apparently diversified positions lose together.",
+    domain: "RISK_LIQUIDITY_HEDGE_FUNDS", tags: ["LTCM", "correlation stress", "leverage"],
+    applicability: "Support no-leverage policy, correlation stress tests and liquidity circuit breakers.",
+    limitations: "A historical case does not provide a real-time probability of crisis."
+  },
+  {
+    sourceTitle: "Quantum Portfolio Optimization with Investment Bands and Target Volatility",
+    claim: "Minimum and maximum investment bands plus a volatility target can encode diversification and prevent corner solutions in constrained portfolio optimization.",
+    domain: "PORTFOLIO_ALLOCATION", tags: ["bands", "target volatility", "QUBO"],
+    applicability: "Test the classical constrained formulation in PortfolioAllocationEngine.",
+    limitations: "No production quantum advantage is established."
+  },
+  {
+    sourceTitle: "Market Making via Reinforcement Learning",
+    claim: "A reward that explicitly penalizes inventory and asymmetric risk can be more stable than raw incremental P&L in an RL trading environment.",
+    domain: "REINFORCEMENT_LEARNING", tags: ["reward shaping", "inventory"],
+    applicability: "Future isolated RL sandbox only.",
+    limitations: "The paper studies market making, not the current directional eToro bot."
+  },
+  {
+    sourceTitle: "Consistent Time Travel for Realistic Interactions with Historical Data",
+    claim: "Historical simulations that ignore the interaction between actions, fills, latency and market impact can create unrealistic offline-RL results.",
+    domain: "BACKTEST_MICROSTRUCTURE", tags: ["offline RL", "realistic replay"],
+    applicability: "Reject naive fill assumptions in future RL experiments.",
+    limitations: "Event-level data required by the method are not currently available."
+  },
+  {
+    sourceTitle: "A Structured Survey of Quantum Computing for the Financial Industry",
+    claim: "Quantum finance use cases remain constrained by hardware, data loading and unclear end-to-end advantage; current production should rely on classical benchmarks.",
+    domain: "QUANTUM_RESEARCH", tags: ["classical benchmark", "hardware limits"],
+    applicability: "Keep quantum work outside LIVE and demand classical comparison.",
+    limitations: "Quantum hardware and algorithms may evolve, so conclusions require future reassessment."
+  }
+]);
+
+function seedResearchKnowledgeLibrary({ force = false } = {}) {
+  if (!RESEARCH_KNOWLEDGE_ENABLED || !RESEARCH_SEED_LIBRARY_ENABLED) {
+    return { seeded: false, reason: "disabled", sourcesCreated: 0, evidenceCreated: 0 };
+  }
+  let sourcesCreated = 0;
+  let evidenceCreated = 0;
+  for (const source of BUILTIN_RESEARCH_SOURCES) {
+    const alreadyPresent = runtimeState.researchSources.some((entry) =>
+      entry.title === source.title && Number(entry.year || 0) === Number(source.year || 0)
+    );
+    if (alreadyPresent) continue;
+    const result = upsertResearchSource({ ...source, seeded: true }, { seeded: true });
+    if (result.created) sourcesCreated += 1;
+  }
+  for (const item of BUILTIN_RESEARCH_EVIDENCE) {
+    const source = runtimeState.researchSources.find((entry) => entry.title === item.sourceTitle);
+    if (!source) continue;
+    const alreadyPresent = runtimeState.researchEvidence.some((entry) =>
+      entry.claim === item.claim && (entry.sourceIds || []).includes(source.id)
+    );
+    if (alreadyPresent) continue;
+    const result = upsertResearchEvidence({
+      ...item,
+      sourceIds: [source.id],
+      seeded: true
+    }, { seeded: true });
+    if (result.created) evidenceCreated += 1;
+  }
+  const generated = force || runtimeState.researchHypotheses.length === 0
+    ? generateResearchHypothesesFromEvidence({ limit: 8 })
+    : [];
+  const report = buildResearchKnowledgeReport();
+  addResearchEvent("SEED_LIBRARY_READY", {
+    sourcesCreated,
+    evidenceCreated,
+    hypothesesGenerated: generated.length,
+    force
+  });
+  return {
+    seeded: true,
+    sourcesCreated,
+    evidenceCreated,
+    hypothesesGenerated: generated.length,
+    report
+  };
+}
+
+
+// -----------------------------------------------------------------------------
+// v10.17 — Data Quality & Scientific Backtesting
+// -----------------------------------------------------------------------------
+
+function candleTimestampForQuality(candle) {
+  const raw = candle?.timestamp ?? normalizeCandleDate(candle);
+  if (Number.isFinite(Number(raw))) {
+    const number = Number(raw);
+    return number > 100000000000 ? number : number * 1000;
+  }
+  const parsed = raw ? new Date(raw).getTime() : NaN;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function compactDataQualityReport(report) {
+  if (!report || typeof report !== "object") return null;
+  return {
+    id: report.id || null,
+    generatedAt: report.generatedAt || null,
+    asset: report.asset || null,
+    interval: report.interval || null,
+    source: report.source || null,
+    provider: report.provider || null,
+    verdict: report.verdict || "UNKNOWN",
+    score: report.score ?? null,
+    originalCount: report.originalCount ?? 0,
+    cleanCount: report.cleanCount ?? 0,
+    firstDate: report.firstDate || null,
+    lastDate: report.lastDate || null,
+    expectedIntervalMinutes: report.expectedIntervalMinutes ?? null,
+    coverageDays: report.coverageDays ?? null,
+    issues: report.issues || {},
+    blockingReasons: report.blockingReasons || [],
+    warnings: report.warnings || [],
+    futureSafe: report.futureSafe !== false,
+    chronologySafe: report.chronologySafe !== false,
+    usableForBacktest: Boolean(report.usableForBacktest),
+    fingerprint: report.fingerprint || null
+  };
+}
+
+function inferExpectedIntervalMs(candles) {
+  const timestamps = (candles || [])
+    .map(candleTimestampForQuality)
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+  const deltas = [];
+  for (let index = 1; index < timestamps.length; index += 1) {
+    const delta = timestamps[index] - timestamps[index - 1];
+    if (delta > 0) deltas.push(delta);
+  }
+  if (!deltas.length) return null;
+  const sorted = [...deltas].sort((a, b) => a - b);
+  const lowerHalf = sorted.slice(0, Math.max(1, Math.ceil(sorted.length * 0.7)));
+  return lowerHalf[Math.floor(lowerHalf.length / 2)] || sorted[Math.floor(sorted.length / 2)] || null;
+}
+
+function auditHistoricalCandles(asset, candles, metadata = {}) {
+  const generatedAt = nowIso();
+  const rows = Array.isArray(candles) ? candles : [];
+  const originalCount = rows.length;
+  const nowMs = Date.now();
+  const futureToleranceMs = DATA_QUALITY_FUTURE_TOLERANCE_MINUTES * 60 * 1000;
+  const expectedIntervalMs = inferExpectedIntervalMs(rows);
+  const seen = new Set();
+  const cleanMap = new Map();
+  let invalidTimestampCount = 0;
+  let invalidOhlcCount = 0;
+  let duplicateCount = 0;
+  let outOfOrderCount = 0;
+  let futureCount = 0;
+  let missingVolumeCount = 0;
+  let extremeReturnCount = 0;
+  let largeGapCount = 0;
+  let priorInputTimestamp = null;
+
+  for (const candle of rows) {
+    const timestamp = candleTimestampForQuality(candle);
+    if (!Number.isFinite(timestamp)) {
+      invalidTimestampCount += 1;
+      continue;
+    }
+    if (priorInputTimestamp !== null && timestamp < priorInputTimestamp) outOfOrderCount += 1;
+    priorInputTimestamp = timestamp;
+    if (timestamp > nowMs + futureToleranceMs) futureCount += 1;
+
+    const open = getFirstNumber(candle, ["open", "Open"]);
+    const high = getFirstNumber(candle, ["high", "High"]);
+    const low = getFirstNumber(candle, ["low", "Low"]);
+    const close = getFirstNumber(candle, ["close", "Close"]);
+    const volume = getFirstNumber(candle, ["volume", "Volume"]);
+    const prices = [open, high, low, close];
+    const validPrices = prices.every((value) => Number.isFinite(value) && value > 0);
+    const validEnvelope = validPrices && high >= low && high >= Math.max(open, close) && low <= Math.min(open, close);
+    if (!validEnvelope) {
+      invalidOhlcCount += 1;
+      continue;
+    }
+    if (!Number.isFinite(volume)) missingVolumeCount += 1;
+    const key = String(timestamp);
+    if (seen.has(key)) duplicateCount += 1;
+    seen.add(key);
+    cleanMap.set(key, {
+      ...candle,
+      asset: candle.asset || asset,
+      date: candle.date || new Date(timestamp).toISOString(),
+      timestamp,
+      open,
+      high,
+      low,
+      close,
+      volume: Number.isFinite(volume) ? volume : null
+    });
+  }
+
+  const cleanedCandles = [...cleanMap.values()].sort((a, b) => a.timestamp - b.timestamp);
+  const extremeThresholdPct = CRYPTO_ASSETS.has(asset) ? 85 : 55;
+  for (let index = 1; index < cleanedCandles.length; index += 1) {
+    const previous = cleanedCandles[index - 1];
+    const current = cleanedCandles[index];
+    const returnPct = previous.close > 0 ? Math.abs(((current.close - previous.close) / previous.close) * 100) : 0;
+    if (returnPct > extremeThresholdPct) extremeReturnCount += 1;
+    if (expectedIntervalMs && current.timestamp - previous.timestamp > expectedIntervalMs * DATA_QUALITY_MAX_GAP_MULTIPLIER) {
+      largeGapCount += 1;
+    }
+  }
+
+  const invalidCount = invalidTimestampCount + invalidOhlcCount;
+  const duplicatePct = originalCount ? (duplicateCount / originalCount) * 100 : 100;
+  const invalidPct = originalCount ? (invalidCount / originalCount) * 100 : 100;
+  const outOfOrderPct = originalCount ? (outOfOrderCount / originalCount) * 100 : 0;
+  const cleanCount = cleanedCandles.length;
+  const firstTimestamp = cleanedCandles[0]?.timestamp ?? null;
+  const lastTimestamp = cleanedCandles[cleanedCandles.length - 1]?.timestamp ?? null;
+  const coverageDays = Number.isFinite(firstTimestamp) && Number.isFinite(lastTimestamp)
+    ? roundNumber((lastTimestamp - firstTimestamp) / 86400000, 2)
+    : null;
+  const latestAgeHours = Number.isFinite(lastTimestamp)
+    ? roundNumber(Math.max(0, nowMs - lastTimestamp) / 3600000, 2)
+    : null;
+
+  let score = 100;
+  score -= Math.min(35, invalidPct * 5);
+  score -= Math.min(20, duplicatePct * 4);
+  score -= Math.min(15, outOfOrderPct * 2);
+  score -= Math.min(20, futureCount * 10);
+  score -= Math.min(12, extremeReturnCount * 3);
+  score -= Math.min(12, largeGapCount * 1.5);
+  if (cleanCount < DATA_QUALITY_MIN_CANDLES) score -= 25;
+  if (!expectedIntervalMs) score -= 10;
+  score = Math.round(clampNumber(score, 0, 100));
+
+  const blockingReasons = [];
+  const warnings = [];
+  if (!DATA_QUALITY_ENABLED) warnings.push("DATA_QUALITY_DISABLED");
+  if (cleanCount < DATA_QUALITY_MIN_CANDLES) blockingReasons.push("INSUFFICIENT_CANDLES");
+  if (invalidPct > DATA_QUALITY_MAX_INVALID_PCT) blockingReasons.push("TOO_MANY_INVALID_ROWS");
+  if (duplicatePct > DATA_QUALITY_MAX_DUPLICATE_PCT) blockingReasons.push("TOO_MANY_DUPLICATES");
+  if (futureCount > 0) blockingReasons.push("FUTURE_DATED_CANDLES");
+  if (!expectedIntervalMs) blockingReasons.push("INTERVAL_NOT_INFERABLE");
+  if (score < DATA_QUALITY_MIN_SCORE) blockingReasons.push("QUALITY_SCORE_TOO_LOW");
+  if (outOfOrderCount > 0) warnings.push("INPUT_NOT_CHRONOLOGICAL");
+  if (largeGapCount > 0) warnings.push("LARGE_TIME_GAPS");
+  if (extremeReturnCount > 0) warnings.push("EXTREME_RETURNS_TO_REVIEW");
+  if (missingVolumeCount > 0) warnings.push("MISSING_VOLUME");
+
+  const hardFailure = blockingReasons.some((reason) => [
+    "INSUFFICIENT_CANDLES",
+    "TOO_MANY_INVALID_ROWS",
+    "TOO_MANY_DUPLICATES",
+    "FUTURE_DATED_CANDLES",
+    "INTERVAL_NOT_INFERABLE",
+    "QUALITY_SCORE_TOO_LOW"
+  ].includes(reason));
+  const verdict = hardFailure ? "FAIL" : (warnings.length ? "WARN" : "PASS");
+  const report = {
+    id: randomUUID(),
+    generatedAt,
+    version: VERSION,
+    name: "DataQualityAgent",
+    asset,
+    interval: metadata.interval || cleanedCandles[0]?.interval || null,
+    source: metadata.source || metadata.selectedSource || null,
+    provider: metadata.provider || metadata.selectedProvider || null,
+    verdict,
+    score,
+    originalCount,
+    cleanCount,
+    removedCount: Math.max(0, originalCount - cleanCount),
+    firstDate: firstTimestamp ? new Date(firstTimestamp).toISOString() : null,
+    lastDate: lastTimestamp ? new Date(lastTimestamp).toISOString() : null,
+    expectedIntervalMinutes: expectedIntervalMs ? roundNumber(expectedIntervalMs / 60000, 4) : null,
+    coverageDays,
+    latestAgeHours,
+    issues: {
+      invalidTimestampCount,
+      invalidOhlcCount,
+      duplicateCount,
+      duplicatePct: roundNumber(duplicatePct, 4),
+      invalidPct: roundNumber(invalidPct, 4),
+      outOfOrderCount,
+      outOfOrderPct: roundNumber(outOfOrderPct, 4),
+      futureCount,
+      missingVolumeCount,
+      extremeReturnCount,
+      largeGapCount
+    },
+    blockingReasons,
+    warnings,
+    futureSafe: futureCount === 0,
+    chronologySafe: outOfOrderCount === 0,
+    usableForBacktest: DATA_QUALITY_ENABLED
+      ? (!hardFailure || DATA_QUALITY_ENFORCEMENT_MODE === "advisory")
+      : true,
+    enforcementMode: DATA_QUALITY_ENFORCEMENT_MODE,
+    fingerprint: sha256(canonicalJson(cleanedCandles.map((candle) => [
+      candle.timestamp,
+      candle.open,
+      candle.high,
+      candle.low,
+      candle.close,
+      candle.volume
+    ]))),
+    governance: {
+      analysisOnly: true,
+      canPlaceOrder: false,
+      canModifyLiveStrategy: false,
+      pointInTimeRequirement: true
+    }
+  };
+  Object.defineProperty(report, "cleanedCandles", {
+    value: cleanedCandles,
+    enumerable: false,
+    writable: false
+  });
+  return report;
+}
+
+function recordDataQualityReport(report) {
+  const compact = compactDataQualityReport(report);
+  if (!compact) return null;
+  const key = `${compact.asset || "UNKNOWN"}|${compact.interval || "UNKNOWN"}|${compact.provider || compact.source || "UNKNOWN"}`;
+  runtimeState.lastDataQualityReport = compact;
+  runtimeState.dataQualityBySeries[key] = compact;
+  runtimeState.dataQualityHistory.unshift(compact);
+  runtimeState.dataQualityHistory = runtimeState.dataQualityHistory.slice(0, DATA_QUALITY_HISTORY_LIMIT);
+  addAudit("DATA_QUALITY_AUDIT_COMPLETED", {
+    asset: compact.asset,
+    verdict: compact.verdict,
+    score: compact.score,
+    cleanCount: compact.cleanCount,
+    blockingReasons: compact.blockingReasons
+  });
+  scheduleSave();
+  return compact;
+}
+
+function buildDataQualityStatus() {
+  const reports = runtimeState.dataQualityHistory || [];
+  const pass = reports.filter((item) => item.verdict === "PASS").length;
+  const warn = reports.filter((item) => item.verdict === "WARN").length;
+  const fail = reports.filter((item) => item.verdict === "FAIL").length;
+  const scores = reports.map((item) => Number(item.score)).filter(Number.isFinite);
+  return {
+    name: "DataQualityAgent",
+    version: VERSION,
+    generatedAt: nowIso(),
+    enabled: DATA_QUALITY_ENABLED,
+    enforcementMode: DATA_QUALITY_ENFORCEMENT_MODE,
+    thresholds: {
+      minimumScore: DATA_QUALITY_MIN_SCORE,
+      minimumCandles: DATA_QUALITY_MIN_CANDLES,
+      maximumDuplicatePct: DATA_QUALITY_MAX_DUPLICATE_PCT,
+      maximumInvalidPct: DATA_QUALITY_MAX_INVALID_PCT,
+      maximumGapMultiplier: DATA_QUALITY_MAX_GAP_MULTIPLIER,
+      futureToleranceMinutes: DATA_QUALITY_FUTURE_TOLERANCE_MINUTES
+    },
+    counts: { total: reports.length, pass, warn, fail },
+    averageScore: scores.length ? roundNumber(average(scores), 2) : null,
+    lastReport: runtimeState.lastDataQualityReport || null,
+    recent: reports.slice(0, 20),
+    governance: { analysisOnly: true, directLiveInfluence: false }
+  };
+}
+
+function enforceDataQualityForBacktest(report) {
+  if (!DATA_QUALITY_ENABLED || DATA_QUALITY_ENFORCEMENT_MODE !== "required") return true;
+  if (report?.verdict === "FAIL" || report?.usableForBacktest === false) {
+    const reasons = (report?.blockingReasons || []).join(", ") || "qualité insuffisante";
+    throw new Error(`Backtest bloqué par DataQualityAgent pour ${report?.asset || "série"}: ${reasons}`);
+  }
+  return true;
+}
+
+function compactScientificBacktestReport(report) {
+  if (!report || typeof report !== "object") return null;
+  return {
+    id: report.id || null,
+    fingerprint: report.fingerprint || null,
+    duplicateOf: report.duplicateOf || null,
+    generatedAt: report.generatedAt || null,
+    type: report.type || null,
+    assets: report.assets || [],
+    verdict: report.verdict || "UNKNOWN",
+    trialNumber: report.trialNumber ?? null,
+    trainPct: report.protocol?.trainPct ?? null,
+    embargoCandles: report.protocol?.embargoCandles ?? null,
+    testStart: report.protocol?.testStart || null,
+    testCandles: report.protocol?.testCandles ?? null,
+    dataQuality: report.dataQuality || null,
+    baselineMetrics: report.baseline?.metrics || null,
+    stressedMetrics: report.costStress?.metrics || null,
+    walkForwardSummary: report.walkForward?.summary || null,
+    checks: report.checks || {},
+    blockingReasons: report.blockingReasons || [],
+    warnings: report.warnings || [],
+    analysisOnly: true
+  };
+}
+
+function scientificBacktestFingerprint(payload) {
+  return sha256(canonicalJson({
+    version: VERSION,
+    type: payload.type,
+    assets: payload.assets,
+    dataFingerprints: payload.dataFingerprints,
+    config: payload.config,
+    protocol: payload.protocol
+  }));
+}
+
+function registerScientificBacktest(report) {
+  const compact = compactScientificBacktestReport(report);
+  const previous = (runtimeState.scientificBacktestRegistry || []).find((item) => item.fingerprint === compact.fingerprint);
+  compact.duplicateOf = previous?.id || compact.duplicateOf || null;
+  runtimeState.scientificBacktestRegistry.unshift(compact);
+  runtimeState.scientificBacktestRegistry = runtimeState.scientificBacktestRegistry.slice(0, SCIENTIFIC_BACKTEST_REGISTRY_LIMIT);
+  runtimeState.lastScientificBacktestReport = compact;
+  addAudit("SCIENTIFIC_BACKTEST_REGISTERED", {
+    id: compact.id,
+    type: compact.type,
+    assets: compact.assets,
+    verdict: compact.verdict,
+    fingerprint: compact.fingerprint,
+    duplicateOf: compact.duplicateOf
+  });
+  scheduleSave();
+  return compact;
+}
+
+function scientificBacktestStatus() {
+  const registry = runtimeState.scientificBacktestRegistry || [];
+  const pass = registry.filter((item) => item.verdict === "PASS").length;
+  const warn = registry.filter((item) => item.verdict === "WARN").length;
+  const fail = registry.filter((item) => item.verdict === "FAIL").length;
+  const uniqueFingerprints = new Set(registry.map((item) => item.fingerprint).filter(Boolean)).size;
+  return {
+    name: "ScientificBacktestRegistry",
+    version: VERSION,
+    generatedAt: nowIso(),
+    enabled: SCIENTIFIC_BACKTEST_ENABLED,
+    counts: {
+      totalTrials: registry.length,
+      uniqueTrials: uniqueFingerprints,
+      duplicateTrials: Math.max(0, registry.length - uniqueFingerprints),
+      pass,
+      warn,
+      fail
+    },
+    protocol: {
+      chronologicalHoldout: true,
+      trainPct: SCIENTIFIC_BACKTEST_TRAIN_PCT,
+      embargoCandles: SCIENTIFIC_BACKTEST_EMBARGO_CANDLES,
+      minimumTestCandles: SCIENTIFIC_BACKTEST_MIN_TEST_CANDLES,
+      costStressMultiplier: SCIENTIFIC_BACKTEST_COST_STRESS_MULTIPLIER,
+      walkForwardRequired: SCIENTIFIC_BACKTEST_REQUIRE_WALK_FORWARD,
+      noLookahead: true,
+      dataQualityRequired: DATA_QUALITY_ENFORCEMENT_MODE === "required"
+    },
+    lastReport: runtimeState.lastScientificBacktestReport || null,
+    recent: registry.slice(0, 20),
+    governance: { analysisOnly: true, directLiveInfluence: false, autoPromotion: false }
+  };
+}
+
+function buildScientificVerdict({ dataReports, baseline, costStress, walkForward, testCandles }) {
+  const blockingReasons = [];
+  const warnings = [];
+  const qualityFailures = (dataReports || []).filter((item) => item.verdict === "FAIL");
+  if (qualityFailures.length) blockingReasons.push("DATA_QUALITY_FAILURE");
+  if (!baseline?.validation?.lookaheadSafe) blockingReasons.push("LOOKAHEAD_CHECK_FAILED");
+  if (Number(testCandles || 0) < SCIENTIFIC_BACKTEST_MIN_TEST_CANDLES) blockingReasons.push("INSUFFICIENT_HOLDOUT");
+  if (Number(costStress?.metrics?.maxDrawdownPct || 0) > SCIENTIFIC_BACKTEST_MAX_DRAWDOWN_PCT) {
+    blockingReasons.push("COST_STRESS_DRAWDOWN_TOO_HIGH");
+  }
+  if (Number(costStress?.metrics?.totalReturnPct || 0) < -25) blockingReasons.push("COST_STRESS_COLLAPSE");
+  if (Number(baseline?.metrics?.closedTrades || 0) < SCIENTIFIC_BACKTEST_MIN_CLOSED_TRADES) warnings.push("TOO_FEW_CLOSED_TRADES");
+  if (SCIENTIFIC_BACKTEST_REQUIRE_WALK_FORWARD) {
+    if (!walkForward || Number(walkForward?.summary?.folds || 0) < 2) blockingReasons.push("WALK_FORWARD_MISSING");
+    else if (Number(walkForward?.summary?.positiveFoldPct || 0) < 40) warnings.push("LOW_WALK_FORWARD_STABILITY");
+  }
+  if (baseline?.validation?.status === "FAIL") blockingReasons.push("BASELINE_VALIDATION_FAILED");
+  const verdict = blockingReasons.length ? "FAIL" : (warnings.length ? "WARN" : "PASS");
+  return { verdict, blockingReasons: [...new Set(blockingReasons)], warnings: [...new Set(warnings)] };
+}
+
+function buildHoldoutProtocol(candles, overrides = {}) {
+  const sorted = (candles || [])
+    .filter(looksLikeCandle)
+    .map((candle) => ({ ...candle, timestamp: candleTimestampForQuality(candle) }))
+    .filter((candle) => Number.isFinite(candle.timestamp))
+    .sort((a, b) => a.timestamp - b.timestamp);
+  const trainPct = Math.max(50, Math.min(85, Number(overrides.trainPct || SCIENTIFIC_BACKTEST_TRAIN_PCT)));
+  const embargoCandles = Math.max(0, Math.min(30, Number(overrides.embargoCandles ?? SCIENTIFIC_BACKTEST_EMBARGO_CANDLES)));
+  const rawTrainEnd = Math.floor(sorted.length * trainPct / 100);
+  const testStartIndex = Math.min(sorted.length - 1, rawTrainEnd + embargoCandles);
+  const testStartTimestamp = sorted[testStartIndex]?.timestamp || null;
+  return {
+    sorted,
+    trainPct,
+    trainCandles: rawTrainEnd,
+    embargoCandles,
+    embargoStart: sorted[rawTrainEnd]?.date || null,
+    testStartIndex,
+    testStart: sorted[testStartIndex]?.date || null,
+    testStartTimestamp,
+    testCandles: Math.max(0, sorted.length - testStartIndex),
+    totalCandles: sorted.length,
+    noLookaheadPolicy: "Signaux calculés avec le passé; évaluation uniquement après le holdout et l'embargo."
+  };
+}
+
+async function runScientificAssetBacktest(asset, options = {}) {
+  if (!SCIENTIFIC_BACKTEST_ENABLED) throw new Error("Scientific Backtesting désactivé");
+  const normalizedAsset = String(asset || "").toUpperCase();
+  if (!WATCHLIST[normalizedAsset]) throw new Error(`Actif invalide: ${normalizedAsset}`);
+  const count = Math.min(1000, Math.max(180, Number(options.count || Math.max(BACKTEST_DEFAULT_CANDLES, 500))));
+  const historical = await getHistoricalCandles(normalizedAsset, options.interval || "OneDay", count, Boolean(options.force));
+  const quality = auditHistoricalCandles(normalizedAsset, historical.candles, {
+    interval: options.interval || "OneDay",
+    selectedProvider: historical.selectedProvider,
+    selectedSource: historical.selectedSource
+  });
+  recordDataQualityReport(quality);
+  enforceDataQualityForBacktest(quality);
+  const protocol = buildHoldoutProtocol(quality.cleanedCandles, options);
+  if (protocol.testCandles < SCIENTIFIC_BACKTEST_MIN_TEST_CANDLES) {
+    throw new Error(`Holdout insuffisant pour ${normalizedAsset}: ${protocol.testCandles} bougies de test`);
+  }
+  const baseOverrides = {
+    ...options,
+    startTradingTimestamp: protocol.testStartTimestamp,
+    benchmarkAsset: options.benchmarkAsset || normalizedAsset
+  };
+  delete baseOverrides.force;
+  delete baseOverrides.count;
+  delete baseOverrides.interval;
+  delete baseOverrides.trainPct;
+  delete baseOverrides.embargoCandles;
+  const baseline = simulateAssetBacktest(normalizedAsset, protocol.sorted, baseOverrides);
+  const normalizedConfig = normalizeBacktestConfig(baseOverrides);
+  const stressedOverrides = {
+    ...baseOverrides,
+    feePct: normalizedConfig.feePct * SCIENTIFIC_BACKTEST_COST_STRESS_MULTIPLIER,
+    slippageBps: normalizedConfig.slippageBps * SCIENTIFIC_BACKTEST_COST_STRESS_MULTIPLIER
+  };
+  const costStress = simulateAssetBacktest(normalizedAsset, protocol.sorted, stressedOverrides);
+  const walkForward = SCIENTIFIC_BACKTEST_REQUIRE_WALK_FORWARD
+    ? simulateWalkForwardBacktest(normalizedAsset, protocol.sorted, options)
+    : null;
+  const verdictInfo = buildScientificVerdict({
+    dataReports: [quality],
+    baseline,
+    costStress,
+    walkForward,
+    testCandles: protocol.testCandles
+  });
+  const dataFingerprints = { [normalizedAsset]: quality.fingerprint };
+  const fingerprint = scientificBacktestFingerprint({
+    type: "ASSET_HOLDOUT",
+    assets: [normalizedAsset],
+    dataFingerprints,
+    config: baseline.config,
+    protocol: {
+      trainPct: protocol.trainPct,
+      embargoCandles: protocol.embargoCandles,
+      testStart: protocol.testStart,
+      testCandles: protocol.testCandles
+    }
+  });
+  const sameFingerprintCount = (runtimeState.scientificBacktestRegistry || [])
+    .filter((item) => item.fingerprint === fingerprint).length;
+  const report = {
+    id: randomUUID(),
+    fingerprint,
+    generatedAt: nowIso(),
+    version: VERSION,
+    name: "ScientificBacktest",
+    type: "ASSET_HOLDOUT",
+    assets: [normalizedAsset],
+    trialNumber: runtimeState.scientificBacktestRegistry.length + 1,
+    repeatedIdenticalTrialNumber: sameFingerprintCount + 1,
+    protocol: {
+      trainPct: protocol.trainPct,
+      trainCandles: protocol.trainCandles,
+      embargoCandles: protocol.embargoCandles,
+      embargoStart: protocol.embargoStart,
+      testStart: protocol.testStart,
+      testCandles: protocol.testCandles,
+      totalCandles: protocol.totalCandles,
+      noLookahead: true,
+      pointInTime: true
+    },
+    dataQuality: { [normalizedAsset]: compactDataQualityReport(quality) },
+    dataSource: {
+      selectedProvider: historical.selectedProvider,
+      selectedSource: historical.selectedSource,
+      divergence: historical.divergence || null
+    },
+    baseline,
+    costStress,
+    walkForward,
+    checks: {
+      dataQualityPassed: quality.verdict !== "FAIL",
+      lookaheadSafe: Boolean(baseline.validation?.lookaheadSafe),
+      holdoutSufficient: protocol.testCandles >= SCIENTIFIC_BACKTEST_MIN_TEST_CANDLES,
+      costsIncluded: Number(baseline.costs?.feesPaid || 0) >= 0,
+      costStressRun: true,
+      walkForwardRun: Boolean(walkForward)
+    },
+    ...verdictInfo,
+    analysisOnly: true,
+    governance: {
+      canPlaceOrder: false,
+      canPromoteLive: false,
+      requiresLaterPaperAndShadowLive: true
+    }
+  };
+  persistBacktestResult(baseline);
+  registerScientificBacktest(report);
+  return report;
+}
+
+async function runScientificPortfolioBacktest(assets, options = {}) {
+  if (!SCIENTIFIC_BACKTEST_ENABLED) throw new Error("Scientific Backtesting désactivé");
+  const selected = [...new Set((assets || BACKTEST_DEFAULT_ASSETS)
+    .map((asset) => String(asset).toUpperCase())
+    .filter((asset) => WATCHLIST[asset]))].slice(0, BACKTEST_MAX_ASSETS);
+  if (!selected.length) throw new Error("Aucun actif valide");
+  const count = Math.min(1000, Math.max(180, Number(options.count || Math.max(BACKTEST_DEFAULT_CANDLES, 500))));
+  const settled = await Promise.allSettled(selected.map((asset) =>
+    getHistoricalCandles(asset, options.interval || "OneDay", count, Boolean(options.force))
+  ));
+  const series = {};
+  const dataQuality = {};
+  const dataSources = {};
+  const failures = [];
+  let commonTestStartTimestamp = null;
+  let minimumTestCandles = Infinity;
+  settled.forEach((result, index) => {
+    const asset = selected[index];
+    if (result.status !== "fulfilled") {
+      failures.push({ asset, error: result.reason?.message || String(result.reason) });
+      return;
+    }
+    const historical = result.value;
+    const quality = auditHistoricalCandles(asset, historical.candles, {
+      interval: options.interval || "OneDay",
+      selectedProvider: historical.selectedProvider,
+      selectedSource: historical.selectedSource
+    });
+    recordDataQualityReport(quality);
+    dataQuality[asset] = compactDataQualityReport(quality);
+    dataSources[asset] = {
+      selectedProvider: historical.selectedProvider,
+      selectedSource: historical.selectedSource,
+      divergence: historical.divergence || null
+    };
+    if (DATA_QUALITY_ENFORCEMENT_MODE === "required" && quality.verdict === "FAIL") {
+      failures.push({ asset, error: `DATA_QUALITY_FAIL: ${(quality.blockingReasons || []).join(", ")}` });
+      return;
+    }
+    const protocol = buildHoldoutProtocol(quality.cleanedCandles, options);
+    if (!protocol.testStartTimestamp || protocol.testCandles < SCIENTIFIC_BACKTEST_MIN_TEST_CANDLES) {
+      failures.push({ asset, error: `HOLDOUT_INSUFFICIENT: ${protocol.testCandles}` });
+      return;
+    }
+    series[asset] = protocol.sorted;
+    commonTestStartTimestamp = commonTestStartTimestamp === null
+      ? protocol.testStartTimestamp
+      : Math.max(commonTestStartTimestamp, protocol.testStartTimestamp);
+    minimumTestCandles = Math.min(minimumTestCandles, protocol.testCandles);
+  });
+  const usableAssets = Object.keys(series);
+  if (!usableAssets.length) throw new Error(`Aucune série exploitable: ${failures.map((item) => `${item.asset}:${item.error}`).join(" | ")}`);
+  const baseOverrides = { ...options, startTradingTimestamp: commonTestStartTimestamp };
+  delete baseOverrides.force;
+  delete baseOverrides.count;
+  delete baseOverrides.interval;
+  delete baseOverrides.trainPct;
+  delete baseOverrides.embargoCandles;
+  const baseline = simulatePortfolioBacktest(series, baseOverrides);
+  const normalizedConfig = normalizeBacktestConfig(baseOverrides);
+  const costStress = simulatePortfolioBacktest(series, {
+    ...baseOverrides,
+    feePct: normalizedConfig.feePct * SCIENTIFIC_BACKTEST_COST_STRESS_MULTIPLIER,
+    slippageBps: normalizedConfig.slippageBps * SCIENTIFIC_BACKTEST_COST_STRESS_MULTIPLIER
+  });
+  const walkForwardAsset = usableAssets.includes(BACKTEST_BENCHMARK_ASSET)
+    ? BACKTEST_BENCHMARK_ASSET
+    : usableAssets[0];
+  const walkForward = SCIENTIFIC_BACKTEST_REQUIRE_WALK_FORWARD
+    ? simulateWalkForwardBacktest(walkForwardAsset, series[walkForwardAsset], options)
+    : null;
+  const qualityReports = Object.values(dataQuality);
+  const verdictInfo = buildScientificVerdict({
+    dataReports: qualityReports,
+    baseline,
+    costStress,
+    walkForward,
+    testCandles: Number.isFinite(minimumTestCandles) ? minimumTestCandles : 0
+  });
+  const dataFingerprints = Object.fromEntries(qualityReports.map((item) => [item.asset, item.fingerprint]));
+  const fingerprint = scientificBacktestFingerprint({
+    type: "PORTFOLIO_HOLDOUT",
+    assets: usableAssets,
+    dataFingerprints,
+    config: baseline.config,
+    protocol: {
+      trainPct: SCIENTIFIC_BACKTEST_TRAIN_PCT,
+      embargoCandles: SCIENTIFIC_BACKTEST_EMBARGO_CANDLES,
+      testStart: commonTestStartTimestamp ? new Date(commonTestStartTimestamp).toISOString() : null,
+      testCandles: Number.isFinite(minimumTestCandles) ? minimumTestCandles : null
+    }
+  });
+  const sameFingerprintCount = (runtimeState.scientificBacktestRegistry || [])
+    .filter((item) => item.fingerprint === fingerprint).length;
+  const report = {
+    id: randomUUID(),
+    fingerprint,
+    generatedAt: nowIso(),
+    version: VERSION,
+    name: "ScientificBacktest",
+    type: "PORTFOLIO_HOLDOUT",
+    assets: usableAssets,
+    excludedAssets: failures,
+    trialNumber: runtimeState.scientificBacktestRegistry.length + 1,
+    repeatedIdenticalTrialNumber: sameFingerprintCount + 1,
+    protocol: {
+      trainPct: SCIENTIFIC_BACKTEST_TRAIN_PCT,
+      embargoCandles: SCIENTIFIC_BACKTEST_EMBARGO_CANDLES,
+      testStart: commonTestStartTimestamp ? new Date(commonTestStartTimestamp).toISOString() : null,
+      testCandles: Number.isFinite(minimumTestCandles) ? minimumTestCandles : null,
+      noLookahead: true,
+      pointInTime: true
+    },
+    dataQuality,
+    dataSources,
+    baseline,
+    costStress,
+    walkForward,
+    checks: {
+      usableAssets: usableAssets.length,
+      excludedAssets: failures.length,
+      dataQualityPassed: qualityReports.every((item) => item.verdict !== "FAIL"),
+      lookaheadSafe: Boolean(baseline.validation?.lookaheadSafe),
+      holdoutSufficient: Number(minimumTestCandles || 0) >= SCIENTIFIC_BACKTEST_MIN_TEST_CANDLES,
+      costsIncluded: Number(baseline.costs?.feesPaid || 0) >= 0,
+      costStressRun: true,
+      walkForwardRun: Boolean(walkForward)
+    },
+    ...verdictInfo,
+    analysisOnly: true,
+    governance: {
+      canPlaceOrder: false,
+      canPromoteLive: false,
+      requiresLaterPaperAndShadowLive: true
+    }
+  };
+  persistBacktestResult(baseline);
+  registerScientificBacktest(report);
+  return report;
+}
+
+
+// -----------------------------------------------------------------------------
+// v10.18 — StrategyLab : hypothèses → expériences reproductibles → tournoi
+// -----------------------------------------------------------------------------
+
+function strategyLabV2Event(type, details = {}) {
+  const event = {
+    id: `strategy-lab-event-${randomUUID()}`,
+    time: nowIso(),
+    type: researchSafeText(type, 100),
+    details
+  };
+  runtimeState.strategyLabV2Events.unshift(event);
+  runtimeState.strategyLabV2Events = runtimeState.strategyLabV2Events.slice(0, STRATEGY_LAB_V2_HISTORY_LIMIT);
+  return event;
+}
+
+function strategyLabV2SafeAssets(input, fallback = STRATEGY_LAB_V2_DEFAULT_ASSETS) {
+  const raw = Array.isArray(input) ? input : String(input || "").split(",");
+  const normalized = [...new Set(raw
+    .map((asset) => String(asset || "").trim().toUpperCase())
+    .filter((asset) => WATCHLIST[asset]))];
+  return (normalized.length ? normalized : fallback).slice(0, BACKTEST_MAX_ASSETS);
+}
+
+function strategyLabV2HypothesisText(hypothesis) {
+  const evidenceText = (hypothesis?.evidenceIds || []).map((id) => {
+    const evidence = runtimeState.researchEvidence.find((item) => item.id === id);
+    return [evidence?.claim, evidence?.domain, ...(evidence?.tags || [])].filter(Boolean).join(" ");
+  }).join(" ");
+  return [
+    hypothesis?.title,
+    hypothesis?.statement,
+    hypothesis?.expectedEffect,
+    ...(hypothesis?.failureCriteria || []),
+    ...(hypothesis?.validationRequirements || []),
+    evidenceText
+  ].filter(Boolean).join(" ").toUpperCase();
+}
+
+function classifyStrategyLabV2Hypothesis(hypothesis) {
+  const primary = [
+    hypothesis?.title,
+    hypothesis?.statement,
+    hypothesis?.expectedEffect
+  ].filter(Boolean).join(" ").toUpperCase();
+  const evidenceCorpus = (hypothesis?.evidenceIds || []).map((id) => {
+    const evidence = runtimeState.researchEvidence.find((item) => item.id === id);
+    return [evidence?.claim, evidence?.domain, ...(evidence?.tags || [])].filter(Boolean).join(" ");
+  }).join(" ").toUpperCase();
+
+  const classifyCorpus = (corpus, { allowExperimental = true } = {}) => {
+    const has = (...tokens) => tokens.some((token) => corpus.includes(token));
+    if (allowExperimental && has("QAOA", "VQE", "QUBO", "QUANTUM", "QUANTIQUE")) return STRATEGY_LAB_V2_FAMILIES.QUANTUM_SANDBOX_PLACEHOLDER;
+    if (allowExperimental && has("REINFORCEMENT", "PPO", "SAC", "TD3", "APPRENTISSAGE PAR RENFORCEMENT", "RL ISOLÉ", "RL SANDBOX")) return STRATEGY_LAB_V2_FAMILIES.RL_SANDBOX_PLACEHOLDER;
+    if (has("SUR-TRADING", "OVERTRADING", "TURNOVER", "COOLDOWN", "ROTATION")) return STRATEGY_LAB_V2_FAMILIES.LOW_TURNOVER;
+    if (has("ALLOCATION", "BANDE", "BAND", "DIVERSIFICATION", "CONCENTRATION", "TARGET VOLATILITY", "VOLATILITÉ CIBLE")) return STRATEGY_LAB_V2_FAMILIES.ALLOCATION_BANDS;
+    if (has("CORRÉLATION", "CORRELATION", "LIQUIDITÉ", "LIQUIDITY", "CIRCUIT BREAKER", "CRISE", "STRESS DE CORRÉLATION", "DRAWDOWN DE CRISE")) return STRATEGY_LAB_V2_FAMILIES.STRESS_DEFENSE;
+    if (has("VOLATILITÉ IMPLICITE", "IMPLIED VOLATILITY", "SKEW", "ATR", "RÉGIME DE VOLATILITÉ", "VOLATILITY REGIME")) return STRATEGY_LAB_V2_FAMILIES.VOLATILITY_GUARD;
+    if (has("SPREAD", "SLIPPAGE", "COÛT D’EXÉCUTION", "COÛT D'EXÉCUTION", "MICROSTRUCTURE", "MARKET IMPACT")) return STRATEGY_LAB_V2_FAMILIES.EXECUTION_FILTER;
+    if (has("BACKTEST", "VALIDATION", "OVERFITTING", "SURAPPRENTISSAGE", "EMBARGO", "MULTIPLE TESTING", "DEFLATED SHARPE", "PURGÉE", "PURGED")) return STRATEGY_LAB_V2_FAMILIES.STRICT_VALIDATION;
+    return null;
+  };
+
+  return classifyCorpus(primary, { allowExperimental: true })
+    || classifyCorpus(evidenceCorpus, { allowExperimental: false })
+    || STRATEGY_LAB_V2_FAMILIES.GENERAL_PARAMETER_SEARCH;
+}
+
+function strategyLabV2MutationTemplates(family, base) {
+  const reduceOrder = (pct) => Math.max(1, roundNumber(base.orderUsd * pct, 2));
+  const templates = {
+    [STRATEGY_LAB_V2_FAMILIES.STRICT_VALIDATION]: [
+      {},
+      { buyScoreMin: base.buyScoreMin + 2 },
+      { buyScoreMin: base.buyScoreMin + 4, sellScoreMax: base.sellScoreMax - 2 },
+      { buyScoreMin: base.buyScoreMin + 3, cashReservePct: base.cashReservePct + 5 },
+      { buyScoreMin: base.buyScoreMin + 5, orderUsd: reduceOrder(0.75) },
+      { buyScoreMin: base.buyScoreMin + 2, trailingStopPct: base.trailingStopPct - 2 }
+    ],
+    [STRATEGY_LAB_V2_FAMILIES.ALLOCATION_BANDS]: [
+      {},
+      { cashReservePct: base.cashReservePct + 5, maxHoldings: base.maxHoldings + 1 },
+      { cashReservePct: base.cashReservePct + 10, maxHoldings: base.maxHoldings + 2, orderUsd: reduceOrder(0.75) },
+      { maxHoldings: base.maxHoldings + 2, orderUsd: reduceOrder(0.65) },
+      { cashReservePct: base.cashReservePct + 5, orderUsd: reduceOrder(0.8) },
+      { maxHoldings: base.maxHoldings - 1, cashReservePct: base.cashReservePct + 8 }
+    ],
+    [STRATEGY_LAB_V2_FAMILIES.EXECUTION_FILTER]: [
+      {},
+      { buyScoreMin: base.buyScoreMin + 3, orderUsd: reduceOrder(0.8) },
+      { buyScoreMin: base.buyScoreMin + 5, orderUsd: reduceOrder(0.65) },
+      { buyScoreMin: base.buyScoreMin + 4, cashReservePct: base.cashReservePct + 5 },
+      { buyScoreMin: base.buyScoreMin + 2, trailingStopPct: base.trailingStopPct - 2 },
+      { buyScoreMin: base.buyScoreMin + 6, maxHoldings: base.maxHoldings - 1 }
+    ],
+    [STRATEGY_LAB_V2_FAMILIES.LOW_TURNOVER]: [
+      {},
+      { buyScoreMin: base.buyScoreMin + 4, sellScoreMax: base.sellScoreMax - 3 },
+      { buyScoreMin: base.buyScoreMin + 6, sellScoreMax: base.sellScoreMax - 5 },
+      { buyScoreMin: base.buyScoreMin + 4, trailingStopPct: base.trailingStopPct + 3 },
+      { sellScoreMax: base.sellScoreMax - 4, stopLossPct: base.stopLossPct + 2 },
+      { buyScoreMin: base.buyScoreMin + 5, cashReservePct: base.cashReservePct + 5 }
+    ],
+    [STRATEGY_LAB_V2_FAMILIES.STRESS_DEFENSE]: [
+      {},
+      { cashReservePct: base.cashReservePct + 10, buyScoreMin: base.buyScoreMin + 3 },
+      { stopLossPct: base.stopLossPct - 2, trailingStopPct: base.trailingStopPct - 2 },
+      { cashReservePct: base.cashReservePct + 15, orderUsd: reduceOrder(0.65) },
+      { buyScoreMin: base.buyScoreMin + 5, stopLossPct: base.stopLossPct - 3 },
+      { maxHoldings: base.maxHoldings - 1, cashReservePct: base.cashReservePct + 12 }
+    ],
+    [STRATEGY_LAB_V2_FAMILIES.VOLATILITY_GUARD]: [
+      {},
+      { buyScoreMin: base.buyScoreMin + 3, orderUsd: reduceOrder(0.8) },
+      { buyScoreMin: base.buyScoreMin + 5, cashReservePct: base.cashReservePct + 8 },
+      { stopLossPct: base.stopLossPct - 2, trailingStopPct: base.trailingStopPct - 2 },
+      { orderUsd: reduceOrder(0.6), maxHoldings: base.maxHoldings + 1 },
+      { buyScoreMin: base.buyScoreMin + 4, stopLossPct: base.stopLossPct - 3, cashReservePct: base.cashReservePct + 5 }
+    ],
+    [STRATEGY_LAB_V2_FAMILIES.GENERAL_PARAMETER_SEARCH]: [
+      {},
+      { buyScoreMin: base.buyScoreMin - 2 },
+      { buyScoreMin: base.buyScoreMin + 2 },
+      { sellScoreMax: base.sellScoreMax - 3 },
+      { stopLossPct: base.stopLossPct - 2, trailingStopPct: base.trailingStopPct - 2 },
+      { cashReservePct: base.cashReservePct + 5, maxHoldings: base.maxHoldings + 1 }
+    ]
+  };
+  return templates[family] || templates[STRATEGY_LAB_V2_FAMILIES.GENERAL_PARAMETER_SEARCH];
+}
+
+function buildStrategyLabV2Candidates(hypothesis, family) {
+  const base = normalizeStrategyParams(getExecutionStrategyParams("BACKTEST"));
+  const mutations = strategyLabV2MutationTemplates(family, base);
+  const seen = new Set();
+  const candidates = [];
+  for (const mutation of mutations) {
+    const params = normalizeStrategyParams({ ...base, ...mutation });
+    const fingerprint = sha256(canonicalJson({ hypothesisId: hypothesis.id, family, params }));
+    if (seen.has(fingerprint)) continue;
+    seen.add(fingerprint);
+    candidates.push({
+      id: `lab-candidate-${fingerprint.slice(0, 16)}`,
+      fingerprint,
+      hypothesisId: hypothesis.id,
+      family,
+      baseline: candidates.length === 0,
+      params,
+      generatedAt: nowIso(),
+      analysisOnly: true
+    });
+    if (candidates.length >= STRATEGY_LAB_V2_MAX_CANDIDATES) break;
+  }
+  return candidates;
+}
+
+function compileStrategyLabV2Hypothesis(hypothesis, { assets = null } = {}) {
+  if (!hypothesis?.id) throw new Error("Hypothèse StrategyLab invalide");
+  const family = classifyStrategyLabV2Hypothesis(hypothesis);
+  const unsupported = [
+    STRATEGY_LAB_V2_FAMILIES.RL_SANDBOX_PLACEHOLDER,
+    STRATEGY_LAB_V2_FAMILIES.QUANTUM_SANDBOX_PLACEHOLDER
+  ].includes(family);
+  const selectedAssets = strategyLabV2SafeAssets(assets || hypothesis.targetAssets);
+  const candidates = unsupported ? [] : buildStrategyLabV2Candidates(hypothesis, family);
+  const fingerprint = sha256(canonicalJson({
+    hypothesisId: hypothesis.id,
+    hypothesisFingerprint: hypothesis.fingerprint,
+    family,
+    assets: selectedAssets,
+    candidates: candidates.map((item) => item.params),
+    protocol: {
+      holdout: true,
+      embargoCandles: SCIENTIFIC_BACKTEST_EMBARGO_CANDLES,
+      costStressMultiplier: SCIENTIFIC_BACKTEST_COST_STRESS_MULTIPLIER,
+      walkForward: true
+    }
+  }));
+  const existing = runtimeState.strategyLabV2Experiments.find((item) => item.fingerprint === fingerprint);
+  if (existing) return { experiment: existing, created: false, duplicate: true };
+
+  let researchExperimentId = null;
+  if (!unsupported) {
+    try {
+      const linked = createResearchExperiment({
+        hypothesisId: hypothesis.id,
+        phase: "BACKTEST",
+        assets: selectedAssets,
+        title: `StrategyLab v10.18 — ${hypothesis.title}`
+      });
+      researchExperimentId = linked.experiment?.id || null;
+    } catch (error) {
+      strategyLabV2Event("RESEARCH_EXPERIMENT_LINK_WARNING", { hypothesisId: hypothesis.id, error: error.message });
+    }
+  }
+
+  const experiment = {
+    id: `strategy-lab-experiment-${fingerprint.slice(0, 16)}`,
+    fingerprint,
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    hypothesisId: hypothesis.id,
+    researchExperimentId,
+    title: hypothesis.title,
+    family,
+    assets: selectedAssets,
+    status: unsupported ? STRATEGY_LAB_V2_STATUS.SKIPPED : STRATEGY_LAB_V2_STATUS.PLANNED,
+    skipReason: unsupported ? `${family} réservé à une future sandbox isolée` : null,
+    parameterizationCoverage: unsupported ? "NONE" : (family === STRATEGY_LAB_V2_FAMILIES.EXECUTION_FILTER ? "PARTIAL" : "FULL"),
+    candidates,
+    results: [],
+    champion: null,
+    governance: {
+      analysisOnly: true,
+      canPlaceOrder: false,
+      canCallExecutionFunctions: false,
+      canPromotePaperAutomatically: false,
+      canPromoteLive: false,
+      codeRewriteAllowed: false
+    }
+  };
+  runtimeState.strategyLabV2Experiments.unshift(experiment);
+  runtimeState.strategyLabV2Experiments = runtimeState.strategyLabV2Experiments.slice(0, STRATEGY_LAB_V2_HISTORY_LIMIT);
+  strategyLabV2Event("EXPERIMENT_COMPILED", {
+    experimentId: experiment.id,
+    hypothesisId: hypothesis.id,
+    family,
+    candidates: candidates.length,
+    status: experiment.status
+  });
+  scheduleSave();
+  return { experiment, created: true, duplicate: false };
+}
+
+function compileReadyStrategyLabV2Hypotheses({ limit = STRATEGY_LAB_V2_MAX_HYPOTHESES_PER_RUN } = {}) {
+  if (!STRATEGY_LAB_V2_ENABLED) throw new Error("StrategyLab v10.18 désactivé");
+  const ready = runtimeState.researchHypotheses
+    .filter((item) => [
+      RESEARCH_HYPOTHESIS_STATUS.READY_FOR_BACKTEST,
+      RESEARCH_HYPOTHESIS_STATUS.IN_TEST
+    ].includes(item.status))
+    .sort((a, b) => {
+      const unsupported = new Set([
+        STRATEGY_LAB_V2_FAMILIES.RL_SANDBOX_PLACEHOLDER,
+        STRATEGY_LAB_V2_FAMILIES.QUANTUM_SANDBOX_PLACEHOLDER
+      ]);
+      const aUnsupported = unsupported.has(classifyStrategyLabV2Hypothesis(a)) ? 1 : 0;
+      const bUnsupported = unsupported.has(classifyStrategyLabV2Hypothesis(b)) ? 1 : 0;
+      if (aUnsupported !== bUnsupported) return aUnsupported - bUnsupported;
+      return Number(b.acceptedEvidenceCount || 0) - Number(a.acceptedEvidenceCount || 0);
+    })
+    .slice(0, Math.max(1, Math.min(20, Number(limit || 1))));
+  const compiled = ready.map((hypothesis) => compileStrategyLabV2Hypothesis(hypothesis));
+  return {
+    generatedAt: nowIso(),
+    considered: ready.length,
+    created: compiled.filter((item) => item.created).length,
+    duplicates: compiled.filter((item) => item.duplicate).length,
+    experiments: compiled.map((item) => item.experiment),
+    analysisOnly: true
+  };
+}
+
+async function prepareStrategyLabV2Dataset(assets, { count = STRATEGY_LAB_V2_CANDLES, force = false } = {}) {
+  const selected = strategyLabV2SafeAssets(assets);
+  if (!selected.length) throw new Error("Aucun actif StrategyLab valide");
+  const settled = await Promise.allSettled(selected.map((asset) =>
+    getHistoricalCandles(asset, "OneDay", Math.min(1000, Math.max(240, Number(count))), Boolean(force))
+  ));
+  const series = {};
+  const quality = {};
+  const sources = {};
+  const failures = [];
+  let commonTestStartTimestamp = null;
+  let minimumTestCandles = Infinity;
+
+  settled.forEach((result, index) => {
+    const asset = selected[index];
+    if (result.status !== "fulfilled") {
+      failures.push({ asset, error: result.reason?.message || String(result.reason) });
+      return;
+    }
+    const historical = result.value;
+    const audit = auditHistoricalCandles(asset, historical.candles, {
+      interval: "OneDay",
+      selectedProvider: historical.selectedProvider,
+      selectedSource: historical.selectedSource
+    });
+    recordDataQualityReport(audit);
+    quality[asset] = compactDataQualityReport(audit);
+    sources[asset] = {
+      selectedProvider: historical.selectedProvider,
+      selectedSource: historical.selectedSource,
+      divergence: historical.divergence || null
+    };
+    if (!audit.usableForBacktest || (DATA_QUALITY_ENFORCEMENT_MODE === "required" && audit.verdict === "FAIL")) {
+      failures.push({ asset, error: `DATA_QUALITY_FAIL: ${(audit.blockingReasons || []).join(", ")}` });
+      return;
+    }
+    const protocol = buildHoldoutProtocol(audit.cleanedCandles, {});
+    if (!protocol.testStartTimestamp || protocol.testCandles < SCIENTIFIC_BACKTEST_MIN_TEST_CANDLES) {
+      failures.push({ asset, error: `HOLDOUT_INSUFFICIENT: ${protocol.testCandles}` });
+      return;
+    }
+    series[asset] = protocol.sorted;
+    commonTestStartTimestamp = commonTestStartTimestamp === null
+      ? protocol.testStartTimestamp
+      : Math.max(commonTestStartTimestamp, protocol.testStartTimestamp);
+    minimumTestCandles = Math.min(minimumTestCandles, protocol.testCandles);
+  });
+
+  const usableAssets = Object.keys(series);
+  if (!usableAssets.length) {
+    throw new Error(`StrategyLab sans série exploitable: ${failures.map((item) => `${item.asset}:${item.error}`).join(" | ")}`);
+  }
+  return {
+    generatedAt: nowIso(),
+    requestedAssets: selected,
+    usableAssets,
+    excludedAssets: failures,
+    series,
+    dataQuality: quality,
+    dataSources: sources,
+    commonTestStartTimestamp,
+    minimumTestCandles: Number.isFinite(minimumTestCandles) ? minimumTestCandles : 0,
+    fingerprint: sha256(canonicalJson({
+      assets: usableAssets,
+      quality: Object.fromEntries(Object.entries(quality).map(([asset, item]) => [asset, item.fingerprint])),
+      commonTestStartTimestamp
+    }))
+  };
+}
+
+function aggregateStrategyLabV2WalkForward(series, params) {
+  const reports = Object.entries(series).slice(0, BACKTEST_MAX_ASSETS).map(([asset, candles]) =>
+    simulateWalkForwardBacktest(asset, candles, params)
+  );
+  const allFolds = reports.reduce((sum, report) => sum + Number(report.summary?.folds || 0), 0);
+  const positiveFolds = reports.reduce((sum, report) => sum + Number(report.summary?.positiveFolds || 0), 0);
+  const stabilityScores = reports.map((report) => Number(report.summary?.stabilityScore)).filter(Number.isFinite);
+  const worstReturns = reports.map((report) => Number(report.summary?.worstReturnPct)).filter(Number.isFinite);
+  const worstDrawdowns = reports.map((report) => Number(report.summary?.worstDrawdownPct)).filter(Number.isFinite);
+  return {
+    assets: reports.map((report) => report.asset),
+    reports: reports.map((report) => ({ asset: report.asset, summary: report.summary })),
+    folds: allFolds,
+    positiveFolds,
+    positiveFoldPct: allFolds ? roundNumber(positiveFolds / allFolds * 100, 2) : 0,
+    averageStabilityScore: stabilityScores.length ? roundNumber(average(stabilityScores), 3) : 0,
+    worstReturnPct: worstReturns.length ? roundNumber(Math.min(...worstReturns), 4) : null,
+    worstDrawdownPct: worstDrawdowns.length ? roundNumber(Math.max(...worstDrawdowns), 4) : null
+  };
+}
+
+function strategyLabV2TrialPenalty(trialNumber) {
+  return roundNumber(Math.log2(Math.max(2, Number(trialNumber || 1) + 1)) * STRATEGY_LAB_V2_TRIAL_PENALTY, 4);
+}
+
+function scoreStrategyLabV2Candidate({ backtest, costStress, walkForward, trialNumber, parameterizationCoverage }) {
+  const metrics = backtest?.metrics || {};
+  const stressed = costStress?.metrics || {};
+  const rawScore = 45
+    + Number(metrics.totalReturnPct || 0) * 0.75
+    + Number(metrics.excessReturnPct || 0) * 0.55
+    + Number(metrics.sharpe || 0) * 7
+    + Number(metrics.sortino || 0) * 3
+    + Number(walkForward?.positiveFoldPct || 0) * 0.12
+    + Number(walkForward?.averageStabilityScore || 0) * 0.1
+    + Number(stressed.totalReturnPct || 0) * 0.25
+    - Number(metrics.maxDrawdownPct || 0) * 1.15;
+  const penalty = strategyLabV2TrialPenalty(trialNumber);
+  const coveragePenalty = parameterizationCoverage === "PARTIAL" ? 2 : 0;
+  const adjustedScore = roundNumber(clampNumber(rawScore - penalty - coveragePenalty, 0, 100), 4);
+  return { rawScore: roundNumber(clampNumber(rawScore, 0, 100), 4), penalty, coveragePenalty, adjustedScore };
+}
+
+function evaluateStrategyLabV2Candidate(candidate, dataset, experiment, trialNumber) {
+  const benchmarkAsset = dataset.usableAssets.includes(BACKTEST_BENCHMARK_ASSET)
+    ? BACKTEST_BENCHMARK_ASSET
+    : dataset.usableAssets[0];
+  const params = normalizeStrategyParams(candidate.params);
+  const backtest = simulatePortfolioBacktest(dataset.series, {
+    ...params,
+    benchmarkAsset,
+    startTradingTimestamp: dataset.commonTestStartTimestamp
+  });
+  const normalizedConfig = normalizeBacktestConfig({ ...params, benchmarkAsset });
+  const costStress = simulatePortfolioBacktest(dataset.series, {
+    ...params,
+    benchmarkAsset,
+    startTradingTimestamp: dataset.commonTestStartTimestamp,
+    feePct: normalizedConfig.feePct * SCIENTIFIC_BACKTEST_COST_STRESS_MULTIPLIER,
+    slippageBps: normalizedConfig.slippageBps * SCIENTIFIC_BACKTEST_COST_STRESS_MULTIPLIER
+  });
+  const walkForward = aggregateStrategyLabV2WalkForward(dataset.series, params);
+  const score = scoreStrategyLabV2Candidate({
+    backtest,
+    costStress,
+    walkForward,
+    trialNumber,
+    parameterizationCoverage: experiment.parameterizationCoverage
+  });
+  const blockingReasons = [];
+  const warnings = [];
+  if (!backtest.validation?.lookaheadSafe) blockingReasons.push("LOOKAHEAD_CHECK_FAILED");
+  if (Number(backtest.metrics?.closedTrades || 0) < STRATEGY_LAB_V2_MIN_TRADES) warnings.push("TOO_FEW_CLOSED_TRADES");
+  if (Number(backtest.metrics?.maxDrawdownPct || 0) > STRATEGY_LAB_V2_MAX_DRAWDOWN_PCT) blockingReasons.push("DRAWDOWN_LIMIT_EXCEEDED");
+  if (Number(costStress.metrics?.totalReturnPct || 0) < -20) blockingReasons.push("COST_STRESS_COLLAPSE");
+  if (Number(walkForward.folds || 0) < 2) blockingReasons.push("WALK_FORWARD_MISSING");
+  if (Number(walkForward.positiveFoldPct || 0) < STRATEGY_LAB_V2_MIN_POSITIVE_FOLDS_PCT) warnings.push("LOW_WALK_FORWARD_STABILITY");
+  if (score.adjustedScore < STRATEGY_LAB_V2_MIN_SCORE) warnings.push("SCORE_BELOW_TARGET");
+  if (experiment.parameterizationCoverage === "PARTIAL") warnings.push("PARTIAL_HYPOTHESIS_PARAMETERIZATION");
+  const verdict = blockingReasons.length ? "FAIL" : (warnings.length ? "WARN" : "PASS");
+  return {
+    id: candidate.id,
+    fingerprint: sha256(canonicalJson({ candidate: candidate.fingerprint, dataset: dataset.fingerprint, params })),
+    generatedAt: nowIso(),
+    hypothesisId: experiment.hypothesisId,
+    experimentId: experiment.id,
+    family: experiment.family,
+    baseline: Boolean(candidate.baseline),
+    params,
+    verdict,
+    blockingReasons,
+    warnings,
+    score,
+    metrics: backtest.metrics,
+    costStressMetrics: costStress.metrics,
+    validation: backtest.validation,
+    walkForward,
+    datasetFingerprint: dataset.fingerprint,
+    trialNumber,
+    analysisOnly: true,
+    canPlaceOrder: false
+  };
+}
+
+function compactStrategyLabV2CandidateResult(result) {
+  if (!result) return null;
+  return {
+    id: result.id,
+    fingerprint: result.fingerprint,
+    generatedAt: result.generatedAt,
+    hypothesisId: result.hypothesisId,
+    experimentId: result.experimentId,
+    family: result.family,
+    baseline: result.baseline,
+    params: result.params,
+    verdict: result.verdict,
+    blockingReasons: result.blockingReasons,
+    warnings: result.warnings,
+    score: result.score,
+    scoreDelta: result.scoreDelta ?? null,
+    returnDeltaPct: result.returnDeltaPct ?? null,
+    beatsBaseline: Boolean(result.beatsBaseline),
+    metrics: result.metrics,
+    costStressMetrics: result.costStressMetrics,
+    validation: result.validation,
+    walkForward: result.walkForward,
+    datasetFingerprint: result.datasetFingerprint,
+    trialNumber: result.trialNumber,
+    analysisOnly: true
+  };
+}
+
+function rebuildStrategyLabV2Leaderboard() {
+  const all = runtimeState.strategyLabV2Experiments.flatMap((experiment) =>
+    (experiment.results || []).filter((item) => !item.baseline).map((item) => ({
+      ...item,
+      experimentTitle: experiment.title,
+      experimentStatus: experiment.status,
+      hypothesisId: experiment.hypothesisId
+    }))
+  );
+  const deduplicated = new Map();
+  for (const item of all) {
+    const existing = deduplicated.get(item.fingerprint);
+    if (!existing || Number(item.score?.adjustedScore || 0) > Number(existing.score?.adjustedScore || 0)) {
+      deduplicated.set(item.fingerprint, item);
+    }
+  }
+  runtimeState.strategyLabV2Leaderboard = [...deduplicated.values()]
+    .sort((a, b) => Number(b.score?.adjustedScore || 0) - Number(a.score?.adjustedScore || 0))
+    .slice(0, STRATEGY_LAB_V2_LEADERBOARD_LIMIT);
+  return runtimeState.strategyLabV2Leaderboard;
+}
+
+async function runStrategyLabV2Experiment(experimentId, { assets = null, count = STRATEGY_LAB_V2_CANDLES, force = false, trigger = "manual" } = {}) {
+  if (!STRATEGY_LAB_V2_ENABLED) throw new Error("StrategyLab v10.18 désactivé");
+  if (TRADING_MODE === "LIVE" && !STRATEGY_LAB_V2_LIVE_ANALYSIS_ENABLED) {
+    throw new Error("Analyse StrategyLab désactivée pendant le mode LIVE");
+  }
+  if (runtimeState.strategyLabV2Running) throw new Error("Un run StrategyLab est déjà en cours");
+  const experiment = runtimeState.strategyLabV2Experiments.find((item) => item.id === experimentId);
+  if (!experiment) throw new Error("Expérience StrategyLab introuvable");
+  if (experiment.status === STRATEGY_LAB_V2_STATUS.SKIPPED) {
+    return { skipped: true, reason: experiment.skipReason, experiment, analysisOnly: true };
+  }
+  if (!experiment.candidates?.length) throw new Error("Aucun candidat dans cette expérience");
+
+  runtimeState.strategyLabV2Running = true;
+  experiment.status = STRATEGY_LAB_V2_STATUS.RUNNING;
+  experiment.startedAt = nowIso();
+  experiment.updatedAt = nowIso();
+  const startedAtMs = Date.now();
+  strategyLabV2Event("EXPERIMENT_STARTED", { experimentId, trigger, tradingMode: TRADING_MODE });
+  try {
+    const dataset = await prepareStrategyLabV2Dataset(assets || experiment.assets, { count, force });
+    const totalExistingTrials = runtimeState.strategyLabV2Leaderboard.length + runtimeState.strategyLabV2Runs.length;
+    const evaluated = [];
+    for (let index = 0; index < experiment.candidates.length; index += 1) {
+      const result = evaluateStrategyLabV2Candidate(
+        experiment.candidates[index],
+        dataset,
+        experiment,
+        totalExistingTrials + index + 1
+      );
+      evaluated.push(result);
+    }
+    const baseline = evaluated.find((item) => item.baseline) || evaluated[0];
+    for (const item of evaluated) {
+      item.scoreDelta = roundNumber(Number(item.score?.adjustedScore || 0) - Number(baseline.score?.adjustedScore || 0), 4);
+      item.returnDeltaPct = roundNumber(Number(item.metrics?.totalReturnPct || 0) - Number(baseline.metrics?.totalReturnPct || 0), 4);
+      item.beatsBaseline = !item.baseline &&
+        item.verdict !== "FAIL" &&
+        item.scoreDelta >= STRATEGY_LAB_V2_MIN_SCORE_DELTA &&
+        item.returnDeltaPct >= 0 &&
+        Number(item.metrics?.maxDrawdownPct || Infinity) <= Number(baseline.metrics?.maxDrawdownPct || Infinity) + 2;
+    }
+    const champion = evaluated
+      .filter((item) => item.beatsBaseline)
+      .sort((a, b) => Number(b.score?.adjustedScore || 0) - Number(a.score?.adjustedScore || 0))[0] || null;
+    experiment.results = evaluated.map(compactStrategyLabV2CandidateResult);
+    experiment.champion = compactStrategyLabV2CandidateResult(champion);
+    experiment.dataset = {
+      generatedAt: dataset.generatedAt,
+      requestedAssets: dataset.requestedAssets,
+      usableAssets: dataset.usableAssets,
+      excludedAssets: dataset.excludedAssets,
+      dataQuality: dataset.dataQuality,
+      dataSources: dataset.dataSources,
+      minimumTestCandles: dataset.minimumTestCandles,
+      fingerprint: dataset.fingerprint
+    };
+    experiment.status = champion
+      ? STRATEGY_LAB_V2_STATUS.PASSED
+      : (evaluated.some((item) => item.verdict !== "FAIL")
+          ? STRATEGY_LAB_V2_STATUS.INCONCLUSIVE
+          : STRATEGY_LAB_V2_STATUS.FAILED);
+    experiment.completedAt = nowIso();
+    experiment.updatedAt = nowIso();
+    experiment.durationMs = Date.now() - startedAtMs;
+
+    const linkedResearchExperiment = runtimeState.researchExperiments.find((item) => item.id === experiment.researchExperimentId);
+    if (linkedResearchExperiment) {
+      linkedResearchExperiment.status = champion ? "PASSED" : (experiment.status === STRATEGY_LAB_V2_STATUS.FAILED ? "FAILED" : "RUNNING");
+      linkedResearchExperiment.results = {
+        strategyLabExperimentId: experiment.id,
+        status: experiment.status,
+        champion: experiment.champion,
+        datasetFingerprint: dataset.fingerprint
+      };
+      linkedResearchExperiment.updatedAt = nowIso();
+    }
+    const hypothesis = runtimeState.researchHypotheses.find((item) => item.id === experiment.hypothesisId);
+    if (hypothesis) {
+      hypothesis.status = champion ? RESEARCH_HYPOTHESIS_STATUS.PAPER_ONLY : RESEARCH_HYPOTHESIS_STATUS.IN_TEST;
+      hypothesis.updatedAt = nowIso();
+    }
+
+    const run = {
+      id: `strategy-lab-run-${randomUUID()}`,
+      generatedAt: experiment.completedAt,
+      version: VERSION,
+      trigger,
+      tradingMode: TRADING_MODE,
+      experimentId: experiment.id,
+      hypothesisId: experiment.hypothesisId,
+      family: experiment.family,
+      status: experiment.status,
+      durationMs: experiment.durationMs,
+      candidatesEvaluated: evaluated.length,
+      champion: experiment.champion,
+      baseline: compactStrategyLabV2CandidateResult(baseline),
+      datasetFingerprint: dataset.fingerprint,
+      analysisOnly: true,
+      orderSent: false,
+      promotionPerformed: false
+    };
+    runtimeState.strategyLabV2Runs.unshift(run);
+    runtimeState.strategyLabV2Runs = runtimeState.strategyLabV2Runs.slice(0, STRATEGY_LAB_V2_HISTORY_LIMIT);
+    runtimeState.lastStrategyLabV2Run = run;
+    rebuildStrategyLabV2Leaderboard();
+    strategyLabV2Event("EXPERIMENT_COMPLETED", {
+      experimentId: experiment.id,
+      status: experiment.status,
+      championId: champion?.id || null,
+      durationMs: experiment.durationMs
+    });
+    addAudit("STRATEGY_LAB_V2_COMPLETED", run);
+    scheduleSave();
+    return { version: VERSION, experiment, run, analysisOnly: true, orderSent: false };
+  } catch (error) {
+    experiment.status = STRATEGY_LAB_V2_STATUS.FAILED;
+    experiment.error = error.message;
+    experiment.completedAt = nowIso();
+    experiment.updatedAt = nowIso();
+    experiment.durationMs = Date.now() - startedAtMs;
+    strategyLabV2Event("EXPERIMENT_FAILED", { experimentId, error: error.message });
+    addAudit("STRATEGY_LAB_V2_FAILED", { experimentId, error: error.message, trigger });
+    scheduleSave();
+    throw error;
+  } finally {
+    runtimeState.strategyLabV2Running = false;
+  }
+}
+
+async function runStrategyLabV2Batch({ limit = STRATEGY_LAB_V2_MAX_HYPOTHESES_PER_RUN, force = false, trigger = "manual-batch" } = {}) {
+  const compilation = compileReadyStrategyLabV2Hypotheses({ limit });
+  const runnable = compilation.experiments
+    .filter((item) => item.status === STRATEGY_LAB_V2_STATUS.PLANNED)
+    .slice(0, Math.max(1, Math.min(STRATEGY_LAB_V2_MAX_HYPOTHESES_PER_RUN, Number(limit || 1))));
+  const results = [];
+  for (const experiment of runnable) {
+    try {
+      const result = await runStrategyLabV2Experiment(experiment.id, { force, trigger });
+      results.push({ experimentId: experiment.id, ok: true, status: result.experiment?.status, champion: result.experiment?.champion || null });
+    } catch (error) {
+      results.push({ experimentId: experiment.id, ok: false, error: error.message });
+    }
+  }
+  const summary = {
+    generatedAt: nowIso(),
+    compilation: {
+      considered: compilation.considered,
+      created: compilation.created,
+      duplicates: compilation.duplicates
+    },
+    requestedRuns: runnable.length,
+    completed: results.filter((item) => item.ok).length,
+    failed: results.filter((item) => !item.ok).length,
+    results,
+    analysisOnly: true,
+    orderSent: false
+  };
+  strategyLabV2Event("BATCH_COMPLETED", summary);
+  scheduleSave();
+  return summary;
+}
+
+function strategyLabV2Status() {
+  const experiments = runtimeState.strategyLabV2Experiments || [];
+  const leaderboard = runtimeState.strategyLabV2Leaderboard || [];
+  return {
+    name: "StrategyLabV2",
+    version: VERSION,
+    generatedAt: nowIso(),
+    enabled: STRATEGY_LAB_V2_ENABLED,
+    running: Boolean(runtimeState.strategyLabV2Running),
+    scheduleEnabled: STRATEGY_LAB_V2_SCHEDULE_ENABLED,
+    schedule: STRATEGY_LAB_V2_SCHEDULE_ENABLED ? STRATEGY_LAB_V2_CRON : null,
+    liveAnalysisEnabled: STRATEGY_LAB_V2_LIVE_ANALYSIS_ENABLED,
+    counts: {
+      experiments: experiments.length,
+      planned: experiments.filter((item) => item.status === STRATEGY_LAB_V2_STATUS.PLANNED).length,
+      running: experiments.filter((item) => item.status === STRATEGY_LAB_V2_STATUS.RUNNING).length,
+      passed: experiments.filter((item) => item.status === STRATEGY_LAB_V2_STATUS.PASSED).length,
+      inconclusive: experiments.filter((item) => item.status === STRATEGY_LAB_V2_STATUS.INCONCLUSIVE).length,
+      failed: experiments.filter((item) => item.status === STRATEGY_LAB_V2_STATUS.FAILED).length,
+      skipped: experiments.filter((item) => item.status === STRATEGY_LAB_V2_STATUS.SKIPPED).length,
+      runs: runtimeState.strategyLabV2Runs.length,
+      leaderboard: leaderboard.length
+    },
+    protocol: {
+      dataQualityRequired: DATA_QUALITY_ENFORCEMENT_MODE === "required",
+      chronologicalHoldout: true,
+      embargoCandles: SCIENTIFIC_BACKTEST_EMBARGO_CANDLES,
+      costStressMultiplier: SCIENTIFIC_BACKTEST_COST_STRESS_MULTIPLIER,
+      walkForwardMultiAsset: true,
+      transparentTrialPenalty: STRATEGY_LAB_V2_TRIAL_PENALTY,
+      minimumScore: STRATEGY_LAB_V2_MIN_SCORE,
+      minimumScoreDeltaVsBaseline: STRATEGY_LAB_V2_MIN_SCORE_DELTA
+    },
+    supportedFamilies: Object.values(STRATEGY_LAB_V2_FAMILIES),
+    lastRun: runtimeState.lastStrategyLabV2Run || null,
+    topCandidates: leaderboard.slice(0, 10),
+    governance: {
+      analysisOnly: true,
+      directLiveInfluence: false,
+      canPlaceOrder: false,
+      canPromotePaperAutomatically: false,
+      canPromoteLive: false,
+      codeRewriteAllowed: false
+    }
+  };
+}
+
 function htmlEscape(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -8478,6 +13938,17 @@ function renderDashboard({ summary, metrics, market, trend, preferredNextAssets,
   const council = agents.agentCouncil || runtimeState.lastAgentCouncil || {};
   const strategyValidation = agents.strategyValidationAgent || runtimeState.lastStrategyValidation || buildStrategyValidationAgent();
   const paperPerformance = agents.paperPerformanceAgent || calculatePaperPerformance();
+  const riskSell = agents.riskSellIntelligenceAgent || runtimeState.lastRiskSellReport || { status: "NOT_MEASURED", globalRisk: {}, sellCandidates: [], emergencyReviews: [], ranking: [] };
+  const macroCredit = agents.macroCreditFundamentalRegimeAgent || runtimeState.lastMacroCreditRegime || { regime: "UNKNOWN", confidence: 0, globalRiskMultiplier: 0.7, ranking: [], basketPulses: {} };
+  const researchKnowledge = runtimeState.lastResearchReport || buildResearchKnowledgeReport();
+  const dataQualityStatus = buildDataQualityStatus();
+  const scientificStatus = scientificBacktestStatus();
+  const strategyLabV2 = strategyLabV2Status();
+  const livePerformance = agents.livePerformanceAgent || runtimeState.lastPerformanceReport || {
+    status: "NOT_MEASURED",
+    performance: {},
+    attribution: { topContributors: [], bottomContributors: [] }
+  };
   const regime = agents.marketRegimeAgent || technical.marketRegimeAgent || { regime: "UNKNOWN", riskMultiplier: 0.65 };
   const modeClass = TRADING_MODE === "LIVE" ? "danger" : (TRADING_MODE === "PAPER" ? "paper" : "safe");
   const positionsRows = (summary.aggregatedPositions || []).map((p) => `
@@ -8495,9 +13966,10 @@ function renderDashboard({ summary, metrics, market, trend, preferredNextAssets,
   const councilRows = (council.ranking || []).slice(0, 14).map((item) => `
     <tr><td>${htmlEscape(item.asset)}</td><td>${htmlEscape(item.status)}</td><td>${htmlEscape(item.recommendation)}</td><td>${htmlEscape(item.support?.buyPct ?? "—")}%</td><td>${htmlEscape(item.support?.sellPct ?? "—")}%</td><td>${htmlEscape(item.support?.vetoPct ?? "—")}%</td><td>${htmlEscape(item.disagreementPct ?? "—")}%</td><td>${htmlEscape(item.participationCount ?? 0)}</td><td>${htmlEscape((item.hardVetoes || []).map((v) => v.agent).join(", ") || "—")}</td></tr>`).join("") || '<tr><td colspan="9">Conseil multi-agents non disponible</td></tr>';
   const lastDecision = runtimeState.lastDecision?.decision || null;
+  const performanceRows = (livePerformance.attribution?.topContributors || []).map((item) => `<tr><td>${htmlEscape(item.asset)}</td><td>${htmlEscape(item.category)}</td><td>${htmlEscape(item.invested)}</td><td>${htmlEscape(item.unrealizedProfit)}</td><td>${htmlEscape(item.returnPctOnInvested ?? "—")}%</td></tr>`).join("") || `<tr><td colspan="5">Aucune attribution disponible</td></tr>`;
   return `<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LEO-AI ${VERSION}</title><style>
     body{font-family:system-ui;background:#0b1020;color:#edf2ff;margin:0;padding:16px}.wrap{max-width:1200px;margin:auto}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.card{background:#151d34;border:1px solid #293554;border-radius:14px;padding:14px}.hero{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.badge{padding:8px 12px;border-radius:999px;font-weight:800}.safe{background:#173c2c}.paper{background:#4a3b13}.danger{background:#5a1f2b}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;border-bottom:1px solid #2d3857;padding:8px;vertical-align:top}a{color:#8fc5ff}.ok{color:#72e0a8}.bad{color:#ff8797}.muted{color:#a7b1ca}pre{white-space:pre-wrap;word-break:break-word}</style></head><body><div class="wrap">
-    <div class="hero"><div><h1>LEO-AI SENTINEL v10.10</h1><div class="muted">Multi-agents + archive point-in-time + StrategyLab contrôlé + walk-forward</div></div><div class="badge ${modeClass}">MODE ${TRADING_MODE}</div></div>
+    <div class="hero"><div><h1>LEO-AI SENTINEL v10.18</h1><div class="muted">StrategyLab + Scientific Backtesting + Research Knowledge Layer</div></div><div class="badge ${modeClass}">MODE ${TRADING_MODE}</div></div>
     <div class="grid" style="margin-top:14px">
       <div class="card"><b>Portefeuille</b><h2>${summary.uniquePositionsCount} actifs</h2><div>Valeur suivie: ${htmlEscape(summary.totalTrackedValue)} USD</div><div>Cash disponible: ${htmlEscape(summary.availableCash)} USD</div></div>
       <div class="card"><b>Marché eToro</b><h2>${market?.tradableCount || 0} négociables</h2><div>${market?.freshCount || 0} frais · ${market?.closedCount || 0} fermés · ${market?.staleCount || 0} périmés</div></div>
@@ -8506,13 +13978,21 @@ function renderDashboard({ summary, metrics, market, trend, preferredNextAssets,
       <div class="card"><b>MarketDataFusionAgent</b><h2>${integrity.tertiaryConfigured ? "3 sources" : (integrity.secondaryConfigured ? "2 sources" : "eToro seul")}</h2><div>Mode: ${htmlEscape(MARKET_DATA_CONSENSUS_MODE)} · divergences: ${integrity.divergenceAssets?.length || 0}</div></div>
       <div class="card"><b>ProviderHealthAgent</b><h2>${providerHealth.secondaryAvailable ? "FOURNISSEURS OK" : "SECONDAIRES LIMITÉS"}</h2><div>${Object.values(providerHealth.providers || {}).filter((p) => p.quarantined).length} en quarantaine</div></div>
       <div class="card"><b>MarketRegimeAgent</b><h2>${htmlEscape(regime.regime || "UNKNOWN")}</h2><div>Multiplicateur risque: ${htmlEscape(regime.riskMultiplier ?? "—")}</div></div>
+      <div class="card"><b>MacroCreditFundamentalRegimeAgent</b><h2>${htmlEscape(macroCredit.regime || "UNKNOWN")}</h2><div>Confiance ${htmlEscape(macroCredit.confidence ?? "—")}% · multiplicateur ${htmlEscape(macroCredit.globalRiskMultiplier ?? "—")}</div></div>
       <div class="card"><b>TechnicalAnalysisAgent</b><h2>${technical.successfulCount || 0} actifs</h2><div>${technical.buyCandidates?.length || 0} configurations achetables · ${technical.failureCount || 0} échecs</div></div>
       <div class="card"><b>Alternative Intelligence</b><h2>${intelligence.successfulCount || 0} actifs</h2><div>${intelligence.buyCandidates?.length || 0} soutiens · ${intelligence.vetoAssets?.length || 0} veto</div></div>
       <div class="card"><b>MultiAgentCouncil</b><h2>${htmlEscape(council.coordinatorRecommendation?.decision || "HOLD")} ${htmlEscape(council.coordinatorRecommendation?.asset || "")}</h2><div>${council.summary?.approvedBuys || 0} BUY approuvés · ${council.summary?.approvedSells || 0} SELL · ${council.summary?.vetoed || 0} veto</div></div>
       <div class="card"><b>BacktestValidationAgent</b><h2 class="${strategyValidation.blockBuy ? "bad" : "ok"}">${htmlEscape(strategyValidation.status || "NOT_RUN")}</h2><div>${htmlEscape(strategyValidation.reason || "Aucun backtest")}</div></div>
       <div class="card"><b>PaperPerformanceAgent</b><h2>${htmlEscape(paperPerformance.totalReturnPct ?? "—")}%</h2><div>Drawdown ${htmlEscape(paperPerformance.maxDrawdownPct ?? "—")}% · Sharpe ${htmlEscape(paperPerformance.sharpe ?? "—")}</div></div>
       <div class="card"><b>Dernière décision</b><h2>${htmlEscape(lastDecision?.decision || "Aucune")}</h2><div>${htmlEscape(lastDecision?.asset || "")}</div><div class="muted">${htmlEscape(runtimeState.lastDecision?.risk_reason || "")}</div></div>
+      <div class="card"><b>ExecutionVerifier</b><h2 class="${executionVerifierStatus().activeIntentsCount ? "bad" : "ok"}">${executionVerifierStatus().activeIntentsCount ? executionVerifierStatus().activeIntentsCount + " À RÉCONCILIER" : "AUCUN INTENT ACTIF"}</h2><div>${htmlEscape(runtimeState.lastExecutionVerification?.status || "Aucune exécution vérifiée")}</div></div>
+      <div class="card"><b>PortfolioAllocationEngine</b><h2 class="${summary.allocationPlan?.status === "CASH_MINIMUM_BREACHED" || summary.allocationPlan?.status === "OVER_MAX" ? "bad" : "ok"}">${htmlEscape(summary.allocationPlan?.status || "UNKNOWN")}</h2><div>Profil ${htmlEscape(summary.allocationPlan?.profile || PORTFOLIO_ALLOCATION_PROFILE)} · cash ${htmlEscape(summary.allocationPlan?.cash?.currentPct ?? "—")}% / cible ${htmlEscape(summary.allocationPlan?.cash?.targetPct ?? "—")}%</div></div>
+      <div class="card"><b>LivePerformanceAttributionAgent</b><h2>${htmlEscape(livePerformance.performance?.accountReturnPct ?? "—")}%</h2><div>Benchmark ${htmlEscape(livePerformance.benchmarkAsset || PERFORMANCE_BENCHMARK_ASSET)} ${htmlEscape(livePerformance.performance?.benchmarkReturnPct ?? "—")}% · excès ${htmlEscape(livePerformance.performance?.excessReturnPct ?? "—")}%</div><div class="muted">${htmlEscape(livePerformance.status || "NOT_MEASURED")} · Sharpe ${htmlEscape(livePerformance.performance?.sharpe ?? "—")}</div></div>
+      <div class="card"><b>RiskSellIntelligenceAgent</b><h2 class="${riskSell.status === "HARD_CIRCUIT" ? "bad" : "ok"}">${htmlEscape(riskSell.status || "NOT_MEASURED")}</h2><div>Drawdown ${htmlEscape(riskSell.globalRisk?.accountDrawdownPct ?? "—")}% · jour ${htmlEscape(riskSell.globalRisk?.dailyChangePct ?? "—")}%</div><div>${riskSell.sellCandidates?.length || 0} revue(s) SELL · ${riskSell.emergencyReviews?.length || 0} urgente(s)</div></div>
     </div>
+    <div class="card" style="margin-top:14px"><h3>Performance réelle et attribution indicative</h3><div>Compte ${htmlEscape(livePerformance.performance?.accountReturnPct ?? "—")}% · benchmark ${htmlEscape(livePerformance.performance?.benchmarkReturnPct ?? "—")}% · excès ${htmlEscape(livePerformance.performance?.excessReturnPct ?? "—")}% · drawdown ${htmlEscape(livePerformance.performance?.maxDrawdownPct ?? "—")}% · tracking error ${htmlEscape(livePerformance.performance?.trackingErrorPct ?? "—")}%</div><table><thead><tr><th>Actif</th><th>Catégorie</th><th>Investi</th><th>P&L latent</th><th>Rendement latent</th></tr></thead><tbody>${performanceRows}</tbody></table><div class="muted">Attribution indicative fondée sur les positions ouvertes; elle ne remplace pas une comptabilité exhaustive des flux.</div></div>
+    <div class="card" style="margin-top:14px"><h3>Macro, crédit et fondamentaux</h3><div>Régime ${htmlEscape(macroCredit.regime || "UNKNOWN")} · confiance ${htmlEscape(macroCredit.confidence ?? "—")}% · risque ${htmlEscape(macroCredit.globalRiskMultiplier ?? "—")}</div><table><thead><tr><th>Actif</th><th>Catégorie</th><th>Score</th><th>État</th><th>Multiplicateur BUY</th><th>Blocage</th></tr></thead><tbody>${(macroCredit.ranking || []).slice(0, 15).map((item) => `<tr><td>${htmlEscape(item.asset)}</td><td>${htmlEscape(item.category)}</td><td>${htmlEscape(item.score)}</td><td>${htmlEscape(item.status)}</td><td>${htmlEscape(item.buyMultiplier)}</td><td>${item.hardBlockNewBuy ? "⛔" : "—"}</td></tr>`).join("") || '<tr><td colspan="6">Régime macro non disponible</td></tr>'}</tbody></table><div class="muted">Les signaux utilisent des proxys de marché. Cette couche ne peut jamais déclencher seule une vente.</div></div>
+    <div class="card" style="margin-top:14px"><h3>Risk & Sell Intelligence</h3><div>État ${htmlEscape(riskSell.status || "NOT_MEASURED")} · multiplicateur nouveaux achats ${htmlEscape(riskSell.globalRisk?.buySizeMultiplier ?? "—")} · raisons ${htmlEscape((riskSell.globalRisk?.reasons || []).join(", ") || "aucune")}</div><table><thead><tr><th>Actif</th><th>Recommandation</th><th>Confiance</th><th>P&L</th><th>Recul sommet</th><th>Preuves indépendantes</th></tr></thead><tbody>${(riskSell.ranking || []).map((item) => `<tr><td>${htmlEscape(item.asset)}</td><td>${htmlEscape(item.recommendation)}</td><td>${htmlEscape(item.confidence)}%</td><td>${htmlEscape(item.pnlPct ?? "—")}%</td><td>${htmlEscape(item.trailingDrawdownPct ?? "—")}%</td><td>${htmlEscape((item.independentBearishFamilies || []).join(", ") || "—")}</td></tr>`).join("") || '<tr><td colspan="6">Aucune revue disponible</td></tr>'}</tbody></table><div class="muted">Une surpondération ou une moins-value isolée ne suffit jamais à vendre. Toute vente reste soumise au conseil, au RiskController et à l’ExecutionVerifier.</div></div>
     <div class="card" style="margin-top:14px"><h3>Pondérations</h3><table><thead><tr><th>Actif</th><th>Catégorie</th><th>Valeur</th><th>Poids compte</th></tr></thead><tbody>${positionsRows}</tbody></table></div>
     <div class="card" style="margin-top:14px"><h3>MarketDataFusionAgent</h3><table><thead><tr><th>Actif</th><th>eToro</th><th>Twelve Data</th><th>Alpha Vantage</th><th>Consensus</th><th>Écart max</th><th>État</th></tr></thead><tbody>${comparisonRows}</tbody></table></div>
     <div class="card" style="margin-top:14px"><h3>ProviderHealthAgent</h3><table><thead><tr><th>Fournisseur</th><th>Réussite</th><th>Latence</th><th>Échecs consécutifs</th><th>État</th></tr></thead><tbody>${providerRows}</tbody></table></div>
@@ -8520,7 +14000,10 @@ function renderDashboard({ summary, metrics, market, trend, preferredNextAssets,
     <div class="card" style="margin-top:14px"><h3>News · Fundamentals · Social</h3><table><thead><tr><th>Actif</th><th>Global</th><th>News</th><th>Fondamental</th><th>Social</th><th>Décision</th><th>Risques</th></tr></thead><tbody>${intelligenceRows}</tbody></table></div>
     <div class="card" style="margin-top:14px"><h3>MultiAgentCouncil — votes et désaccords</h3><table><thead><tr><th>Actif</th><th>État</th><th>Recommandation</th><th>BUY</th><th>SELL</th><th>Veto</th><th>Désaccord</th><th>Agents</th><th>Hard veto</th></tr></thead><tbody>${councilRows}</tbody></table></div>
     <div class="card" style="margin-top:14px"><h3>Prochains actifs</h3><table><thead><tr><th>#</th><th>Actif</th><th>Prix</th><th>Éligible</th><th>Raison</th></tr></thead><tbody>${candidatesRows}</tbody></table></div>
-    <div class="card" style="margin-top:14px"><h3>Contrôles</h3><a href="/watch?secret=${encodeURIComponent(secret || "")}">Watch</a> · <a href="/scan?secret=${encodeURIComponent(secret || "")}">Scan</a> · <a href="/foundation-status?secret=${encodeURIComponent(secret || "")}">Foundation status</a> · <a href="/data-sources?secret=${encodeURIComponent(secret || "")}">Data sources</a> · <a href="/provider-health?secret=${encodeURIComponent(secret || "")}">Provider health</a> · <a href="/technical-summary?secret=${encodeURIComponent(secret || "")}">Technical summary</a> · <a href="/intelligence-summary?secret=${encodeURIComponent(secret || "")}">Intelligence summary</a> · <a href="/market-regime?secret=${encodeURIComponent(secret || "")}">Market regime</a> · <a href="/agent-council?secret=${encodeURIComponent(secret || "")}">Agent council</a> · <a href="/agent-history?secret=${encodeURIComponent(secret || "")}">Agent history</a> · <a href="/paper-status?secret=${encodeURIComponent(secret || "")}">Paper status</a> · <a href="/paper-performance?secret=${encodeURIComponent(secret || "")}">Paper performance</a> · <a href="/backtest-status?secret=${encodeURIComponent(secret || "")}">Backtest status</a> · <a href="/strategy-validation?secret=${encodeURIComponent(secret || "")}">Strategy validation</a> · <a href="/live-preflight?secret=${encodeURIComponent(secret || "")}&asset=SPY&side=BUY&amount=10">LIVE preflight</a> · <a href="/audit?secret=${encodeURIComponent(secret || "")}">Audit</a></div>
+    <div class="card" style="margin-top:14px"><h3>Research Knowledge Layer</h3><div>Sources ${htmlEscape(researchKnowledge.counts?.sources ?? 0)} · preuves acceptées ${htmlEscape(researchKnowledge.counts?.acceptedEvidence ?? 0)} · hypothèses prêtes ${htmlEscape(researchKnowledge.counts?.readyHypotheses ?? 0)} · expériences ${htmlEscape(researchKnowledge.counts?.experiments ?? 0)}</div><div class="muted">Bibliothèque advisory-only : aucune preuve ou hypothèse ne peut créer directement un ordre LIVE.</div></div>
+    <div class="card" style="margin-top:14px"><h3>Data Quality & Scientific Backtesting</h3><div>Audits ${htmlEscape(dataQualityStatus.counts?.total ?? 0)} · PASS ${htmlEscape(dataQualityStatus.counts?.pass ?? 0)} · WARN ${htmlEscape(dataQualityStatus.counts?.warn ?? 0)} · FAIL ${htmlEscape(dataQualityStatus.counts?.fail ?? 0)}</div><div>Essais scientifiques ${htmlEscape(scientificStatus.counts?.totalTrials ?? 0)} · uniques ${htmlEscape(scientificStatus.counts?.uniqueTrials ?? 0)} · verdict ${htmlEscape(scientificStatus.lastReport?.verdict || "NOT_RUN")}</div><div class="muted">Holdout temporel, embargo, coûts stressés et registre des essais. Analyse uniquement.</div></div>
+    <div class="card" style="margin-top:14px"><h3>StrategyLab v10.18</h3><div>Expériences ${htmlEscape(strategyLabV2.counts?.experiments ?? 0)} · planifiées ${htmlEscape(strategyLabV2.counts?.planned ?? 0)} · réussies ${htmlEscape(strategyLabV2.counts?.passed ?? 0)} · classement ${htmlEscape(strategyLabV2.counts?.leaderboard ?? 0)}</div><div>Dernier état ${htmlEscape(strategyLabV2.lastRun?.status || "NOT_RUN")} · champion ${htmlEscape(strategyLabV2.lastRun?.champion?.id || "aucun")}</div><div class="muted">Hypothèses transformées en candidats reproductibles; aucun ordre et aucune promotion automatique.</div></div>
+    <div class="card" style="margin-top:14px"><h3>Contrôles</h3><a href="/watch?secret=${encodeURIComponent(secret || "")}">Watch</a> · <a href="/scan?secret=${encodeURIComponent(secret || "")}">Scan</a> · <a href="/foundation-status?secret=${encodeURIComponent(secret || "")}">Foundation status</a> · <a href="/data-sources?secret=${encodeURIComponent(secret || "")}">Data sources</a> · <a href="/provider-health?secret=${encodeURIComponent(secret || "")}">Provider health</a> · <a href="/technical-summary?secret=${encodeURIComponent(secret || "")}">Technical summary</a> · <a href="/intelligence-summary?secret=${encodeURIComponent(secret || "")}">Intelligence summary</a> · <a href="/market-regime?secret=${encodeURIComponent(secret || "")}">Market regime</a> · <a href="/agent-council?secret=${encodeURIComponent(secret || "")}">Agent council</a> · <a href="/agent-history?secret=${encodeURIComponent(secret || "")}">Agent history</a> · <a href="/paper-status?secret=${encodeURIComponent(secret || "")}">Paper status</a> · <a href="/paper-performance?secret=${encodeURIComponent(secret || "")}">Paper performance</a> · <a href="/backtest-status?secret=${encodeURIComponent(secret || "")}">Backtest status</a> · <a href="/strategy-validation?secret=${encodeURIComponent(secret || "")}">Strategy validation</a> · <a href="/live-preflight?secret=${encodeURIComponent(secret || "")}&asset=SPY&side=BUY&amount=10">LIVE preflight</a> · <a href="/execution-status?secret=${encodeURIComponent(secret || "")}">Execution status</a> · <a href="/allocation-status?secret=${encodeURIComponent(secret || "")}">Allocation status</a> · <a href="/performance-status?secret=${encodeURIComponent(secret || "")}">Performance status</a> · <a href="/performance-history?secret=${encodeURIComponent(secret || "")}">Performance history</a> · <a href="/risk-sell-status?secret=${encodeURIComponent(secret || "")}">Risk/Sell status</a> · <a href="/risk-sell-history?secret=${encodeURIComponent(secret || "")}">Risk/Sell history</a> · <a href="/macro-regime-status?secret=${encodeURIComponent(secret || "")}">Macro regime</a> · <a href="/macro-regime-history?secret=${encodeURIComponent(secret || "")}">Macro history</a> · <a href="/data-quality-status?secret=${encodeURIComponent(secret || "")}">Data quality</a> · <a href="/scientific-backtest-status?secret=${encodeURIComponent(secret || "")}">Scientific backtests</a> · <a href="/scientific-backtest?secret=${encodeURIComponent(secret || "")}&asset=SPY">Scientific SPY</a> · <a href="/research-status?secret=${encodeURIComponent(secret || "")}">Research status</a> · <a href="/research-sources?secret=${encodeURIComponent(secret || "")}">Research sources</a> · <a href="/research-hypotheses?secret=${encodeURIComponent(secret || "")}">Research hypotheses</a> · <a href="/strategy-lab-v2-status?secret=${encodeURIComponent(secret || "")}">StrategyLab v10.18</a> · <a href="/strategy-lab-experiments?secret=${encodeURIComponent(secret || "")}">Lab experiments</a> · <a href="/strategy-lab-leaderboard?secret=${encodeURIComponent(secret || "")}">Lab leaderboard</a> · <a href="/audit?secret=${encodeURIComponent(secret || "")}">Audit</a></div>
   </div></body></html>`;
 }
 
@@ -8538,7 +14021,16 @@ app.get("/health", (req, res) => {
     healthAgent: health,
     providerHealthAgent: buildProviderHealthAgent(),
     strategyValidationAgent: buildStrategyValidationAgent(),
+    riskSellIntelligenceAgent: runtimeState.lastRiskSellReport || { status: "NOT_MEASURED" },
+    macroCreditFundamentalRegimeAgent: runtimeState.lastMacroCreditRegime || { regime: "UNKNOWN", status: "NOT_MEASURED" },
+    researchKnowledgeLayer: runtimeState.lastResearchReport || buildResearchKnowledgeReport(),
     paperPerformanceAgent: calculatePaperPerformance(),
+    livePerformanceAgent: runtimeState.lastPerformanceReport || {
+      name: "LivePerformanceAttributionAgent",
+      enabled: LIVE_PERFORMANCE_ATTRIBUTION_ENABLED,
+      status: "NOT_MEASURED"
+    },
+    executionVerifier: executionVerifierStatus(),
     memory: memoryStatus()
   });
 });
@@ -8565,6 +14057,516 @@ app.get("/memory-status", requireSecret, (req, res) => {
   });
 });
 
+app.get("/scheduler-status", requireSecret, (req, res) => {
+  res.json({
+    version: VERSION,
+    time: nowIso(),
+    scheduler: schedulerStatus(),
+    scan_running: runtimeState.scanRunning,
+    watch_running: runtimeState.watchRunning,
+    memory: compactMemoryStatus()
+  });
+});
+
+app.get("/execution-status", requireSecret, (req, res) => {
+  res.json({
+    version: VERSION,
+    time: nowIso(),
+    executionVerifier: executionVerifierStatus()
+  });
+});
+
+app.get("/allocation-status", requireSecret, async (req, res) => {
+  try {
+    if (PAPER_TRADING_ENABLED && !runtimeState.paperPortfolio) {
+      const marketData = await getMarketRates();
+      const real = await getPortfolio();
+      ensurePaperPortfolio(extractPortfolioSummary(real), marketData.normalized);
+      markPaperPortfolio(marketData.normalized);
+    }
+    const portfolio = PAPER_TRADING_ENABLED ? paperPortfolioResponse() : await getPortfolio();
+    const summary = extractPortfolioSummary(portfolio);
+    const plan = getPortfolioAllocationPlan(summary);
+    res.json({
+      version: VERSION,
+      time: nowIso(),
+      tradingMode: TRADING_MODE,
+      policy: PORTFOLIO_ALLOCATION_POLICY,
+      plan,
+      compact: {
+        status: plan.status,
+        profile: plan.profile,
+        cash: plan.cash,
+        recommendedBuys: plan.recommendedBuys.slice(0, 8),
+        overweightAssets: plan.overweightAssets,
+        overweightBuckets: plan.overweightBuckets
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ version: VERSION, error: error.message });
+  }
+});
+
+
+app.get("/macro-regime-status", requireSecret, async (req, res) => {
+  try {
+    const context = await buildRuntimeContext("macro-regime-status");
+    res.json({
+      version: VERSION,
+      time: nowIso(),
+      tradingMode: TRADING_MODE,
+      macroCreditFundamentalRegimeAgent: context.macroCreditRegimeAgent,
+      safety: "Cet endpoint analyse des proxys de marché et n'envoie aucun ordre."
+    });
+  } catch (error) {
+    res.status(500).json({
+      version: VERSION,
+      error: error.message,
+      macroCreditFundamentalRegimeAgent: runtimeState.lastMacroCreditRegime
+    });
+  }
+});
+
+app.get("/macro-regime-history", requireSecret, (req, res) => {
+  const limit = Math.max(1, Math.min(MACRO_REGIME_HISTORY_LIMIT, Number(req.query.limit || 100)));
+  res.json({
+    version: VERSION,
+    time: nowIso(),
+    mode: MACRO_CREDIT_REGIME_MODE,
+    history: runtimeState.macroCreditRegimeHistory.slice(-limit),
+    lastReport: runtimeState.lastMacroCreditRegime,
+    safety: "Historique informatif; aucun ordre n'est créé par cet endpoint."
+  });
+});
+
+
+
+app.get("/data-quality-status", requireSecret, (req, res) => {
+  res.json({ version: VERSION, time: nowIso(), ...buildDataQualityStatus() });
+});
+
+app.get("/data-quality-audit", requireSecret, async (req, res) => {
+  try {
+    const asset = String(req.query.asset || "SPY").toUpperCase();
+    if (!WATCHLIST[asset]) return res.status(400).json({ version: VERSION, error: `Actif invalide: ${asset}` });
+    const interval = String(req.query.interval || "OneDay");
+    const count = Math.min(1000, Math.max(30, Number(req.query.count || 500)));
+    const force = String(req.query.force || "false") === "true";
+    const historical = await getHistoricalCandles(asset, interval, count, force);
+    const report = auditHistoricalCandles(asset, historical.candles, {
+      interval,
+      selectedProvider: historical.selectedProvider,
+      selectedSource: historical.selectedSource
+    });
+    recordDataQualityReport(report);
+    await flushPersistentState();
+    res.json({
+      version: VERSION,
+      time: nowIso(),
+      report: compactDataQualityReport(report),
+      dataSource: {
+        selectedProvider: historical.selectedProvider,
+        selectedSource: historical.selectedSource,
+        divergence: historical.divergence || null
+      },
+      safety: { analysisOnly: true, orderSent: false }
+    });
+  } catch (error) {
+    res.status(500).json({ version: VERSION, error: error.message });
+  }
+});
+
+app.get("/scientific-backtest-status", requireSecret, (req, res) => {
+  res.json({ version: VERSION, time: nowIso(), ...scientificBacktestStatus() });
+});
+
+app.get("/scientific-backtest-registry", requireSecret, (req, res) => {
+  const limit = Math.max(1, Math.min(250, Number(req.query.limit || 50)));
+  res.json({
+    version: VERSION,
+    time: nowIso(),
+    count: runtimeState.scientificBacktestRegistry.length,
+    trials: runtimeState.scientificBacktestRegistry.slice(0, limit),
+    safety: { analysisOnly: true, directLiveInfluence: false }
+  });
+});
+
+app.get("/scientific-backtest", requireSecret, async (req, res) => {
+  try {
+    const asset = String(req.query.asset || "SPY").toUpperCase();
+    const report = await runScientificAssetBacktest(asset, {
+      count: Number(req.query.count || Math.max(BACKTEST_DEFAULT_CANDLES, 500)),
+      force: String(req.query.force || "false") === "true",
+      trainPct: Number(req.query.trainPct || SCIENTIFIC_BACKTEST_TRAIN_PCT),
+      embargoCandles: Number(req.query.embargoCandles ?? SCIENTIFIC_BACKTEST_EMBARGO_CANDLES),
+      feePct: req.query.feePct !== undefined ? Number(req.query.feePct) : undefined,
+      slippageBps: req.query.slippageBps !== undefined ? Number(req.query.slippageBps) : undefined
+    });
+    await flushPersistentState();
+    res.json({ version: VERSION, time: nowIso(), report, safety: { analysisOnly: true, orderSent: false } });
+  } catch (error) {
+    res.status(400).json({ version: VERSION, error: error.message, safety: { analysisOnly: true, orderSent: false } });
+  }
+});
+
+app.get("/scientific-portfolio-backtest", requireSecret, async (req, res) => {
+  try {
+    const assets = String(req.query.assets || BACKTEST_DEFAULT_ASSETS.join(","))
+      .split(",")
+      .map((asset) => asset.trim().toUpperCase())
+      .filter(Boolean);
+    const report = await runScientificPortfolioBacktest(assets, {
+      count: Number(req.query.count || Math.max(BACKTEST_DEFAULT_CANDLES, 500)),
+      force: String(req.query.force || "false") === "true",
+      trainPct: Number(req.query.trainPct || SCIENTIFIC_BACKTEST_TRAIN_PCT),
+      embargoCandles: Number(req.query.embargoCandles ?? SCIENTIFIC_BACKTEST_EMBARGO_CANDLES),
+      feePct: req.query.feePct !== undefined ? Number(req.query.feePct) : undefined,
+      slippageBps: req.query.slippageBps !== undefined ? Number(req.query.slippageBps) : undefined
+    });
+    await flushPersistentState();
+    res.json({ version: VERSION, time: nowIso(), report, safety: { analysisOnly: true, orderSent: false } });
+  } catch (error) {
+    res.status(400).json({ version: VERSION, error: error.message, safety: { analysisOnly: true, orderSent: false } });
+  }
+});
+
+app.get("/research-status", requireSecret, (req, res) => {
+  res.json({
+    version: VERSION,
+    time: nowIso(),
+    research: buildResearchKnowledgeReport(),
+    recentEvents: runtimeState.researchEvents.slice(0, 20),
+    memory: compactMemoryStatus()
+  });
+});
+
+app.get("/research-sources", requireSecret, (req, res) => {
+  const status = req.query.status ? String(req.query.status).toUpperCase() : null;
+  const domain = req.query.domain ? String(req.query.domain).toUpperCase() : null;
+  const sources = runtimeState.researchSources.filter((source) =>
+    (!status || source.status === status) &&
+    (!domain || (source.domains || []).some((item) => String(item).toUpperCase().includes(domain)))
+  );
+  res.json({ version: VERSION, count: sources.length, sources });
+});
+
+app.get("/research-evidence", requireSecret, (req, res) => {
+  const status = req.query.status ? String(req.query.status).toUpperCase() : null;
+  const domain = req.query.domain ? String(req.query.domain).toUpperCase() : null;
+  const evidence = runtimeState.researchEvidence.filter((item) =>
+    (!status || item.status === status) &&
+    (!domain || String(item.domain || "").includes(domain))
+  );
+  res.json({ version: VERSION, count: evidence.length, evidence });
+});
+
+app.get("/research-hypotheses", requireSecret, (req, res) => {
+  const status = req.query.status ? String(req.query.status).toUpperCase() : null;
+  const hypotheses = runtimeState.researchHypotheses.filter((item) => !status || item.status === status);
+  res.json({ version: VERSION, count: hypotheses.length, hypotheses });
+});
+
+app.get("/research-experiments", requireSecret, (req, res) => {
+  const phase = req.query.phase ? String(req.query.phase).toUpperCase() : null;
+  const status = req.query.status ? String(req.query.status).toUpperCase() : null;
+  const experiments = runtimeState.researchExperiments.filter((item) =>
+    (!phase || item.phase === phase) && (!status || item.status === status)
+  );
+  res.json({ version: VERSION, count: experiments.length, experiments });
+});
+
+app.get("/research-export", requireSecret, (req, res) => {
+  res.json({
+    version: VERSION,
+    exportedAt: nowIso(),
+    governance: {
+      advisoryOnly: true,
+      directLiveInfluence: false,
+      livePromotionImplemented: false
+    },
+    report: buildResearchKnowledgeReport(),
+    sources: runtimeState.researchSources,
+    evidence: runtimeState.researchEvidence,
+    hypotheses: runtimeState.researchHypotheses,
+    experiments: runtimeState.researchExperiments,
+    events: runtimeState.researchEvents
+  });
+});
+
+app.post("/research/source", requireSecret, async (req, res) => {
+  try {
+    const result = upsertResearchSource(req.body || {});
+    addAudit("RESEARCH_SOURCE_UPSERT", { sourceId: result.source.id, created: result.created });
+    await flushPersistentState();
+    res.json({ version: VERSION, ...result, report: buildResearchKnowledgeReport() });
+  } catch (error) {
+    res.status(400).json({ version: VERSION, error: error.message });
+  }
+});
+
+app.post("/research/evidence", requireSecret, async (req, res) => {
+  try {
+    const result = upsertResearchEvidence(req.body || {});
+    addAudit("RESEARCH_EVIDENCE_UPSERT", { evidenceId: result.evidence.id, created: result.created });
+    await flushPersistentState();
+    res.json({ version: VERSION, ...result, report: buildResearchKnowledgeReport() });
+  } catch (error) {
+    res.status(400).json({ version: VERSION, error: error.message });
+  }
+});
+
+app.post("/research/hypothesis", requireSecret, async (req, res) => {
+  try {
+    const result = upsertResearchHypothesis(req.body || {});
+    addAudit("RESEARCH_HYPOTHESIS_UPSERT", { hypothesisId: result.hypothesis.id, created: result.created });
+    await flushPersistentState();
+    res.json({ version: VERSION, ...result, report: buildResearchKnowledgeReport() });
+  } catch (error) {
+    res.status(400).json({ version: VERSION, error: error.message });
+  }
+});
+
+app.post("/research/experiment", requireSecret, async (req, res) => {
+  try {
+    if (String(req.body?.phase || "").toUpperCase() === "LIVE") {
+      return res.status(403).json({ version: VERSION, error: "Une expérience de recherche ne peut pas utiliser la phase LIVE" });
+    }
+    const result = createResearchExperiment(req.body || {});
+    addAudit("RESEARCH_EXPERIMENT_PLANNED", { experimentId: result.experiment.id, phase: result.experiment.phase });
+    await flushPersistentState();
+    res.json({ version: VERSION, ...result, report: buildResearchKnowledgeReport() });
+  } catch (error) {
+    res.status(400).json({ version: VERSION, error: error.message });
+  }
+});
+
+app.post("/research/review", requireSecret, async (req, res) => {
+  try {
+    if (req.body?.confirmation !== RESEARCH_REVIEW_CONFIRMATION) {
+      return res.status(400).json({
+        version: VERSION,
+        error: `Confirmation requise: ${RESEARCH_REVIEW_CONFIRMATION}`
+      });
+    }
+    const item = reviewResearchItem(req.body || {});
+    addAudit("RESEARCH_ITEM_REVIEWED", { itemType: req.body.itemType, itemId: item.id, status: item.status });
+    await flushPersistentState();
+    res.json({ version: VERSION, item, report: buildResearchKnowledgeReport() });
+  } catch (error) {
+    res.status(400).json({ version: VERSION, error: error.message });
+  }
+});
+
+app.post("/research/generate-hypotheses", requireSecret, async (req, res) => {
+  try {
+    if (req.body?.confirmation !== RESEARCH_GENERATE_CONFIRMATION) {
+      return res.status(400).json({
+        version: VERSION,
+        error: `Confirmation requise: ${RESEARCH_GENERATE_CONFIRMATION}`
+      });
+    }
+    const hypotheses = generateResearchHypothesesFromEvidence({ limit: req.body?.limit });
+    addAudit("RESEARCH_HYPOTHESES_GENERATED", { count: hypotheses.length });
+    await flushPersistentState();
+    res.json({ version: VERSION, count: hypotheses.length, hypotheses, report: buildResearchKnowledgeReport() });
+  } catch (error) {
+    res.status(400).json({ version: VERSION, error: error.message });
+  }
+});
+
+app.post("/research/seed", requireSecret, async (req, res) => {
+  try {
+    if (req.body?.confirmation !== RESEARCH_SEED_CONFIRMATION) {
+      return res.status(400).json({
+        version: VERSION,
+        error: `Confirmation requise: ${RESEARCH_SEED_CONFIRMATION}`
+      });
+    }
+    const result = seedResearchKnowledgeLibrary({ force: Boolean(req.body?.force) });
+    addAudit("RESEARCH_LIBRARY_SEEDED", result);
+    await flushPersistentState();
+    res.json({ version: VERSION, ...result });
+  } catch (error) {
+    res.status(400).json({ version: VERSION, error: error.message });
+  }
+});
+
+
+app.get("/strategy-lab-v2-status", requireSecret, (req, res) => {
+  res.json(strategyLabV2Status());
+});
+
+app.get("/strategy-lab-experiments", requireSecret, (req, res) => {
+  const limit = Math.max(1, Math.min(STRATEGY_LAB_V2_HISTORY_LIMIT, Number(req.query.limit || 50)));
+  const status = String(req.query.status || "").toUpperCase();
+  const experiments = (runtimeState.strategyLabV2Experiments || [])
+    .filter((item) => !status || item.status === status)
+    .slice(0, limit);
+  res.json({ version: VERSION, count: experiments.length, experiments, analysisOnly: true });
+});
+
+app.get("/strategy-lab-leaderboard", requireSecret, (req, res) => {
+  const limit = Math.max(1, Math.min(STRATEGY_LAB_V2_LEADERBOARD_LIMIT, Number(req.query.limit || 50)));
+  res.json({
+    version: VERSION,
+    generatedAt: nowIso(),
+    count: runtimeState.strategyLabV2Leaderboard.length,
+    leaderboard: runtimeState.strategyLabV2Leaderboard.slice(0, limit),
+    governance: { analysisOnly: true, orderSent: false, autoPromotion: false }
+  });
+});
+
+app.get("/strategy-lab-compile", requireSecret, (req, res) => {
+  if (String(req.query.confirm || "") !== STRATEGY_LAB_V2_COMPILE_CONFIRMATION) {
+    return res.status(400).json({
+      version: VERSION,
+      skipped: true,
+      reason: `Ajoute &confirm=${STRATEGY_LAB_V2_COMPILE_CONFIRMATION}`,
+      analysisOnly: true
+    });
+  }
+  try {
+    const result = compileReadyStrategyLabV2Hypotheses({ limit: Number(req.query.limit || STRATEGY_LAB_V2_MAX_HYPOTHESES_PER_RUN) });
+    res.json({ version: VERSION, ...result });
+  } catch (error) {
+    res.status(400).json({ version: VERSION, error: error.message, analysisOnly: true });
+  }
+});
+
+app.get("/strategy-lab-run", requireSecret, async (req, res) => {
+  if (String(req.query.confirm || "") !== STRATEGY_LAB_V2_RUN_CONFIRMATION) {
+    return res.status(400).json({
+      version: VERSION,
+      skipped: true,
+      reason: `Ajoute &confirm=${STRATEGY_LAB_V2_RUN_CONFIRMATION}`,
+      analysisOnly: true
+    });
+  }
+  try {
+    let experimentId = researchSafeText(req.query.experimentId, 180);
+    if (!experimentId) {
+      const hypothesisId = researchSafeText(req.query.hypothesisId, 180);
+      const hypothesis = runtimeState.researchHypotheses.find((item) => item.id === hypothesisId);
+      if (!hypothesis) throw new Error("Ajoute experimentId ou un hypothesisId valide");
+      experimentId = compileStrategyLabV2Hypothesis(hypothesis, { assets: req.query.assets }).experiment.id;
+    }
+    const result = await runStrategyLabV2Experiment(experimentId, {
+      assets: req.query.assets,
+      count: Number(req.query.count || STRATEGY_LAB_V2_CANDLES),
+      force: String(req.query.force || "") === "true",
+      trigger: "manual-http"
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ version: VERSION, error: error.message, analysisOnly: true, orderSent: false });
+  }
+});
+
+app.get("/strategy-lab-run-all", requireSecret, async (req, res) => {
+  if (String(req.query.confirm || "") !== STRATEGY_LAB_V2_BATCH_CONFIRMATION) {
+    return res.status(400).json({
+      version: VERSION,
+      skipped: true,
+      reason: `Ajoute &confirm=${STRATEGY_LAB_V2_BATCH_CONFIRMATION}`,
+      analysisOnly: true
+    });
+  }
+  try {
+    const result = await runStrategyLabV2Batch({
+      limit: Number(req.query.limit || STRATEGY_LAB_V2_MAX_HYPOTHESES_PER_RUN),
+      force: String(req.query.force || "") === "true",
+      trigger: "manual-http-batch"
+    });
+    res.json({ version: VERSION, ...result });
+  } catch (error) {
+    res.status(400).json({ version: VERSION, error: error.message, analysisOnly: true, orderSent: false });
+  }
+});
+
+app.get("/risk-sell-status", requireSecret, async (req, res) => {
+  try {
+    const context = await buildRuntimeContext("risk-sell-status");
+    res.json({
+      version: VERSION,
+      time: nowIso(),
+      tradingMode: TRADING_MODE,
+      riskSell: context.riskSellIntelligenceAgent,
+      safety: "Cet endpoint n'envoie aucun ordre."
+    });
+  } catch (error) {
+    res.status(500).json({ version: VERSION, error: error.message, riskSell: runtimeState.lastRiskSellReport });
+  }
+});
+
+app.get("/risk-sell-history", requireSecret, (req, res) => {
+  const limit = Math.max(1, Math.min(RISK_SELL_HISTORY_LIMIT, Number(req.query.limit || 100)));
+  res.json({
+    version: VERSION,
+    time: nowIso(),
+    mode: RISK_SELL_MODE,
+    highWaterByAsset: runtimeState.riskSellHighWaterByAsset,
+    history: runtimeState.riskSellHistory.slice(0, limit),
+    lastReport: runtimeState.lastRiskSellReport,
+    safety: "Historique informatif; aucun ordre n'est créé par cet endpoint."
+  });
+});
+
+app.get("/performance-status", requireSecret, async (req, res) => {
+  try {
+    const context = await buildRuntimeContext("performance-status");
+    res.json({
+      version: VERSION,
+      time: nowIso(),
+      tradingMode: TRADING_MODE,
+      performance: context.livePerformanceAgent
+    });
+  } catch (error) {
+    res.status(500).json({ version: VERSION, error: error.message, performance: runtimeState.lastPerformanceReport });
+  }
+});
+
+app.get("/performance-history", requireSecret, (req, res) => {
+  const limit = Math.max(1, Math.min(PERFORMANCE_HISTORY_LIMIT, Number(req.query.limit || 200)));
+  res.json({
+    version: VERSION,
+    time: nowIso(),
+    benchmarkAsset: PERFORMANCE_BENCHMARK_ASSET,
+    baseline: runtimeState.performanceBaseline,
+    points: runtimeState.performanceHistory.slice(-limit),
+    lastReport: runtimeState.lastPerformanceReport
+  });
+});
+
+app.get("/performance-reset", requireSecret, (req, res) => {
+  if (String(req.query.confirm || "") !== PERFORMANCE_RESET_CONFIRMATION) {
+    return res.status(400).json({
+      version: VERSION,
+      error: "Confirmation manquante",
+      required: `?confirm=${PERFORMANCE_RESET_CONFIRMATION}`,
+      safety: "Cette action efface uniquement la base et l'historique de performance v10.13; elle n'envoie aucun ordre et ne modifie pas le portefeuille."
+    });
+  }
+  const result = resetPerformanceBaseline("manual-endpoint");
+  res.json({ version: VERSION, time: nowIso(), result });
+});
+
+app.get("/execution-reconcile", requireSecret, async (req, res) => {
+  if (String(req.query.confirm || "") !== EXECUTION_RECONCILE_CONFIRMATION) {
+    return res.status(400).json({
+      version: VERSION,
+      error: "Confirmation manquante",
+      required: `?confirm=${EXECUTION_RECONCILE_CONFIRMATION}`,
+      safety: "Cette action relit le portefeuille et met à jour les intents; elle n'envoie aucun ordre."
+    });
+  }
+  const result = await reconcileExecutionIntents({
+    trigger: "manual-endpoint",
+    limit: Number(req.query.limit || EXECUTION_RECONCILE_MAX_PER_RUN)
+  });
+  await flushPersistentState();
+  res.json({ version: VERSION, time: nowIso(), result, executionVerifier: executionVerifierStatus() });
+});
+
 app.get("/force-save", requireSecret, async (req, res) => {
   const ok = await savePersistentState();
 
@@ -8587,6 +14589,10 @@ app.get("/status", requireSecret, async (req, res) => {
       portfolio: context.portfolioSummary,
       real_portfolio: PAPER_TRADING_ENABLED ? context.realSummary : undefined,
       foundation_agents: context.foundationAgents,
+      live_performance: context.livePerformanceAgent,
+      macro_credit_fundamental_regime: context.macroCreditRegimeAgent,
+      data_quality: buildDataQualityStatus(),
+      scientific_backtesting: scientificBacktestStatus(),
       preferred_next_assets: getPreferredNextAssets(
         context.portfolioSummary,
         context.marketSummary
@@ -8648,6 +14654,13 @@ app.get("/metrics", requireSecret, async (req, res) => {
       daily_change_pct: risk.dailyChangePct,
       weekly_change_pct: risk.weeklyChangePct,
       drawdown_pct: risk.drawdownPct,
+      performance_status: context.livePerformanceAgent?.status || null,
+      performance_account_return_pct: context.livePerformanceAgent?.performance?.accountReturnPct ?? null,
+      performance_benchmark_return_pct: context.livePerformanceAgent?.performance?.benchmarkReturnPct ?? null,
+      performance_excess_return_pct: context.livePerformanceAgent?.performance?.excessReturnPct ?? null,
+      performance_sharpe: context.livePerformanceAgent?.performance?.sharpe ?? null,
+      performance_tracking_error_pct: context.livePerformanceAgent?.performance?.trackingErrorPct ?? null,
+      performance_information_ratio: context.livePerformanceAgent?.performance?.informationRatio ?? null,
       circuit_breaker_open: health.circuitBreakerOpen,
       circuit_breaker_reasons: health.reasons,
       execution_stats_24h: getExecutionStats24h(),
@@ -8984,7 +14997,8 @@ app.get("/strategy-lab-status", requireSecret, (req, res) => {
     activeExecutionStrategy: getExecutionStrategyParams(TRADING_MODE),
     lastImprovementRun: runtimeState.lastImprovementRun,
     candidates: runtimeState.strategyCandidates.slice(0, 30),
-    history: runtimeState.improvementHistory.slice(0, 30)
+    history: runtimeState.improvementHistory.slice(0, 30),
+    strategyLabV2: strategyLabV2Status()
   });
 });
 
@@ -9039,7 +15053,7 @@ app.get("/diagnostic", requireSecret, async (req, res) => {
       version: VERSION,
       time: nowIso(),
       trading_mode: TRADING_MODE,
-      message: "Diagnostic v10.10 : consensus multi-source, historiques croisés, portefeuille, technique, actualités, fondamentaux, sentiment social, risque et exécution.",
+      message: "Diagnostic v10.11 : consensus multi-source, portefeuille REAL, ExecutionVerifier, technique, actualités, fondamentaux, risque et exécution.",
       configuration: envConfiguration(),
       portfolioSummary: context.portfolioSummary,
       realPortfolioSummary: PAPER_TRADING_ENABLED ? context.realSummary : undefined,
@@ -9205,8 +15219,16 @@ app.get("/buy-test", requireSecret, async (req, res) => {
     }
     const portfolio = PAPER_TRADING_ENABLED ? paperPortfolioResponse() : await getPortfolio();
     if (hasOpenPosition(portfolio, asset)) return res.json({ skipped: true, reason: `Position déjà ouverte sur ${asset}` });
-    const result = await executeBuy(asset, amount, marketData);
-    addLog({ source: "manual-buy-test", event: "MANUAL_BUY", tradingMode: TRADING_MODE, asset, amount, marketCheck, execution: result, memory: memoryStatus() });
+    const portfolioSummary = extractPortfolioSummary(portfolio);
+    const allocationGuard = allocationCheckForBuy(asset, portfolioSummary, amount);
+    if (PORTFOLIO_ALLOCATION_MODE === "enforced" && !allocationGuard.ok) {
+      return res.json({ skipped: true, reason: allocationGuard.reason, allocationGuard, portfolioSummary });
+    }
+    const safeAmount = PORTFOLIO_ALLOCATION_MODE === "enforced"
+      ? Math.min(amount, Number(allocationGuard.roomUsd || 0))
+      : amount;
+    const result = await executeBuy(asset, safeAmount, marketData);
+    addLog({ source: "manual-buy-test", event: "MANUAL_BUY", tradingMode: TRADING_MODE, asset, amount: safeAmount, allocationGuard, marketCheck, execution: result, memory: memoryStatus() });
     res.json(result);
   } catch (error) { res.json({ error: error.message }); }
 });
@@ -9549,55 +15571,167 @@ app.get("/audit", requireSecret, (req, res) => {
   res.json({ version: VERSION, audit: runtimeState.auditTrail.slice(0, limit), orderIntents: runtimeState.orderIntents, health: buildHealthAgent(), memory: memoryStatus() });
 });
 
+function validateCronSchedule(name, schedule) {
+  if (!cron.validate(schedule)) {
+    throw new Error(`Expression cron invalide pour ${name}: ${schedule}`);
+  }
+}
+
 function startSchedulers() {
-  cron.schedule(WATCH_CRON_SCHEDULE, async () => {
-    console.log(`[${nowIso()}] Watch automatique toutes les 15 min lancé`);
+  console.log("SCHEDULER CONFIG:", JSON.stringify(schedulerStatus()));
 
-    try {
-      const result = await watchMarket("auto-watch");
-      console.log("WATCH AUTO RESULT:", JSON.stringify({
-        version: result.version,
-        source: result.source,
-        market_data_ok: result.market_data_ok,
-        market_data_source: result.market_data_source,
-        memory: memoryStatus()
+  if (ENABLE_INTERNAL_WATCH_CRON) {
+    validateCronSchedule("watch", WATCH_CRON_SCHEDULE);
+    cron.schedule(WATCH_CRON_SCHEDULE, async () => {
+      const runId = automationRunId("watch");
+      const startedAt = Date.now();
+      console.log("WATCH AUTO START:", JSON.stringify({
+        version: VERSION,
+        event: "WATCH_STARTED",
+        run_id: runId,
+        time: nowIso(),
+        schedule: WATCH_CRON_SCHEDULE
       }));
-    } catch (error) {
-      console.error("Erreur watch automatique:", error.message);
-    }
-  });
 
-  cron.schedule(TRADE_CRON_SCHEDULE, async () => {
-    console.log(`[${nowIso()}] Scan trading automatique toutes les 2h lancé`);
+      try {
+        if (runtimeState.scanRunning) {
+          const skipped = {
+            version: VERSION,
+            source: "auto-watch",
+            trading_mode: TRADING_MODE,
+            skipped: true,
+            reason: "Scan de trading déjà en cours"
+          };
+          console.log("WATCH AUTO RESULT:", JSON.stringify(
+            summarizeWatchResult(skipped, runId, Date.now() - startedAt, false)
+          ));
+          return;
+        }
 
-    try {
-      const result = await scanMarket("auto-trade-cron");
-      console.log("SCAN AUTO RESULT:", JSON.stringify(result));
-    } catch (error) {
-      console.error("Erreur scan automatique:", error.message);
-    }
-  });
+        const result = await watchMarket("auto-watch");
+        const saved = await flushPersistentState();
+        const summary = summarizeWatchResult(
+          result,
+          runId,
+          Date.now() - startedAt,
+          saved
+        );
+        console.log(
+          "WATCH AUTO RESULT:",
+          JSON.stringify(AUTOMATION_LOG_DETAIL === "full" ? { ...summary, result } : summary)
+        );
+        emitMemoryPressureWarning("auto-watch", runId);
+      } catch (error) {
+        console.error("WATCH AUTO ERROR:", JSON.stringify({
+          version: VERSION,
+          event: "WATCH_FAILED",
+          run_id: runId,
+          duration_ms: Date.now() - startedAt,
+          error: error.message,
+          memory: compactMemoryStatus()
+        }));
+      }
+    });
+  } else {
+    console.log("WATCH CRON DISABLED: ENABLE_INTERNAL_WATCH_CRON=false");
+  }
+
+  if (ENABLE_INTERNAL_TRADE_CRON) {
+    validateCronSchedule("trade", TRADE_CRON_SCHEDULE);
+    cron.schedule(TRADE_CRON_SCHEDULE, async () => {
+      const runId = automationRunId("scan");
+      const startedAt = Date.now();
+      console.log("SCAN AUTO START:", JSON.stringify({
+        version: VERSION,
+        event: "SCAN_STARTED",
+        run_id: runId,
+        time: nowIso(),
+        schedule: TRADE_CRON_SCHEDULE,
+        trading_mode: TRADING_MODE
+      }));
+
+      try {
+        const result = await scanMarket("auto-trade-cron");
+        const saved = await flushPersistentState();
+        const summary = summarizeScanResult(
+          result,
+          runId,
+          Date.now() - startedAt,
+          saved
+        );
+        console.log(
+          "SCAN AUTO RESULT:",
+          JSON.stringify(AUTOMATION_LOG_DETAIL === "full" ? { ...summary, result } : summary)
+        );
+        emitMemoryPressureWarning("auto-trade-cron", runId);
+      } catch (error) {
+        console.error("SCAN AUTO ERROR:", JSON.stringify({
+          version: VERSION,
+          event: "SCAN_FAILED",
+          run_id: runId,
+          duration_ms: Date.now() - startedAt,
+          error: error.message,
+          memory: compactMemoryStatus()
+        }));
+      }
+    });
+  } else {
+    console.log("TRADE CRON DISABLED: ENABLE_INTERNAL_TRADE_CRON=false");
+  }
 
   if (POINT_IN_TIME_ARCHIVE_ENABLED && POINT_IN_TIME_ARCHIVE_SCHEDULE_ENABLED) {
+    validateCronSchedule("point-in-time archive", POINT_IN_TIME_ARCHIVE_CRON);
     cron.schedule(POINT_IN_TIME_ARCHIVE_CRON, async () => {
-      console.log(`[${nowIso()}] Collecte point-in-time automatique lancée`);
+      const runId = automationRunId("archive");
+      const startedAt = Date.now();
+      console.log("POINT-IN-TIME ARCHIVE START:", JSON.stringify({
+        version: VERSION,
+        run_id: runId,
+        time: nowIso(),
+        schedule: POINT_IN_TIME_ARCHIVE_CRON
+      }));
       try {
         const result = await collectPointInTimeArchive({
           assets: POINT_IN_TIME_ARCHIVE_ASSETS,
           force: POINT_IN_TIME_ARCHIVE_FORCE_REFRESH,
           trigger: "archive-cron"
         });
-        console.log("POINT-IN-TIME ARCHIVE RESULT:", JSON.stringify({ stored: result.stored, failures: result.failures?.length || 0 }));
+        const saved = await flushPersistentState();
+        console.log("POINT-IN-TIME ARCHIVE RESULT:", JSON.stringify({
+          version: VERSION,
+          event: "ARCHIVE_COMPLETED",
+          run_id: runId,
+          duration_ms: Date.now() - startedAt,
+          stored: result.stored,
+          failures: result.failures?.length || 0,
+          state_saved: saved,
+          memory: compactMemoryStatus()
+        }));
+        emitMemoryPressureWarning("archive-cron", runId);
       } catch (error) {
-        console.error("Erreur collecte point-in-time:", error.message);
+        console.error("POINT-IN-TIME ARCHIVE ERROR:", JSON.stringify({
+          version: VERSION,
+          event: "ARCHIVE_FAILED",
+          run_id: runId,
+          duration_ms: Date.now() - startedAt,
+          error: error.message
+        }));
       }
     });
   }
 
   if (AUTO_IMPROVEMENT_ENABLED && AUTO_IMPROVEMENT_SCHEDULE_ENABLED) {
+    validateCronSchedule("StrategyLab", AUTO_IMPROVEMENT_CRON);
     cron.schedule(AUTO_IMPROVEMENT_CRON, async () => {
       if (TRADING_MODE === "LIVE") return;
-      console.log(`[${nowIso()}] StrategyLab automatique lancé`);
+      const runId = automationRunId("strategy-lab");
+      const startedAt = Date.now();
+      console.log("STRATEGY LAB START:", JSON.stringify({
+        version: VERSION,
+        run_id: runId,
+        time: nowIso(),
+        schedule: AUTO_IMPROVEMENT_CRON
+      }));
       try {
         const result = await runControlledAutoImprovement({
           assets: AUTO_IMPROVEMENT_ASSETS,
@@ -9605,12 +15739,74 @@ function startSchedulers() {
           force: false,
           trigger: "strategy-lab-cron"
         });
-        console.log("STRATEGY LAB RESULT:", JSON.stringify({ champion: result.champion?.id || null, autoPromoted: result.autoPromoted }));
+        const saved = await flushPersistentState();
+        console.log("STRATEGY LAB RESULT:", JSON.stringify({
+          version: VERSION,
+          event: "STRATEGY_LAB_COMPLETED",
+          run_id: runId,
+          duration_ms: Date.now() - startedAt,
+          champion: result.champion?.id || null,
+          autoPromoted: result.autoPromoted,
+          state_saved: saved,
+          memory: compactMemoryStatus()
+        }));
       } catch (error) {
-        console.error("Erreur StrategyLab automatique:", error.message);
+        console.error("STRATEGY LAB ERROR:", JSON.stringify({
+          version: VERSION,
+          event: "STRATEGY_LAB_FAILED",
+          run_id: runId,
+          duration_ms: Date.now() - startedAt,
+          error: error.message
+        }));
       }
     });
   }
+
+  if (STRATEGY_LAB_V2_ENABLED && STRATEGY_LAB_V2_SCHEDULE_ENABLED) {
+    validateCronSchedule("StrategyLab v10.18", STRATEGY_LAB_V2_CRON);
+    cron.schedule(STRATEGY_LAB_V2_CRON, async () => {
+      if (TRADING_MODE === "LIVE" && !STRATEGY_LAB_V2_LIVE_ANALYSIS_ENABLED) return;
+      const runId = automationRunId("strategy-lab-v2");
+      const startedAt = Date.now();
+      console.log("STRATEGY LAB V2 START:", JSON.stringify({
+        version: VERSION,
+        run_id: runId,
+        time: nowIso(),
+        schedule: STRATEGY_LAB_V2_CRON,
+        trading_mode: TRADING_MODE,
+        analysis_only: true
+      }));
+      try {
+        const result = await runStrategyLabV2Batch({
+          limit: STRATEGY_LAB_V2_MAX_HYPOTHESES_PER_RUN,
+          force: false,
+          trigger: "strategy-lab-v2-cron"
+        });
+        const saved = await flushPersistentState();
+        console.log("STRATEGY LAB V2 RESULT:", JSON.stringify({
+          version: VERSION,
+          event: "STRATEGY_LAB_V2_COMPLETED",
+          run_id: runId,
+          duration_ms: Date.now() - startedAt,
+          completed: result.completed,
+          failed: result.failed,
+          state_saved: saved,
+          order_sent: false,
+          memory: compactMemoryStatus()
+        }));
+      } catch (error) {
+        console.error("STRATEGY LAB V2 ERROR:", JSON.stringify({
+          version: VERSION,
+          event: "STRATEGY_LAB_V2_FAILED",
+          run_id: runId,
+          duration_ms: Date.now() - startedAt,
+          error: error.message,
+          order_sent: false
+        }));
+      }
+    });
+  }
+
 }
 
 
@@ -9619,13 +15815,127 @@ const PORT = process.env.PORT || 3000;
 async function startServer() {
   await loadPersistentState();
   ensureStrategyRegistry();
+  const researchSeedResult = seedResearchKnowledgeLibrary({ force: false });
+  buildResearchKnowledgeReport();
+  console.log("RESEARCH KNOWLEDGE STARTUP:", JSON.stringify({
+    enabled: RESEARCH_KNOWLEDGE_ENABLED,
+    seeded: researchSeedResult.seeded,
+    sources: runtimeState.researchSources.length,
+    evidence: runtimeState.researchEvidence.length,
+    hypotheses: runtimeState.researchHypotheses.length,
+    experiments: runtimeState.researchExperiments.length,
+    directLiveInfluence: false
+  }));
+  console.log("DATA QUALITY & SCIENTIFIC BACKTESTING STARTUP:", JSON.stringify({
+    dataQualityEnabled: DATA_QUALITY_ENABLED,
+    enforcementMode: DATA_QUALITY_ENFORCEMENT_MODE,
+    minimumScore: DATA_QUALITY_MIN_SCORE,
+    scientificBacktestEnabled: SCIENTIFIC_BACKTEST_ENABLED,
+    trainPct: SCIENTIFIC_BACKTEST_TRAIN_PCT,
+    embargoCandles: SCIENTIFIC_BACKTEST_EMBARGO_CANDLES,
+    costStressMultiplier: SCIENTIFIC_BACKTEST_COST_STRESS_MULTIPLIER,
+    previousAudits: runtimeState.dataQualityHistory.length,
+    previousScientificTrials: runtimeState.scientificBacktestRegistry.length,
+    directLiveInfluence: false
+  }));
+  console.log("STRATEGY LAB V10.18 STARTUP:", JSON.stringify({
+    enabled: STRATEGY_LAB_V2_ENABLED,
+    scheduleEnabled: STRATEGY_LAB_V2_SCHEDULE_ENABLED,
+    schedule: STRATEGY_LAB_V2_CRON,
+    liveAnalysisEnabled: STRATEGY_LAB_V2_LIVE_ANALYSIS_ENABLED,
+    experiments: runtimeState.strategyLabV2Experiments.length,
+    runs: runtimeState.strategyLabV2Runs.length,
+    leaderboard: runtimeState.strategyLabV2Leaderboard.length,
+    analysisOnly: true,
+    directLiveInfluence: false
+  }));
   loadPointInTimeNdjson();
   prunePointInTimeArchive();
+  pruneOrderIntents();
+  if (LIVE_TRADING_ENABLED && EXECUTION_VERIFIER_ENABLED && EXECUTION_RECONCILE_ON_STARTUP) {
+    try {
+      const startupReconciliation = await reconcileExecutionIntents({
+        trigger: "startup",
+        limit: EXECUTION_RECONCILE_MAX_PER_RUN
+      });
+      console.log("EXECUTION RECONCILIATION STARTUP:", JSON.stringify(startupReconciliation));
+    } catch (error) {
+      console.error("EXECUTION RECONCILIATION STARTUP ERROR:", error.message);
+    }
+  }
   startSchedulers();
 
   return app.listen(PORT, () => {
     console.log(`LEO-AI SENTINEL ${VERSION} lancé sur le port ${PORT}`);
     console.log(`Mémoire : ${memoryBackend}`);
+    console.log("AUTOMATION STATUS:", JSON.stringify({
+      scheduler: schedulerStatus(),
+      executionVerifier: {
+        enabled: EXECUTION_VERIFIER_ENABLED,
+        activeIntents: executionVerifierStatus().activeIntentsCount,
+        reconcileOnStartup: EXECUTION_RECONCILE_ON_STARTUP,
+        reconcileOnWatch: EXECUTION_RECONCILE_ON_WATCH
+      },
+      portfolioAllocation: {
+        enabled: PORTFOLIO_ALLOCATION_ENGINE_ENABLED,
+        mode: PORTFOLIO_ALLOCATION_MODE,
+        profile: PORTFOLIO_ALLOCATION_PROFILE,
+        cashTargetPct: PORTFOLIO_ALLOCATION_POLICY.cashTargetPct
+      },
+      livePerformanceAttribution: {
+        enabled: LIVE_PERFORMANCE_ATTRIBUTION_ENABLED,
+        benchmarkAsset: PERFORMANCE_BENCHMARK_ASSET,
+        snapshotMinutes: PERFORMANCE_SNAPSHOT_MINUTES,
+        advisoryOnly: true
+      },
+      riskSellIntelligence: {
+        enabled: RISK_SELL_INTELLIGENCE_ENABLED,
+        mode: RISK_SELL_MODE,
+        status: runtimeState.lastRiskSellReport?.status || "NOT_MEASURED",
+        softDrawdownPct: RISK_SELL_SOFT_DRAWDOWN_PCT,
+        hardDrawdownPct: RISK_SELL_HARD_DRAWDOWN_PCT,
+        minimumEvidenceFamilies: RISK_SELL_MIN_EVIDENCE_FAMILIES
+      },
+      macroCreditFundamentalRegime: {
+        enabled: MACRO_CREDIT_REGIME_ENABLED,
+        mode: MACRO_CREDIT_REGIME_MODE,
+        currentRegime: runtimeState.lastMacroCreditRegime?.regime || "NOT_MEASURED",
+        minimumProxyCoverage: MACRO_MIN_PROXY_COVERAGE,
+        canTriggerSellAlone: false
+      },
+      researchKnowledgeLayer: {
+        enabled: RESEARCH_KNOWLEDGE_ENABLED,
+        sources: runtimeState.researchSources.length,
+        acceptedEvidence: runtimeState.researchEvidence.filter((item) => item.status === RESEARCH_EVIDENCE_STATUS.ACCEPTED).length,
+        hypotheses: runtimeState.researchHypotheses.length,
+        experiments: runtimeState.researchExperiments.length,
+        advisoryOnly: true,
+        directLiveInfluence: false
+      },
+      dataQualityScientificBacktesting: {
+        dataQualityEnabled: DATA_QUALITY_ENABLED,
+        enforcementMode: DATA_QUALITY_ENFORCEMENT_MODE,
+        minimumScore: DATA_QUALITY_MIN_SCORE,
+        audits: runtimeState.dataQualityHistory.length,
+        scientificBacktestEnabled: SCIENTIFIC_BACKTEST_ENABLED,
+        scientificTrials: runtimeState.scientificBacktestRegistry.length,
+        lastVerdict: runtimeState.lastScientificBacktestReport?.verdict || "NOT_RUN",
+        analysisOnly: true,
+        directLiveInfluence: false
+      },
+      strategyLabV2: {
+        enabled: STRATEGY_LAB_V2_ENABLED,
+        scheduleEnabled: STRATEGY_LAB_V2_SCHEDULE_ENABLED,
+        liveAnalysisEnabled: STRATEGY_LAB_V2_LIVE_ANALYSIS_ENABLED,
+        experiments: runtimeState.strategyLabV2Experiments.length,
+        runs: runtimeState.strategyLabV2Runs.length,
+        leaderboard: runtimeState.strategyLabV2Leaderboard.length,
+        lastStatus: runtimeState.lastStrategyLabV2Run?.status || "NOT_RUN",
+        analysisOnly: true,
+        directLiveInfluence: false
+      },
+      memory: compactMemoryStatus()
+    }));
   });
 }
 
@@ -9643,6 +15953,8 @@ module.exports = {
   ASSET_RULES,
   runtimeState,
   TRADING_MODE,
+  schedulerStatus,
+  envConfiguration,
   getZonedClock,
   getExpectedMarketSession,
   classifyMarketRate,
@@ -9650,6 +15962,12 @@ module.exports = {
   updateTrendMemory,
   buildTrendSummary,
   extractPortfolioSummary,
+  buildPortfolioAllocationPolicy,
+  buildPortfolioAllocationPlan,
+  getPortfolioAllocationPlan,
+  allocationCheckForBuy,
+  allocationBucketForAsset,
+  PORTFOLIO_ALLOCATION_POLICY,
   getPreferredNextAssets,
   isMarketRateTradable,
   buildRiskBudgetState,
@@ -9714,6 +16032,15 @@ module.exports = {
   validatePortfolioResponse,
   verifyRealPortfolioBeforeExecution,
   verifyPortfolioAfterExecution,
+  buildAssetExecutionSnapshot,
+  evaluateExecutionEvidence,
+  reconcileExecutionIntents,
+  executionVerifierStatus,
+  createOrderIntent,
+  updateOrderIntentStatus,
+  normalizeExecutionIntentStatus,
+  isActiveExecutionStatus,
+  EXECUTION_STATUS,
   buildPersistentState,
   fitPersistentStateToBudget,
   serializedByteLength,
@@ -9761,6 +16088,67 @@ module.exports = {
   runControlledAutoImprovement,
   promoteStrategyCandidate,
   rollbackStrategy,
+  performanceBenchmarkPrice,
+  performanceAttributionFromOpenPositions,
+  ensurePerformanceBaseline,
+  recordPerformanceSnapshot,
+  dailyPerformanceSnapshots,
+  buildLivePerformanceReport,
+  resetPerformanceBaseline,
+  buildMacroCreditFundamentalRegimeAgent,
+  macroCreditCheckForDecision,
+  macroAlignmentForAsset,
+  macroAssetPulse,
+  MACRO_REGIME_LABELS,
+  researchSafeText,
+  scoreResearchSource,
+  normalizeResearchSource,
+  upsertResearchSource,
+  normalizeResearchEvidence,
+  upsertResearchEvidence,
+  normalizeResearchHypothesis,
+  upsertResearchHypothesis,
+  buildExperimentProtocol,
+  createResearchExperiment,
+  reviewResearchItem,
+  buildResearchKnowledgeReport,
+  generateResearchHypothesesFromEvidence,
+  seedResearchKnowledgeLibrary,
+  BUILTIN_RESEARCH_SOURCES,
+  BUILTIN_RESEARCH_EVIDENCE,
+  RESEARCH_SOURCE_STATUS,
+  RESEARCH_EVIDENCE_STATUS,
+  RESEARCH_HYPOTHESIS_STATUS,
+  auditHistoricalCandles,
+  compactDataQualityReport,
+  recordDataQualityReport,
+  buildDataQualityStatus,
+  enforceDataQualityForBacktest,
+  buildHoldoutProtocol,
+  runScientificAssetBacktest,
+  runScientificPortfolioBacktest,
+  registerScientificBacktest,
+  scientificBacktestStatus,
+  compactScientificBacktestReport,
+  classifyStrategyLabV2Hypothesis,
+  buildStrategyLabV2Candidates,
+  compileStrategyLabV2Hypothesis,
+  compileReadyStrategyLabV2Hypotheses,
+  prepareStrategyLabV2Dataset,
+  aggregateStrategyLabV2WalkForward,
+  scoreStrategyLabV2Candidate,
+  evaluateStrategyLabV2Candidate,
+  rebuildStrategyLabV2Leaderboard,
+  runStrategyLabV2Experiment,
+  runStrategyLabV2Batch,
+  strategyLabV2Status,
+  STRATEGY_LAB_V2_FAMILIES,
+  STRATEGY_LAB_V2_STATUS,
+  buildRiskSellIntelligenceAgent,
+  riskSellCheckForDecision,
+  riskSellTrailingThresholdPct,
+  currentAccountDrawdownPct,
+  currentDailyAccountChangePct,
   memoryStatus,
   startServer
 };
