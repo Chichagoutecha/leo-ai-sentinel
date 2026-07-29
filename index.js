@@ -1,5 +1,5 @@
 /**
- * LEO-AI SENTINEL v10.21 — Data Integrity & Portfolio Identity Safety
+ * LEO-AI SENTINEL v10.22 — Agent Portfolio Identity & Data Integrity
  * - Prix explicitement issus de l'API publique eToro
  * - Gestion week-end / horaires réguliers du marché US
  * - Cryptomonnaies analysables 24/7
@@ -109,6 +109,9 @@
  * - v10.21 : quarantaine fournisseur × actif et diagnostic des outliers seulement avec deux preuves concordantes
  * - v10.21 : dimensionnement sans triple comptage des couches informationnelles corrélées
  * - v10.21 : navigation dashboard par cookie HttpOnly afin de retirer BOT_SECRET des liens internes
+ * - v10.22 : distinction explicite entre capital virtuel du portefeuille-agent et argent réel investi par le copieur
+ * - v10.22 : découverte /agent-portfolios, validation agentPortfolioId/GCID/mirrorId et contrôle des scopes 200/202
+ * - v10.22 : aucun blocage erroné fondé sur la comparaison entre 10 000 USD virtuels et le montant réel copié
  */
 
 const express = require("express");
@@ -129,6 +132,7 @@ app.use((req, res, next) => {
 });
 
 let openAIClient = null;
+let agentPortfolioMetadataCache = { fetchedAtMs: 0, response: null };
 
 function getOpenAIClient() {
   if (!process.env.OPENAI_API_KEY) {
@@ -144,7 +148,7 @@ function getOpenAIClient() {
   return openAIClient;
 }
 
-const VERSION = "v10.21.1-live-readiness-diagnostics";
+const VERSION = "v10.22-agent-portfolio-aware";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
@@ -177,9 +181,26 @@ const LIVE_PORTFOLIO_MAX_AGE_SECONDS = Math.max(
 );
 const LIVE_PORTFOLIO_IDENTITY_REQUIRED =
   process.env.LIVE_PORTFOLIO_IDENTITY_REQUIRED !== "false";
+const ETORO_PORTFOLIO_CONTEXT = ["AUTO", "AGENT", "ACCOUNT"].includes(
+  String(process.env.ETORO_PORTFOLIO_CONTEXT || "AUTO").trim().toUpperCase()
+) ? String(process.env.ETORO_PORTFOLIO_CONTEXT || "AUTO").trim().toUpperCase() : "AUTO";
 const ETORO_EXPECTED_PORTFOLIO_ID = String(
   process.env.ETORO_EXPECTED_PORTFOLIO_ID || ""
 ).trim();
+const ETORO_EXPECTED_AGENT_PORTFOLIO_ID = String(
+  process.env.ETORO_EXPECTED_AGENT_PORTFOLIO_ID || ETORO_EXPECTED_PORTFOLIO_ID || ""
+).trim();
+const ETORO_EXPECTED_AGENT_PORTFOLIO_GCID = String(
+  process.env.ETORO_EXPECTED_AGENT_PORTFOLIO_GCID || ""
+).trim();
+const ETORO_EXPECTED_MIRROR_ID = String(
+  process.env.ETORO_EXPECTED_MIRROR_ID || ""
+).trim();
+const ETORO_AGENT_PORTFOLIOS_ENDPOINT = "https://public-api.etoro.com/api/v1/agent-portfolios";
+const ETORO_AGENT_PORTFOLIO_CACHE_SECONDS = Math.max(
+  30,
+  Math.min(3600, Number(process.env.ETORO_AGENT_PORTFOLIO_CACHE_SECONDS || 300))
+);
 const EXPECTED_ACCOUNT_VALUE_RAW = String(process.env.ETORO_EXPECTED_ACCOUNT_VALUE_USD || "").trim();
 const ETORO_EXPECTED_ACCOUNT_VALUE_USD = EXPECTED_ACCOUNT_VALUE_RAW !== "" && Number.isFinite(Number(EXPECTED_ACCOUNT_VALUE_RAW))
   ? Number(EXPECTED_ACCOUNT_VALUE_RAW)
@@ -1694,7 +1715,7 @@ const runtimeState = {
 };
 
 const PROMPT = `
-Tu es LEO-AI SENTINEL v10.21, le StrategyCoordinator d'un conseil multi-agents quantitatif, fondamental, informationnel, multi-source et explicable.
+Tu es LEO-AI SENTINEL v10.22, le StrategyCoordinator d'un conseil multi-agents quantitatif, fondamental, informationnel, multi-source et explicable.
 
 MISSION :
 Construire et gérer progressivement un portefeuille diversifié, en protégeant le capital.
@@ -3194,6 +3215,171 @@ function etoroHeaders() {
   };
 }
 
+
+function normalizeAgentPortfolio(item) {
+  if (!item || typeof item !== "object") return null;
+  const agentPortfolioId = String(item.agentPortfolioId || item.id || "").trim() || null;
+  const agentPortfolioGcid = item.agentPortfolioGcid ?? item.gcid ?? null;
+  const mirrorId = item.mirrorId ?? item.mirrorID ?? null;
+  const virtualBalance = Number(item.agentPortfolioVirtualBalance ?? item.virtualBalance);
+  return {
+    agentPortfolioId,
+    agentPortfolioName: item.agentPortfolioName || item.name || null,
+    agentPortfolioGcid: agentPortfolioGcid !== null ? String(agentPortfolioGcid) : null,
+    mirrorId: mirrorId !== null ? String(mirrorId) : null,
+    agentPortfolioVirtualBalance: Number.isFinite(virtualBalance) ? virtualBalance : null,
+    createdAt: item.createdAt || null,
+    userTokens: Array.isArray(item.userTokens) ? item.userTokens.map((token) => ({
+      userTokenId: token.userTokenId || null,
+      userTokenName: token.userTokenName || null,
+      clientId: token.clientId || null,
+      externalApplicationName: token.externalApplicationName || null,
+      scopeIds: Array.isArray(token.scopeIds) ? token.scopeIds.map(Number).filter(Number.isFinite) : [],
+      expiresAt: token.expiresAt || null
+    })) : []
+  };
+}
+
+async function getAgentPortfolios({ force = false } = {}) {
+  const ageMs = Date.now() - Number(agentPortfolioMetadataCache.fetchedAtMs || 0);
+  if (!force && agentPortfolioMetadataCache.response && ageMs < ETORO_AGENT_PORTFOLIO_CACHE_SECONDS * 1000) {
+    return agentPortfolioMetadataCache.response;
+  }
+  const headers = etoroHeaders();
+  try {
+    const { response, data, attempts } = await fetchJsonWithRetry(
+      ETORO_AGENT_PORTFOLIOS_ENDPOINT,
+      { method: "GET", headers },
+      { label: "eToro agent portfolios", retries: ETORO_GET_RETRIES }
+    );
+    const raw = Array.isArray(data?.agentPortfolios) ? data.agentPortfolios : (Array.isArray(data) ? data : []);
+    const agentPortfolios = raw.map(normalizeAgentPortfolio).filter(Boolean);
+    const result = {
+      ok: Boolean(response.ok),
+      status: response.status,
+      endpoint: ETORO_AGENT_PORTFOLIOS_ENDPOINT,
+      fetchedAt: nowIso(),
+      attempts,
+      agentPortfolios,
+      error: response.ok ? null : (data?.message || data?.error || `HTTP_${response.status}`)
+    };
+    agentPortfolioMetadataCache = { fetchedAtMs: Date.now(), response: result };
+    return result;
+  } catch (error) {
+    const result = {
+      ok: false,
+      status: null,
+      endpoint: ETORO_AGENT_PORTFOLIOS_ENDPOINT,
+      fetchedAt: nowIso(),
+      attempts: null,
+      agentPortfolios: [],
+      error: error.message
+    };
+    agentPortfolioMetadataCache = { fetchedAtMs: Date.now(), response: result };
+    return result;
+  }
+}
+
+function extractPnlMirrorIds(portfolioResponse) {
+  const client = portfolioResponse?.data?.clientPortfolio || {};
+  const containers = [
+    ...(Array.isArray(client.positions) ? client.positions : []),
+    ...(Array.isArray(client.ordersForOpen) ? client.ordersForOpen : []),
+    ...(Array.isArray(client.ordersForClose) ? client.ordersForClose : []),
+    ...(Array.isArray(client.mirrors) ? client.mirrors : [])
+  ];
+  const ids = containers.map((item) => item?.mirrorId ?? item?.mirrorID ?? item?.MirrorID)
+    .filter((value) => value !== undefined && value !== null && String(value).trim() !== "")
+    .map((value) => String(value));
+  return [...new Set(ids)];
+}
+
+async function resolveEtoroPortfolioContext(portfolioResponse, summary, { force = false } = {}) {
+  if (ETORO_PORTFOLIO_CONTEXT === "ACCOUNT") {
+    return { kind: "ACCOUNT", resolved: true, reason: "FORCED_ACCOUNT_CONTEXT", agentPortfolio: null, discovery: null };
+  }
+
+  const discovery = await getAgentPortfolios({ force });
+  const list = discovery.agentPortfolios || [];
+  const pnlMirrorIds = extractPnlMirrorIds(portfolioResponse);
+  let selected = null;
+  let reason = null;
+
+  if (ETORO_EXPECTED_AGENT_PORTFOLIO_ID) {
+    selected = list.find((item) => item.agentPortfolioId === ETORO_EXPECTED_AGENT_PORTFOLIO_ID) || null;
+    reason = selected ? "MATCH_EXPECTED_AGENT_PORTFOLIO_ID" : "EXPECTED_AGENT_PORTFOLIO_ID_NOT_FOUND";
+  }
+  if (!selected && ETORO_EXPECTED_AGENT_PORTFOLIO_GCID) {
+    selected = list.find((item) => item.agentPortfolioGcid === ETORO_EXPECTED_AGENT_PORTFOLIO_GCID) || null;
+    reason = selected ? "MATCH_EXPECTED_AGENT_PORTFOLIO_GCID" : "EXPECTED_AGENT_PORTFOLIO_GCID_NOT_FOUND";
+  }
+  if (!selected && ETORO_EXPECTED_MIRROR_ID) {
+    selected = list.find((item) => item.mirrorId === ETORO_EXPECTED_MIRROR_ID) || null;
+    reason = selected ? "MATCH_EXPECTED_MIRROR_ID" : "EXPECTED_MIRROR_ID_NOT_FOUND";
+  }
+  if (!selected && pnlMirrorIds.length) {
+    selected = list.find((item) => item.mirrorId && pnlMirrorIds.includes(item.mirrorId)) || null;
+    if (selected) reason = "MATCH_PNL_MIRROR_ID";
+  }
+  if (!selected && list.length === 1) {
+    selected = list[0];
+    reason = "ONLY_AGENT_PORTFOLIO";
+  }
+  if (!selected && list.length > 1 && Number.isFinite(Number(summary?.totalTrackedValue))) {
+    const total = Number(summary.totalTrackedValue);
+    const ranked = list
+      .filter((item) => Number.isFinite(Number(item.agentPortfolioVirtualBalance)))
+      .map((item) => ({ item, distance: Math.abs(Number(item.agentPortfolioVirtualBalance) - total) }))
+      .sort((a, b) => a.distance - b.distance);
+    if (ranked.length && ranked[0].distance <= Math.max(100, total * 0.10)) {
+      const tied = ranked.length > 1 && Math.abs(ranked[1].distance - ranked[0].distance) < 1;
+      if (!tied) {
+        selected = ranked[0].item;
+        reason = "MATCH_VIRTUAL_BALANCE";
+      }
+    }
+  }
+
+  if (selected) {
+    const scopeIds = [...new Set(selected.userTokens.flatMap((token) => token.scopeIds || []))];
+    return {
+      kind: "AGENT_PORTFOLIO",
+      resolved: true,
+      reason,
+      agentPortfolio: selected,
+      pnlMirrorIds,
+      scopes: {
+        realRead: scopeIds.includes(200),
+        realWrite: scopeIds.includes(202),
+        scopeIds
+      },
+      discovery
+    };
+  }
+
+  if (ETORO_PORTFOLIO_CONTEXT === "AGENT") {
+    return {
+      kind: "AGENT_PORTFOLIO",
+      resolved: false,
+      reason: reason || (discovery.ok ? "AGENT_PORTFOLIO_AMBIGUOUS_OR_MISSING" : "AGENT_PORTFOLIO_DISCOVERY_FAILED"),
+      agentPortfolio: null,
+      pnlMirrorIds,
+      scopes: null,
+      discovery
+    };
+  }
+
+  return {
+    kind: "ACCOUNT",
+    resolved: true,
+    reason: discovery.ok && list.length === 0 ? "NO_AGENT_PORTFOLIO_FOUND" : "AUTO_FALLBACK_ACCOUNT_CONTEXT",
+    agentPortfolio: null,
+    pnlMirrorIds,
+    scopes: null,
+    discovery
+  };
+}
+
 function normalizeConfidence(value) {
   let confidence = Number(value);
   if (!Number.isFinite(confidence)) return 0;
@@ -3343,22 +3529,45 @@ function extractPortfolioIdentifier(portfolioResponse) {
   return candidates.length ? String(candidates[0]).trim() : null;
 }
 
-function buildLivePortfolioIdentitySnapshot(portfolioResponse, summary) {
-  const portfolioId = extractPortfolioIdentifier(portfolioResponse);
+function buildLivePortfolioIdentitySnapshot(portfolioResponse, summary, portfolioContext = null) {
+  const stored = runtimeState.livePortfolioIdentity;
+  const fallbackAgent = stored?.contextKind === "AGENT_PORTFOLIO" ? stored.agentPortfolio : null;
+  const agentPortfolio = portfolioContext?.agentPortfolio || fallbackAgent || null;
+  const contextKind = portfolioContext?.kind || stored?.contextKind || (agentPortfolio ? "AGENT_PORTFOLIO" : "ACCOUNT");
+  const portfolioId = contextKind === "AGENT_PORTFOLIO"
+    ? (agentPortfolio?.agentPortfolioId || stored?.portfolioId || null)
+    : extractPortfolioIdentifier(portfolioResponse);
   const environment = String(portfolioResponse?.accountEnvironment || "UNKNOWN").toUpperCase();
   const totalValueUsd = Number(summary?.totalTrackedValue);
-  const openInstrumentIds = (summary?.openPositions || [])
+  const openInstrumentIds = [...new Set((summary?.openPositions || [])
     .map((item) => Number(item.instrumentId))
-    .filter(Number.isFinite)
+    .filter(Number.isFinite))]
     .sort((a, b) => a - b);
+  const agentIdentity = agentPortfolio ? {
+    agentPortfolioId: agentPortfolio.agentPortfolioId || null,
+    agentPortfolioName: agentPortfolio.agentPortfolioName || null,
+    agentPortfolioGcid: agentPortfolio.agentPortfolioGcid || null,
+    mirrorId: agentPortfolio.mirrorId || null,
+    virtualBalanceUsd: Number.isFinite(Number(agentPortfolio.agentPortfolioVirtualBalance))
+      ? roundNumber(Number(agentPortfolio.agentPortfolioVirtualBalance), 4)
+      : null
+  } : null;
   const signature = createHash("sha256")
-    .update(JSON.stringify({ environment, portfolioId: portfolioId || null }))
+    .update(JSON.stringify({
+      environment,
+      contextKind,
+      portfolioId: portfolioId || null,
+      agentPortfolioGcid: agentIdentity?.agentPortfolioGcid || null,
+      mirrorId: agentIdentity?.mirrorId || null
+    }))
     .digest("hex");
   return {
     confirmedAt: nowIso(),
+    contextKind,
     environment,
     endpoint: portfolioResponse?.endpoint || null,
     portfolioId,
+    agentPortfolio: agentIdentity,
     totalValueUsd: Number.isFinite(totalValueUsd) ? roundNumber(totalValueUsd, 4) : null,
     availableCashUsd: Number.isFinite(Number(summary?.availableCash)) ? roundNumber(Number(summary.availableCash), 4) : null,
     positionsCount: Number(summary?.uniquePositionsCount || 0),
@@ -3367,29 +3576,52 @@ function buildLivePortfolioIdentitySnapshot(portfolioResponse, summary) {
   };
 }
 
-function validateLivePortfolioIdentity(portfolioResponse, summary, { allowUnconfirmed = false } = {}) {
+function validateLivePortfolioIdentity(portfolioResponse, summary, { allowUnconfirmed = false, portfolioContext = null } = {}) {
   if (!LIVE_TRADING_ENABLED || !LIVE_PORTFOLIO_IDENTITY_REQUIRED) {
     return { ok: true, status: "NOT_REQUIRED", reasons: [], expected: null, current: null };
   }
-  const current = buildLivePortfolioIdentitySnapshot(portfolioResponse, summary);
   const stored = runtimeState.livePortfolioIdentity;
-  const expectedId = ETORO_EXPECTED_PORTFOLIO_ID || stored?.portfolioId || null;
-  const expectedValue = Number.isFinite(ETORO_EXPECTED_ACCOUNT_VALUE_USD)
-    ? ETORO_EXPECTED_ACCOUNT_VALUE_USD
-    : (Number.isFinite(Number(stored?.totalValueUsd)) ? Number(stored.totalValueUsd) : null);
+  const current = buildLivePortfolioIdentitySnapshot(portfolioResponse, summary, portfolioContext);
+  const currentIsAgent = current.contextKind === "AGENT_PORTFOLIO";
+  const expectedId = currentIsAgent
+    ? (ETORO_EXPECTED_AGENT_PORTFOLIO_ID || stored?.portfolioId || null)
+    : (ETORO_EXPECTED_PORTFOLIO_ID || stored?.portfolioId || null);
+  const metadataVirtualBalance = Number(portfolioContext?.agentPortfolio?.agentPortfolioVirtualBalance);
+  const expectedValue = currentIsAgent
+    ? (Number.isFinite(metadataVirtualBalance)
+        ? metadataVirtualBalance
+        : (Number.isFinite(Number(stored?.agentPortfolio?.virtualBalanceUsd)) ? Number(stored.agentPortfolio.virtualBalanceUsd) : null))
+    : (Number.isFinite(ETORO_EXPECTED_ACCOUNT_VALUE_USD)
+        ? ETORO_EXPECTED_ACCOUNT_VALUE_USD
+        : (Number.isFinite(Number(stored?.totalValueUsd)) ? Number(stored.totalValueUsd) : null));
   const reasons = [];
 
-  if (!stored && !ETORO_EXPECTED_PORTFOLIO_ID && !Number.isFinite(ETORO_EXPECTED_ACCOUNT_VALUE_USD)) {
+  if (ETORO_PORTFOLIO_CONTEXT === "AGENT" && portfolioContext && !portfolioContext.resolved) {
+    reasons.push(`AGENT_PORTFOLIO_UNRESOLVED:${portfolioContext.reason || "UNKNOWN"}`);
+  }
+  if (!stored && !expectedId && !Number.isFinite(expectedValue)) {
+    reasons.push("PORTFOLIO_IDENTITY_UNCONFIRMED");
+  }
+  if (!stored && currentIsAgent && portfolioContext?.resolved) {
     reasons.push("PORTFOLIO_IDENTITY_UNCONFIRMED");
   }
   if (expectedId && current.portfolioId !== expectedId) {
     reasons.push(`PORTFOLIO_ID_MISMATCH:${current.portfolioId || "MISSING"}`);
   }
+  if (stored?.contextKind && current.contextKind !== stored.contextKind) {
+    reasons.push(`PORTFOLIO_CONTEXT_MISMATCH:${current.contextKind}`);
+  }
   if (stored?.environment && current.environment !== stored.environment) {
     reasons.push(`PORTFOLIO_ENVIRONMENT_MISMATCH:${current.environment}`);
   }
-  if (stored?.signature && current.signature !== stored.signature && (stored.portfolioId || current.portfolioId)) {
+  if (stored?.signature && current.signature !== stored.signature) {
     reasons.push("PORTFOLIO_SIGNATURE_MISMATCH");
+  }
+  if (currentIsAgent && portfolioContext?.scopes && !portfolioContext.scopes.realRead) {
+    reasons.push("AGENT_TOKEN_MISSING_REAL_READ_SCOPE_200");
+  }
+  if (currentIsAgent && portfolioContext?.scopes && LIVE_EXECUTION_ARMED && !portfolioContext.scopes.realWrite) {
+    reasons.push("AGENT_TOKEN_MISSING_REAL_WRITE_SCOPE_202");
   }
   if (Number.isFinite(expectedValue) && Number.isFinite(Number(current.totalValueUsd))) {
     const toleranceUsd = Math.max(
@@ -3397,22 +3629,33 @@ function validateLivePortfolioIdentity(portfolioResponse, summary, { allowUnconf
       Math.abs(expectedValue) * LIVE_PORTFOLIO_VALUE_TOLERANCE_PCT / 100
     );
     if (Math.abs(Number(current.totalValueUsd) - expectedValue) > toleranceUsd) {
-      reasons.push(`PORTFOLIO_VALUE_MISMATCH:${current.totalValueUsd}_VS_${roundNumber(expectedValue, 4)}`);
+      reasons.push(`${currentIsAgent ? "AGENT_VIRTUAL_VALUE" : "PORTFOLIO_VALUE"}_MISMATCH:${current.totalValueUsd}_VS_${roundNumber(expectedValue, 4)}`);
     }
   }
 
-  const ok = reasons.length === 0 || (allowUnconfirmed && reasons.every((reason) => reason === "PORTFOLIO_IDENTITY_UNCONFIRMED"));
+  const onlyUnconfirmed = reasons.length > 0 && reasons.every((reason) => reason === "PORTFOLIO_IDENTITY_UNCONFIRMED");
+  const ok = reasons.length === 0 || (allowUnconfirmed && onlyUnconfirmed);
   return {
     ok,
-    status: reasons.length === 0 ? "CONFIRMED" : (reasons.includes("PORTFOLIO_IDENTITY_UNCONFIRMED") ? "UNCONFIRMED" : "MISMATCH"),
+    status: reasons.length === 0 ? "CONFIRMED" : (onlyUnconfirmed ? "UNCONFIRMED" : "MISMATCH"),
     reasons,
     expected: {
+      contextKind: current.contextKind,
       portfolioId: expectedId,
       totalValueUsd: Number.isFinite(expectedValue) ? roundNumber(expectedValue, 4) : null,
+      valueMeaning: currentIsAgent ? "AGENT_PORTFOLIO_VIRTUAL_BALANCE" : "ACCOUNT_EQUITY",
       tolerancePct: LIVE_PORTFOLIO_VALUE_TOLERANCE_PCT,
       minimumToleranceUsd: LIVE_PORTFOLIO_VALUE_MIN_TOLERANCE_USD
     },
-    current
+    current,
+    portfolioContext: portfolioContext ? {
+      kind: portfolioContext.kind,
+      resolved: portfolioContext.resolved,
+      reason: portfolioContext.reason,
+      scopes: portfolioContext.scopes || null,
+      discoveryOk: portfolioContext.discovery?.ok ?? null,
+      discoveryError: portfolioContext.discovery?.error || null
+    } : null
   };
 }
 
@@ -3423,12 +3666,16 @@ async function confirmLivePortfolioIdentity() {
     throw new Error(`Portefeuille REAL non vérifiable: ${validation.errors.join(", ")}`);
   }
   const summary = extractPortfolioSummary(portfolio);
-  const snapshot = buildLivePortfolioIdentitySnapshot(portfolio, summary);
+  const portfolioContext = await resolveEtoroPortfolioContext(portfolio, summary, { force: true });
+  if (ETORO_PORTFOLIO_CONTEXT === "AGENT" && !portfolioContext.resolved) {
+    throw new Error(`Portefeuille-agent non résolu: ${portfolioContext.reason || portfolioContext.discovery?.error || "UNKNOWN"}`);
+  }
+  const snapshot = buildLivePortfolioIdentitySnapshot(portfolio, summary, portfolioContext);
   runtimeState.livePortfolioIdentity = snapshot;
-  summary.livePortfolioIdentity = validateLivePortfolioIdentity(portfolio, summary);
+  summary.livePortfolioIdentity = validateLivePortfolioIdentity(portfolio, summary, { portfolioContext });
   addAudit("LIVE_PORTFOLIO_IDENTITY_CONFIRMED", snapshot);
   await flushPersistentState();
-  return { portfolio, summary, snapshot };
+  return { portfolio, summary, snapshot, portfolioContext };
 }
 
 async function getPortfolio(options = {}) {
@@ -3486,7 +3733,8 @@ async function verifyRealPortfolioBeforeExecution({ asset, side, amount = 0 } = 
   }
 
   const summary = extractPortfolioSummary(portfolio);
-  const identity = validateLivePortfolioIdentity(portfolio, summary);
+  const portfolioContext = await resolveEtoroPortfolioContext(portfolio, summary);
+  const identity = validateLivePortfolioIdentity(portfolio, summary, { portfolioContext });
   if (!identity.ok) {
     return {
       ok: false,
@@ -4914,7 +5162,11 @@ function envConfiguration() {
     livePortfolioIdentity: {
       required: LIVE_PORTFOLIO_IDENTITY_REQUIRED,
       confirmed: Boolean(runtimeState.livePortfolioIdentity),
+      configuredContext: ETORO_PORTFOLIO_CONTEXT,
       expectedPortfolioIdConfigured: Boolean(ETORO_EXPECTED_PORTFOLIO_ID),
+      expectedAgentPortfolioIdConfigured: Boolean(ETORO_EXPECTED_AGENT_PORTFOLIO_ID),
+      expectedAgentPortfolioGcidConfigured: Boolean(ETORO_EXPECTED_AGENT_PORTFOLIO_GCID),
+      expectedMirrorIdConfigured: Boolean(ETORO_EXPECTED_MIRROR_ID),
       expectedAccountValueUsd: ETORO_EXPECTED_ACCOUNT_VALUE_USD,
       valueTolerancePct: LIVE_PORTFOLIO_VALUE_TOLERANCE_PCT
     },
@@ -15513,10 +15765,10 @@ function renderDashboard({ summary, metrics, market, trend, preferredNextAssets 
   const performanceRows = (livePerformance.attribution?.topContributors || []).map((item) => `<tr><td>${htmlEscape(item.asset)}</td><td>${htmlEscape(item.category)}</td><td>${htmlEscape(item.invested)}</td><td>${htmlEscape(item.unrealizedProfit)}</td><td>${htmlEscape(item.returnPctOnInvested ?? "—")}%</td></tr>`).join("") || `<tr><td colspan="5">Aucune attribution disponible</td></tr>`;
   return `<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LEO-AI ${VERSION}</title><style>
     body{font-family:system-ui;background:#0b1020;color:#edf2ff;margin:0;padding:16px}.wrap{max-width:1200px;margin:auto}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.card{background:#151d34;border:1px solid #293554;border-radius:14px;padding:14px}.hero{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.badge{padding:8px 12px;border-radius:999px;font-weight:800}.safe{background:#173c2c}.paper{background:#4a3b13}.danger{background:#5a1f2b}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;border-bottom:1px solid #2d3857;padding:8px;vertical-align:top}a{color:#8fc5ff}.ok{color:#72e0a8}.bad{color:#ff8797}.muted{color:#a7b1ca}pre{white-space:pre-wrap;word-break:break-word}</style></head><body><div class="wrap">
-    <div class="hero"><div><h1>LEO-AI SENTINEL v10.21</h1><div class="muted">Intégrité des prix + identité du portefeuille + fiabilité des automatismes</div></div><div class="badge ${modeClass}">MODE ${TRADING_MODE}</div></div>
+    <div class="hero"><div><h1>LEO-AI SENTINEL v10.22</h1><div class="muted">Portefeuille-agent eToro + intégrité des prix + fiabilité des automatismes</div></div><div class="badge ${modeClass}">MODE ${TRADING_MODE}</div></div>
     <div class="grid" style="margin-top:14px">
-      <div class="card"><b>Portefeuille</b><h2>${summary.uniquePositionsCount} actifs</h2><div>Valeur suivie: ${htmlEscape(summary.totalTrackedValue)} USD</div><div>Cash disponible: ${htmlEscape(summary.availableCash)} USD</div></div>
-      <div class="card"><b>Identité portefeuille LIVE</b><h2 class="${portfolioIdentity.ok ? "ok" : "bad"}">${htmlEscape(portfolioIdentity.status)}</h2><div>${htmlEscape((portfolioIdentity.reasons || []).join(", ") || "Portefeuille REAL confirmé")}</div><div class="muted">ID ${htmlEscape(portfolioIdentity.current?.portfolioId || "non fourni par l’API")} · base ${htmlEscape(portfolioIdentity.expected?.totalValueUsd ?? "—")} USD</div></div>
+      <div class="card"><b>${runtimeState.livePortfolioIdentity?.contextKind === "AGENT_PORTFOLIO" ? "Portefeuille-agent (capital virtuel)" : "Portefeuille"}</b><h2>${summary.uniquePositionsCount} actifs</h2><div>Valeur suivie: ${htmlEscape(summary.totalTrackedValue)} USD</div><div>Cash disponible: ${htmlEscape(summary.availableCash)} USD</div>${runtimeState.livePortfolioIdentity?.contextKind === "AGENT_PORTFOLIO" ? '<div class="muted">Ces montants servent au dimensionnement proportionnel; ils ne sont pas le solde personnel réellement investi.</div>' : ''}</div>
+      <div class="card"><b>Identité portefeuille LIVE</b><h2 class="${portfolioIdentity.ok ? "ok" : "bad"}">${htmlEscape(portfolioIdentity.status)}</h2><div>${htmlEscape((portfolioIdentity.reasons || []).join(", ") || "Portefeuille REAL confirmé")}</div><div class="muted">Contexte ${htmlEscape(portfolioIdentity.current?.contextKind || runtimeState.livePortfolioIdentity?.contextKind || "—")} · ID ${htmlEscape(portfolioIdentity.current?.portfolioId || runtimeState.livePortfolioIdentity?.portfolioId || "non résolu")}</div><div class="muted">Référence ${htmlEscape(portfolioIdentity.expected?.totalValueUsd ?? runtimeState.livePortfolioIdentity?.agentPortfolio?.virtualBalanceUsd ?? "—")} USD · ${htmlEscape(portfolioIdentity.expected?.valueMeaning || "—")}</div></div>
       <div class="card"><b>Marché eToro</b><h2>${market?.tradableCount || 0} négociables</h2><div>${market?.freshCount || 0} frais · ${market?.closedCount || 0} fermés · ${market?.staleCount || 0} périmés</div></div>
       <div class="card"><b>RiskBudgetAgent</b><h2 class="${risk.newBuyBlocked ? "bad" : "ok"}">${risk.newBuyBlocked ? "ACHATS BLOQUÉS" : "BUDGET OK"}</h2><div>Jour: ${htmlEscape(risk.dailyChangePct ?? "—")}% · Drawdown: ${htmlEscape(risk.drawdownPct ?? "—")}%</div></div>
       <div class="card"><b>HealthAgent</b><h2 class="${health.circuitBreakerOpen ? "bad" : "ok"}">${health.circuitBreakerOpen ? "CIRCUIT OUVERT" : "SYSTÈME OK"}</h2><div>${htmlEscape(health.reasons?.join(", ") || "Aucun veto")}</div></div>
@@ -15549,7 +15801,7 @@ function renderDashboard({ summary, metrics, market, trend, preferredNextAssets 
     <div class="card" style="margin-top:14px"><h3>Data Quality & Scientific Backtesting</h3><div>Audits ${htmlEscape(dataQualityStatus.counts?.total ?? 0)} · PASS ${htmlEscape(dataQualityStatus.counts?.pass ?? 0)} · WARN ${htmlEscape(dataQualityStatus.counts?.warn ?? 0)} · FAIL ${htmlEscape(dataQualityStatus.counts?.fail ?? 0)}</div><div>Essais scientifiques ${htmlEscape(scientificStatus.counts?.totalTrials ?? 0)} · uniques ${htmlEscape(scientificStatus.counts?.uniqueTrials ?? 0)} · verdict ${htmlEscape(scientificStatus.lastReport?.verdict || "NOT_RUN")}</div><div class="muted">Holdout temporel, embargo, coûts stressés et registre des essais. Analyse uniquement.</div></div>
     <div class="card" style="margin-top:14px"><h3>StrategyLab v10.18</h3><div>Expériences ${htmlEscape(strategyLabV2.counts?.experiments ?? 0)} · planifiées ${htmlEscape(strategyLabV2.counts?.planned ?? 0)} · réussies ${htmlEscape(strategyLabV2.counts?.passed ?? 0)} · classement ${htmlEscape(strategyLabV2.counts?.leaderboard ?? 0)}</div><div>Dernier état ${htmlEscape(strategyLabV2.lastRun?.status || "NOT_RUN")} · champion ${htmlEscape(strategyLabV2.lastRun?.champion?.id || "aucun")}</div><div class="muted">Hypothèses transformées en candidats reproductibles; aucun ordre et aucune promotion automatique.</div></div>
     <div class="card" style="margin-top:14px"><h3>Anti-Overfitting v10.19</h3><div>Rapports ${htmlEscape(antiOverfitting.counts?.reports ?? 0)} · éligibles shadow ${htmlEscape(antiOverfitting.counts?.ELIGIBLE_FOR_SHADOW ?? 0)} · rejetés ${htmlEscape(antiOverfitting.counts?.REJECTED ?? 0)}</div><div>Dernier statut ${htmlEscape(antiOverfitting.lastReport?.status || "NOT_RUN")} · robustesse ${htmlEscape(antiOverfitting.lastReport?.robustnessScore ?? "—")}</div><div class="muted">DSR, nombre d’essais, embargo et folds non chevauchants; aucun ordre et aucune promotion automatique.</div></div>
-    <div class="card" style="margin-top:14px"><h3>Contrôles</h3><a href="/watch">Watch</a> · <a href="/scan">Scan</a> · <a href="/foundation-status">Foundation status</a> · <a href="/data-sources">Data sources</a> · <a href="/provider-health">Provider health</a> · <a href="/technical-summary">Technical summary</a> · <a href="/intelligence-summary">Intelligence summary</a> · <a href="/market-regime">Market regime</a> · <a href="/agent-council">Agent council</a> · <a href="/agent-history">Agent history</a> · <a href="/paper-status">Paper status</a> · <a href="/paper-performance">Paper performance</a> · <a href="/backtest-status">Backtest status</a> · <a href="/strategy-validation">Strategy validation</a> · <a href="/live-preflight?asset=SPY&side=BUY&amount=10">LIVE preflight</a> · <a href="/execution-status">Execution status</a> · <a href="/allocation-status">Allocation status</a> · <a href="/performance-status">Performance status</a> · <a href="/performance-history">Performance history</a> · <a href="/risk-sell-status">Risk/Sell status</a> · <a href="/risk-sell-history">Risk/Sell history</a> · <a href="/macro-regime-status">Macro regime</a> · <a href="/macro-regime-history">Macro history</a> · <a href="/data-quality-status">Data quality</a> · <a href="/scientific-backtest-status">Scientific backtests</a> · <a href="/scientific-backtest?asset=SPY">Scientific SPY</a> · <a href="/research-status">Research status</a> · <a href="/research-sources">Research sources</a> · <a href="/research-hypotheses">Research hypotheses</a> · <a href="/strategy-lab-v2-status">StrategyLab v10.18</a> · <a href="/strategy-lab-experiments">Lab experiments</a> · <a href="/strategy-lab-leaderboard">Lab leaderboard</a> · <a href="/anti-overfitting-status">Anti-overfitting</a> · <a href="/anti-overfitting-reports">Validation reports</a> · <a href="/purged-walk-forward-protocol">Purged protocol</a> · <a href="/memory-status">Memory status</a> · <a href="/auto-trading-check">Auto-trading check</a> · <a href="/portfolio-identity-status">Portfolio identity</a> · <a href="/audit">Audit</a></div>
+    <div class="card" style="margin-top:14px"><h3>Contrôles</h3><a href="/watch">Watch</a> · <a href="/scan">Scan</a> · <a href="/foundation-status">Foundation status</a> · <a href="/data-sources">Data sources</a> · <a href="/provider-health">Provider health</a> · <a href="/technical-summary">Technical summary</a> · <a href="/intelligence-summary">Intelligence summary</a> · <a href="/market-regime">Market regime</a> · <a href="/agent-council">Agent council</a> · <a href="/agent-history">Agent history</a> · <a href="/paper-status">Paper status</a> · <a href="/paper-performance">Paper performance</a> · <a href="/backtest-status">Backtest status</a> · <a href="/strategy-validation">Strategy validation</a> · <a href="/live-preflight?asset=SPY&side=BUY&amount=10">LIVE preflight</a> · <a href="/execution-status">Execution status</a> · <a href="/allocation-status">Allocation status</a> · <a href="/performance-status">Performance status</a> · <a href="/performance-history">Performance history</a> · <a href="/risk-sell-status">Risk/Sell status</a> · <a href="/risk-sell-history">Risk/Sell history</a> · <a href="/macro-regime-status">Macro regime</a> · <a href="/macro-regime-history">Macro history</a> · <a href="/data-quality-status">Data quality</a> · <a href="/scientific-backtest-status">Scientific backtests</a> · <a href="/scientific-backtest?asset=SPY">Scientific SPY</a> · <a href="/research-status">Research status</a> · <a href="/research-sources">Research sources</a> · <a href="/research-hypotheses">Research hypotheses</a> · <a href="/strategy-lab-v2-status">StrategyLab v10.18</a> · <a href="/strategy-lab-experiments">Lab experiments</a> · <a href="/strategy-lab-leaderboard">Lab leaderboard</a> · <a href="/anti-overfitting-status">Anti-overfitting</a> · <a href="/anti-overfitting-reports">Validation reports</a> · <a href="/purged-walk-forward-protocol">Purged protocol</a> · <a href="/memory-status">Memory status</a> · <a href="/auto-trading-check">Auto-trading check</a> · <a href="/portfolio-identity-status">Portfolio identity</a> · <a href="/agent-portfolio-status">Agent portfolio</a> · <a href="/audit">Audit</a></div>
   </div><script>if(location.search.includes("secret=")){history.replaceState({},document.title,location.pathname);}</script></body></html>`;
 }
 
@@ -15654,6 +15906,12 @@ app.get("/auto-trading-check", requireSecret, (req, res) => {
   if (TRADING_MODE === "LIVE" && LIVE_PORTFOLIO_IDENTITY_REQUIRED && !runtimeState.livePortfolioIdentity) {
     blockers.push("Identité du portefeuille REAL non confirmée via /portfolio-identity-confirm.");
   }
+  if (TRADING_MODE === "LIVE" && ETORO_PORTFOLIO_CONTEXT === "AGENT" && runtimeState.livePortfolioIdentity && runtimeState.livePortfolioIdentity.contextKind !== "AGENT_PORTFOLIO") {
+    blockers.push("L'identité enregistrée n'est pas celle d'un portefeuille-agent. Reconfirme après vérification de /agent-portfolio-status.");
+  }
+  if (ETORO_EXPECTED_ACCOUNT_VALUE_USD !== null && (ETORO_PORTFOLIO_CONTEXT === "AGENT" || runtimeState.livePortfolioIdentity?.contextKind === "AGENT_PORTFOLIO")) {
+    warnings.push("ETORO_EXPECTED_ACCOUNT_VALUE_USD est ignoré pour un portefeuille-agent; la référence correcte est son capital virtuel.");
+  }
   if (TRADING_MODE === "LIVE" && missingEnvironment.length > 0) {
     blockers.push(`Variables indispensables absentes : ${missingEnvironment.join(", ")}.`);
   } else if (missingEnvironment.length > 0) {
@@ -15733,8 +15991,9 @@ app.get("/portfolio-identity-status", requireSecret, async (req, res) => {
     const portfolio = await getPortfolio({ environment: "REAL" });
     const validation = validatePortfolioResponse(portfolio, { requireReal: true });
     const summary = validation.ok ? extractPortfolioSummary(portfolio) : null;
+    const portfolioContext = summary ? await resolveEtoroPortfolioContext(portfolio, summary, { force: true }) : null;
     const identity = summary
-      ? validateLivePortfolioIdentity(portfolio, summary)
+      ? validateLivePortfolioIdentity(portfolio, summary, { portfolioContext })
       : { ok: false, status: "PORTFOLIO_INVALID", reasons: validation.errors };
     res.status(identity.ok ? 200 : 409).json({
       version: VERSION,
@@ -15742,8 +16001,36 @@ app.get("/portfolio-identity-status", requireSecret, async (req, res) => {
       required: LIVE_PORTFOLIO_IDENTITY_REQUIRED,
       validation,
       identity,
+      portfolioContext,
       confirmedIdentity: runtimeState.livePortfolioIdentity,
       executionAttempted: false
+    });
+  } catch (error) {
+    res.status(500).json({ version: VERSION, error: error.message, executionAttempted: false });
+  }
+});
+
+app.get("/agent-portfolio-status", requireSecret, async (req, res) => {
+  try {
+    const portfolio = await getPortfolio({ environment: "REAL" });
+    const validation = validatePortfolioResponse(portfolio, { requireReal: true });
+    const summary = validation.ok ? extractPortfolioSummary(portfolio) : null;
+    const portfolioContext = summary ? await resolveEtoroPortfolioContext(portfolio, summary, { force: true }) : null;
+    res.status(portfolioContext?.resolved ? 200 : 409).json({
+      version: VERSION,
+      tradingMode: TRADING_MODE,
+      configuredContext: ETORO_PORTFOLIO_CONTEXT,
+      validation,
+      summary: summary ? {
+        totalTrackedValueUsd: summary.totalTrackedValue,
+        availableCashUsd: summary.availableCash,
+        uniquePositionsCount: summary.uniquePositionsCount
+      } : null,
+      portfolioContext,
+      executionAttempted: false,
+      explanation: portfolioContext?.kind === "AGENT_PORTFOLIO"
+        ? "Le solde proche de 10 000 USD est le capital virtuel du portefeuille-agent. L'investissement réel du copieur est proportionnel et n'est pas ce solde."
+        : "Contexte compte eToro standard."
     });
   } catch (error) {
     res.status(500).json({ version: VERSION, error: error.message, executionAttempted: false });
@@ -15757,7 +16044,7 @@ app.get("/portfolio-identity-confirm", requireSecret, async (req, res) => {
         version: VERSION,
         confirmed: false,
         executionAttempted: false,
-        reason: `Ajoute &confirm=${PORTFOLIO_IDENTITY_CONFIRMATION} après avoir vérifié la valeur et les positions du portefeuille REAL.`
+        reason: `Ajoute &confirm=${PORTFOLIO_IDENTITY_CONFIRMATION} après avoir vérifié /agent-portfolio-status. Pour un portefeuille-agent, les 10 000 USD sont virtuels et ne doivent pas être comparés à la somme réelle copiée.`
       });
     }
     const result = await confirmLivePortfolioIdentity();
@@ -15766,6 +16053,7 @@ app.get("/portfolio-identity-confirm", requireSecret, async (req, res) => {
       confirmed: true,
       executionAttempted: false,
       identity: result.snapshot,
+      portfolioContext: result.portfolioContext,
       portfolioSummary: result.summary
     });
   } catch (error) {
