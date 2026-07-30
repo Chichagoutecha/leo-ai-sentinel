@@ -112,6 +112,9 @@
  * - v10.22 : distinction explicite entre capital virtuel du portefeuille-agent et argent réel investi par le copieur
  * - v10.22 : découverte /agent-portfolios, validation agentPortfolioId/GCID/mirrorId et contrôle des scopes 200/202
  * - v10.22 : aucun blocage erroné fondé sur la comparaison entre 10 000 USD virtuels et le montant réel copié
+ * - v10.22.3 : un HTTP 2xx sans identifiant, statut métier ni effet portefeuille n'est plus considéré comme une acceptation prouvée
+ * - v10.22.3 : expiration sûre des intents sans effet après plusieurs réconciliations et absence totale de variation du portefeuille
+ * - v10.22.3 : minimum LIVE prudent de 10 USD par défaut; les montants réduits sous ce seuil deviennent HOLD
  */
 
 const express = require("express");
@@ -148,7 +151,7 @@ function getOpenAIClient() {
   return openAIClient;
 }
 
-const VERSION = "v10.22.2-agent-identity-close-order-fix";
+const VERSION = "v10.22.3-no-effect-intent-recovery";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
@@ -253,6 +256,18 @@ const EXECUTION_RECONCILE_MAX_PER_RUN = Math.max(
   Math.min(50, Number(process.env.EXECUTION_RECONCILE_MAX_PER_RUN || 10))
 );
 const EXECUTION_RECONCILE_CONFIRMATION = "RECONCILE_EXECUTIONS";
+const EXECUTION_NO_EFFECT_TIMEOUT_MINUTES = Math.max(
+  15,
+  Math.min(360, Number(process.env.EXECUTION_NO_EFFECT_TIMEOUT_MINUTES || 30))
+);
+const EXECUTION_NO_EFFECT_MIN_RECONCILIATIONS = Math.max(
+  2,
+  Math.min(20, Number(process.env.EXECUTION_NO_EFFECT_MIN_RECONCILIATIONS || 3))
+);
+const EXECUTION_NO_EFFECT_CASH_TOLERANCE_USD = Math.max(
+  0.001,
+  Math.min(5, Number(process.env.EXECUTION_NO_EFFECT_CASH_TOLERANCE_USD || 0.05))
+);
 
 const EXECUTION_STATUS = Object.freeze({
   INTENT_CREATED: "ORDER_INTENT_CREATED",
@@ -261,6 +276,7 @@ const EXECUTION_STATUS = Object.freeze({
   CONFIRMED: "POSITION_CONFIRMED",
   REJECTED: "ORDER_REJECTED",
   NOT_FOUND: "POSITION_NOT_FOUND",
+  NO_EFFECT: "ORDER_NO_EFFECT",
   UNCERTAIN: "EXECUTION_UNCERTAIN",
   DUPLICATE_BLOCKED: "DUPLICATE_BLOCKED"
 });
@@ -1099,7 +1115,7 @@ const ANTI_OVERFITTING_STATUS = Object.freeze({
   ELIGIBLE_FOR_SHADOW: "ELIGIBLE_FOR_SHADOW"
 });
 
-const MIN_ORDER_USD = Number(process.env.MIN_ORDER_USD || 1);
+const MIN_ORDER_USD = Math.max(1, Number(process.env.MIN_ORDER_USD || 10));
 const MAX_CONSECUTIVE_FAILURES = Number(
   process.env.MAX_CONSECUTIVE_FAILURES || 3
 );
@@ -5150,21 +5166,35 @@ async function reconcileExecutionIntents({ trigger = "manual", limit = EXECUTION
         afterSnapshot
       });
       let nextStatus = evaluation.status;
-      if (nextStatus === EXECUTION_STATUS.NOT_FOUND) {
+      const nextReconciliationAttempts = Number(intent.reconciliationAttempts || 0) + 1;
+      const noEffectAssessment = shouldResolveIntentAsNoEffect(
+        intent,
+        evaluation,
+        afterSnapshot,
+        nextReconciliationAttempts
+      );
+      if (noEffectAssessment.resolve) {
+        nextStatus = EXECUTION_STATUS.NO_EFFECT;
+        clearCooldown(intent.asset);
+      } else if (nextStatus === EXECUTION_STATUS.NOT_FOUND) {
         nextStatus = [EXECUTION_STATUS.ACCEPTED, EXECUTION_STATUS.NOT_FOUND].includes(normalizeExecutionIntentStatus(intent.status))
           ? EXECUTION_STATUS.NOT_FOUND
           : EXECUTION_STATUS.UNCERTAIN;
       }
       const updated = updateOrderIntentStatus(intent.id, nextStatus, {
-        reconciliationAttempts: Number(intent.reconciliationAttempts || 0) + 1,
+        reconciliationAttempts: nextReconciliationAttempts,
         lastReconciledAt: nowIso(),
         lastReconciliationTrigger: trigger,
         afterSnapshot,
         verificationEvidence: evaluation.evidence,
+        noEffectAssessment,
+        resolvedNoEffectAt: nextStatus === EXECUTION_STATUS.NO_EFFECT ? nowIso() : intent.resolvedNoEffectAt || null,
         confirmedAt: nextStatus === EXECUTION_STATUS.CONFIRMED ? nowIso() : intent.confirmedAt || null,
         note: nextStatus === EXECUTION_STATUS.CONFIRMED
           ? "Intent confirmé par réconciliation du portefeuille REAL"
-          : "Intent non renvoyé; réconciliation uniquement"
+          : nextStatus === EXECUTION_STATUS.NO_EFFECT
+            ? "Aucun effet portefeuille après délai et réconciliations; intent clos sans renvoi automatique"
+            : "Intent non renvoyé; réconciliation uniquement"
       });
       recordExecutionVerification({
         trigger: `reconcile:${trigger}`,
@@ -5173,7 +5203,9 @@ async function reconcileExecutionIntents({ trigger = "manual", limit = EXECUTION
         side: intent.type,
         status: nextStatus,
         confirmed: nextStatus === EXECUTION_STATUS.CONFIRMED,
-        evidence: evaluation.evidence,
+        evidence: nextStatus === EXECUTION_STATUS.NO_EFFECT
+          ? [...(evaluation.evidence || []), "ORDER_NO_EFFECT_RESOLVED"]
+          : evaluation.evidence,
         attempts: 1,
         beforeSnapshot: intent.beforeSnapshot || null,
         afterSnapshot
@@ -5185,7 +5217,10 @@ async function reconcileExecutionIntents({ trigger = "manual", limit = EXECUTION
         previousStatus: intent.status,
         status: updated?.status || nextStatus,
         confirmed: nextStatus === EXECUTION_STATUS.CONFIRMED,
-        evidence: evaluation.evidence
+        noEffectResolved: nextStatus === EXECUTION_STATUS.NO_EFFECT,
+        evidence: nextStatus === EXECUTION_STATUS.NO_EFFECT
+          ? [...(evaluation.evidence || []), "ORDER_NO_EFFECT_RESOLVED"]
+          : evaluation.evidence
       });
     }
   } catch (error) {
@@ -5230,6 +5265,13 @@ function isInCooldown(asset) {
 function setCooldown(asset) {
   runtimeState.cooldownMemory[asset] = Date.now();
   scheduleSave();
+}
+
+function clearCooldown(asset) {
+  if (runtimeState.cooldownMemory && Object.prototype.hasOwnProperty.call(runtimeState.cooldownMemory, asset)) {
+    delete runtimeState.cooldownMemory[asset];
+    scheduleSave();
+  }
 }
 
 
@@ -5739,6 +5781,79 @@ function compactEtoroExecutionResponse(data) {
   };
 }
 
+function hasExecutionBusinessAcknowledgement(response = null) {
+  if (!response || typeof response !== "object") return false;
+  if (response.orderId !== null && response.orderId !== undefined) return true;
+  if (response.positionId !== null && response.positionId !== undefined) return true;
+  if (response.statusId !== null && response.statusId !== undefined) return true;
+  if (response.success === true) return true;
+  if (response.errorCode !== null && response.errorCode !== undefined) return true;
+  return Boolean(String(response.message || "").trim());
+}
+
+function executionCashDelta(beforeSnapshot = null, afterSnapshot = null) {
+  const beforeCash = Number(beforeSnapshot?.availableCash);
+  const afterCash = Number(afterSnapshot?.availableCash);
+  if (!Number.isFinite(beforeCash) || !Number.isFinite(afterCash)) return null;
+  return roundNumber(afterCash - beforeCash, 6);
+}
+
+function comparableExecutionSnapshot(snapshot = null) {
+  if (!snapshot || typeof snapshot !== "object") return null;
+  const sortedIds = (value) => (Array.isArray(value) ? value : [])
+    .map((item) => String(item))
+    .sort();
+  const numberOrNull = (value) => Number.isFinite(Number(value)) ? roundNumber(Number(value), 6) : null;
+  return {
+    positionLineCount: Number(snapshot.positionLineCount || 0),
+    positionIds: sortedIds(snapshot.positionIds),
+    investedAmount: numberOrNull(snapshot.investedAmount),
+    positionUnits: numberOrNull(snapshot.positionUnits),
+    openOrderCount: Number(snapshot.openOrderCount || 0),
+    openOrderIds: sortedIds(snapshot.openOrderIds),
+    closeOrderCount: Number(snapshot.closeOrderCount || 0),
+    closeOrderIds: sortedIds(snapshot.closeOrderIds)
+  };
+}
+
+function executionStateUnchanged(beforeSnapshot = null, afterSnapshot = null) {
+  const before = comparableExecutionSnapshot(beforeSnapshot);
+  const after = comparableExecutionSnapshot(afterSnapshot);
+  if (!before || !after) return false;
+  return canonicalJson(before) === canonicalJson(after);
+}
+
+function shouldResolveIntentAsNoEffect(intent, evaluation, afterSnapshot, nextReconciliationAttempts = null) {
+  if (!intent || evaluation?.status !== EXECUTION_STATUS.NOT_FOUND) {
+    return { resolve: false, reasons: ["EVIDENCE_NOT_NOT_FOUND"] };
+  }
+  const ageMinutes = minutesSince(intent.createdAt);
+  const reconciliations = Number(nextReconciliationAttempts ?? intent.reconciliationAttempts ?? 0);
+  const responseAcknowledged = hasExecutionBusinessAcknowledgement(intent.response);
+  const cashDelta = executionCashDelta(intent.beforeSnapshot, afterSnapshot);
+  const stateUnchanged = executionStateUnchanged(intent.beforeSnapshot, afterSnapshot);
+  const cashUnchanged = cashDelta !== null && Math.abs(cashDelta) <= EXECUTION_NO_EFFECT_CASH_TOLERANCE_USD;
+  const timeoutReached = Number.isFinite(ageMinutes) && ageMinutes >= EXECUTION_NO_EFFECT_TIMEOUT_MINUTES;
+  const enoughReconciliations = reconciliations >= EXECUTION_NO_EFFECT_MIN_RECONCILIATIONS;
+  const httpWas2xx = Number(intent.httpStatus) >= 200 && Number(intent.httpStatus) < 300;
+
+  const resolve = httpWas2xx && !responseAcknowledged && stateUnchanged && cashUnchanged &&
+    timeoutReached && enoughReconciliations;
+  return {
+    resolve,
+    ageMinutes: Number.isFinite(ageMinutes) ? roundNumber(ageMinutes, 2) : null,
+    reconciliations,
+    responseAcknowledged,
+    cashDelta,
+    stateUnchanged,
+    cashUnchanged,
+    timeoutReached,
+    enoughReconciliations,
+    httpWas2xx,
+    reasons: resolve ? ["HTTP_2XX_EMPTY_BUSINESS_RESPONSE", "NO_PORTFOLIO_EFFECT", "CASH_UNCHANGED"] : []
+  };
+}
+
 function recordExecutionVerification(entry = {}) {
   const record = {
     id: randomUUID(),
@@ -5772,6 +5887,9 @@ function executionVerifierStatus() {
     attempts: EXECUTION_VERIFY_ATTEMPTS,
     initialDelayMs: LIVE_POST_TRADE_VERIFY_DELAY_MS,
     retryDelayMs: EXECUTION_VERIFY_RETRY_DELAY_MS,
+    noEffectTimeoutMinutes: EXECUTION_NO_EFFECT_TIMEOUT_MINUTES,
+    noEffectMinReconciliations: EXECUTION_NO_EFFECT_MIN_RECONCILIATIONS,
+    noEffectCashToleranceUsd: EXECUTION_NO_EFFECT_CASH_TOLERANCE_USD,
     reconcileOnStartup: EXECUTION_RECONCILE_ON_STARTUP,
     reconcileOnWatch: EXECUTION_RECONCILE_ON_WATCH,
     intentsCount: intents.length,
@@ -12170,6 +12288,7 @@ async function executeBuy(asset, amount, marketData = null) {
     );
 
     const compactResponse = compactEtoroExecutionResponse(data);
+    const businessAcknowledged = hasExecutionBusinessAcknowledgement(compactResponse);
     if (!response.ok) {
       updateOrderIntentStatus(intent.id, EXECUTION_STATUS.REJECTED, {
         httpStatus: response.status,
@@ -12197,12 +12316,15 @@ async function executeBuy(asset, amount, marketData = null) {
       };
     }
 
-    updateOrderIntentStatus(intent.id, EXECUTION_STATUS.ACCEPTED, {
+    updateOrderIntentStatus(intent.id, businessAcknowledged ? EXECUTION_STATUS.ACCEPTED : EXECUTION_STATUS.NOT_FOUND, {
       httpStatus: response.status,
       response: compactResponse,
+      businessAcknowledged,
       requestId: headers["x-request-id"],
-      acceptedAt: nowIso(),
-      note: "Réponse HTTP acceptée; confirmation portefeuille en cours"
+      acceptedAt: businessAcknowledged ? nowIso() : null,
+      note: businessAcknowledged
+        ? "Réponse HTTP et accusé métier reçus; confirmation portefeuille en cours"
+        : "HTTP 2xx sans identifiant, statut métier ni message; effet portefeuille à vérifier"
     });
 
     const verification = await verifyPortfolioAfterExecution({
@@ -12210,7 +12332,7 @@ async function executeBuy(asset, amount, marketData = null) {
       side: "BUY",
       beforeSnapshot,
       intentId: intent.id,
-      apiAccepted: true,
+      apiAccepted: businessAcknowledged,
       trigger: "live-buy-post-order"
     });
     updateOrderIntentStatus(intent.id, verification.status, {
@@ -12222,8 +12344,8 @@ async function executeBuy(asset, amount, marketData = null) {
       note: verification.note
     });
 
-    // Dès qu'eToro a accepté la requête, on compte l'essai et on bloque tout renvoi automatique.
-    setCooldown(asset);
+    // Un cooldown n'est posé que si eToro a accusé réception au niveau métier ou si un effet est observé.
+    if (businessAcknowledged || verification.observed) setCooldown(asset);
     addExecutionHistory({
       type: "BUY",
       asset,
@@ -12248,7 +12370,9 @@ async function executeBuy(asset, amount, marketData = null) {
 
     return {
       status: response.status,
-      ok: true,
+      httpOk: true,
+      ok: Boolean(businessAcknowledged || verification.confirmed),
+      businessAcknowledged,
       confirmed: verification.confirmed,
       verification_status: verification.status,
       uncertain: [EXECUTION_STATUS.NOT_FOUND, EXECUTION_STATUS.UNCERTAIN].includes(verification.status),
@@ -12357,6 +12481,7 @@ async function executeSell(asset, marketData = null) {
     );
 
     const compactResponse = compactEtoroExecutionResponse(data);
+    const businessAcknowledged = hasExecutionBusinessAcknowledgement(compactResponse);
     if (!response.ok) {
       updateOrderIntentStatus(intent.id, EXECUTION_STATUS.REJECTED, {
         httpStatus: response.status,
@@ -12384,12 +12509,15 @@ async function executeSell(asset, marketData = null) {
       };
     }
 
-    updateOrderIntentStatus(intent.id, EXECUTION_STATUS.ACCEPTED, {
+    updateOrderIntentStatus(intent.id, businessAcknowledged ? EXECUTION_STATUS.ACCEPTED : EXECUTION_STATUS.NOT_FOUND, {
       httpStatus: response.status,
       response: compactResponse,
+      businessAcknowledged,
       requestId: headers["x-request-id"],
-      acceptedAt: nowIso(),
-      note: "Réponse HTTP acceptée; confirmation portefeuille en cours"
+      acceptedAt: businessAcknowledged ? nowIso() : null,
+      note: businessAcknowledged
+        ? "Réponse HTTP et accusé métier reçus; confirmation portefeuille en cours"
+        : "HTTP 2xx sans identifiant, statut métier ni message; effet portefeuille à vérifier"
     });
 
     const verification = await verifyPortfolioAfterExecution({
@@ -12397,7 +12525,7 @@ async function executeSell(asset, marketData = null) {
       side: "SELL",
       beforeSnapshot,
       intentId: intent.id,
-      apiAccepted: true,
+      apiAccepted: businessAcknowledged,
       trigger: "live-sell-post-order"
     });
     updateOrderIntentStatus(intent.id, verification.status, {
@@ -12433,7 +12561,9 @@ async function executeSell(asset, marketData = null) {
 
     return {
       status: response.status,
-      ok: true,
+      httpOk: true,
+      ok: Boolean(businessAcknowledged || verification.confirmed),
+      businessAcknowledged,
       confirmed: verification.confirmed,
       verification_status: verification.status,
       uncertain: [EXECUTION_STATUS.NOT_FOUND, EXECUTION_STATUS.UNCERTAIN].includes(verification.status),
@@ -16049,6 +16179,13 @@ app.get("/auto-trading-check", requireSecret, (req, res) => {
     automationGuards: runtimeState.automationGuards,
     lastDecision: latestDecision,
     lastExecution: latestExecution,
+    orderPolicy: {
+      minimumOrderUsd: MIN_ORDER_USD,
+      maximumOrderUsd: MAX_ORDER_USD,
+      noEffectTimeoutMinutes: EXECUTION_NO_EFFECT_TIMEOUT_MINUTES,
+      noEffectMinReconciliations: EXECUTION_NO_EFFECT_MIN_RECONCILIATIONS,
+      noEffectCashToleranceUsd: EXECUTION_NO_EFFECT_CASH_TOLERANCE_USD
+    },
     counters: {
       executionHistory: runtimeState.executionHistory.length,
       orderIntents: Object.keys(runtimeState.orderIntents || {}).length,
@@ -18378,6 +18515,11 @@ module.exports = {
   rebuildAntiOverfittingLeaderboard,
   ANTI_OVERFITTING_STATUS,
   buildRiskSellIntelligenceAgent,
+  hasExecutionBusinessAcknowledgement,
+  shouldResolveIntentAsNoEffect,
+  executionCashDelta,
+  executionStateUnchanged,
+  comparableExecutionSnapshot,
   riskSellCheckForDecision,
   riskSellTrailingThresholdPct,
   currentAccountDrawdownPct,
