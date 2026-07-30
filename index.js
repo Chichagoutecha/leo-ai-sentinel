@@ -1,5 +1,5 @@
 /**
- * LEO-AI SENTINEL v10.22 — Agent Portfolio Identity & Data Integrity
+ * LEO-AI SENTINEL v10.22.4 — Effective Execution Readiness
  * - Prix explicitement issus de l'API publique eToro
  * - Gestion week-end / horaires réguliers du marché US
  * - Cryptomonnaies analysables 24/7
@@ -115,6 +115,9 @@
  * - v10.22.3 : un HTTP 2xx sans identifiant, statut métier ni effet portefeuille n'est plus considéré comme une acceptation prouvée
  * - v10.22.3 : expiration sûre des intents sans effet après plusieurs réconciliations et absence totale de variation du portefeuille
  * - v10.22.3 : minimum LIVE prudent de 10 USD par défaut; les montants réduits sous ce seuil deviennent HOLD
+ * - v10.22.4 : les limites 24 h et le délai entre ordres comptent uniquement les exécutions réellement confirmées
+ * - v10.22.4 : les intents ORDER_NO_EFFECT, rejetés ou non prouvés restent audités mais ne bloquent plus les futurs BUY
+ * - v10.22.4 : ExecutionReadinessAgent distingue désormais tentatives, intents actifs et exécutions effectives
  */
 
 const express = require("express");
@@ -151,7 +154,7 @@ function getOpenAIClient() {
   return openAIClient;
 }
 
-const VERSION = "v10.22.3-no-effect-intent-recovery";
+const VERSION = "v10.22.4-effective-execution-readiness";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
@@ -3140,24 +3143,77 @@ function addExecutionHistory(entry) {
   scheduleSave();
 }
 
+function resolveExecutionHistoryStatus(entry) {
+  const intent = entry?.intentId
+    ? runtimeState.orderIntents?.[entry.intentId] || null
+    : null;
+  if (intent?.status) return normalizeExecutionIntentStatus(intent.status);
+  if (entry?.verificationStatus) return normalizeExecutionIntentStatus(entry.verificationStatus);
+  if (entry?.confirmed === true) return EXECUTION_STATUS.CONFIRMED;
+  return null;
+}
+
+function executionHistoryEntryIsEffective(entry) {
+  if (!entry || typeof entry !== "object") return false;
+  const mode = String(entry.mode || "").toUpperCase();
+  if (mode !== "LIVE") return true;
+
+  const status = resolveExecutionHistoryStatus(entry);
+  if ([
+    EXECUTION_STATUS.NO_EFFECT,
+    EXECUTION_STATUS.REJECTED,
+    EXECUTION_STATUS.NOT_FOUND,
+    EXECUTION_STATUS.UNCERTAIN,
+    EXECUTION_STATUS.INTENT_CREATED,
+    EXECUTION_STATUS.SENT,
+    EXECUTION_STATUS.DUPLICATE_BLOCKED
+  ].includes(status)) return false;
+
+  if (entry.confirmed === true || status === EXECUTION_STATUS.CONFIRMED) return true;
+
+  // Avec un intent moderne, seule une preuve portefeuille confirmée compte comme
+  // exécution pour les limites 24 h et le délai entre ordres. Un intent actif est
+  // déjà bloqué séparément par ExecutionVerifier/AuditAgent.
+  if (entry.intentId && runtimeState.orderIntents?.[entry.intentId]) return false;
+
+  // Compatibilité prudente avec les anciennes entrées LIVE qui ne possédaient pas
+  // encore d'intent persistant mais contenaient déjà un identifiant métier eToro.
+  return Boolean(entry.orderId || entry.positionId) &&
+    ![EXECUTION_STATUS.NO_EFFECT, EXECUTION_STATUS.REJECTED].includes(status);
+}
+
 function getExecutionStats24h() {
   runtimeState.executionHistory = runtimeState.executionHistory.filter((e) => {
     const age = hoursSince(e.time);
     return age !== null && age <= 24;
   });
 
-  const total = runtimeState.executionHistory.length;
-  const buys = runtimeState.executionHistory.filter((e) => e.type === "BUY").length;
-  const sells = runtimeState.executionHistory.filter((e) => e.type === "SELL").length;
-  const confirmed = runtimeState.executionHistory.filter((e) => e.confirmed === true).length;
-  const pendingVerification = runtimeState.executionHistory.filter((e) =>
-    e.confirmed !== true && e.verificationStatus === EXECUTION_STATUS.ACCEPTED
+  const attempts = runtimeState.executionHistory;
+  const effectiveExecutions = attempts.filter(executionHistoryEntryIsEffective);
+  const total = effectiveExecutions.length;
+  const buys = effectiveExecutions.filter((e) => e.type === "BUY").length;
+  const sells = effectiveExecutions.filter((e) => e.type === "SELL").length;
+  const confirmed = effectiveExecutions.filter((e) =>
+    e.confirmed === true || resolveExecutionHistoryStatus(e) === EXECUTION_STATUS.CONFIRMED
   ).length;
-  const uncertain = runtimeState.executionHistory.filter((e) =>
-    [EXECUTION_STATUS.NOT_FOUND, EXECUTION_STATUS.UNCERTAIN].includes(e.verificationStatus)
+  const pendingVerification = attempts.filter((e) => {
+    const status = resolveExecutionHistoryStatus(e);
+    return isActiveExecutionStatus(status) && status !== EXECUTION_STATUS.NOT_FOUND && status !== EXECUTION_STATUS.UNCERTAIN;
+  }).length;
+  const uncertain = attempts.filter((e) => {
+    const status = resolveExecutionHistoryStatus(e);
+    return [EXECUTION_STATUS.NOT_FOUND, EXECUTION_STATUS.UNCERTAIN].includes(status);
+  }).length;
+  const noEffect = attempts.filter((e) =>
+    resolveExecutionHistoryStatus(e) === EXECUTION_STATUS.NO_EFFECT
   ).length;
-  const lastExecution = runtimeState.executionHistory[0] || null;
+  const rejected = attempts.filter((e) =>
+    resolveExecutionHistoryStatus(e) === EXECUTION_STATUS.REJECTED
+  ).length;
+  const lastExecution = effectiveExecutions[0] || null;
+  const lastAttempt = attempts[0] || null;
   const hoursSinceLastExecution = lastExecution ? hoursSince(lastExecution.time) : null;
+  const hoursSinceLastAttempt = lastAttempt ? hoursSince(lastAttempt.time) : null;
 
   return {
     total,
@@ -3166,8 +3222,17 @@ function getExecutionStats24h() {
     confirmed,
     pendingVerification,
     uncertain,
+    noEffect,
+    rejected,
+    attemptsTotal: attempts.length,
+    attemptedBuys: attempts.filter((e) => e.type === "BUY").length,
+    attemptedSells: attempts.filter((e) => e.type === "SELL").length,
+    ignoredNonEffectiveAttempts: Math.max(0, attempts.length - effectiveExecutions.length),
     lastExecution,
-    hoursSinceLastExecution
+    lastAttempt,
+    hoursSinceLastExecution,
+    hoursSinceLastAttempt,
+    policyBasis: "CONFIRMED_EFFECTIVE_EXECUTIONS_ONLY"
   };
 }
 
@@ -10740,9 +10805,37 @@ function buildVotesForAsset({
   else if (!held && isInCooldown(asset)) executionBlock = "Cooldown actif";
   else if (!held && portfolioSummary?.uniquePositionsCount >= MAX_OPEN_POSITIONS) executionBlock = "Nombre maximal de positions atteint";
   if (executionBlock) {
-    votes.push(createCouncilVote({ agent: "ExecutionReadinessAgent", asset, action: "VETO", confidence: 100, hardVeto: true, rationale: executionBlock }));
+    votes.push(createCouncilVote({
+      agent: "ExecutionReadinessAgent",
+      asset,
+      action: "VETO",
+      confidence: 100,
+      hardVeto: true,
+      rationale: executionBlock,
+      metadata: {
+        effectiveExecutions24h: executionStats.total,
+        attempts24h: executionStats.attemptsTotal,
+        ignoredNonEffectiveAttempts: executionStats.ignoredNonEffectiveAttempts,
+        policyBasis: executionStats.policyBasis
+      }
+    }));
   } else {
-    votes.push(createCouncilVote({ agent: "ExecutionReadinessAgent", asset, action: "PASS", confidence: 86, rationale: "Pipeline d'exécution disponible et aucune duplication détectée" }));
+    const ignored = Number(executionStats.ignoredNonEffectiveAttempts || 0);
+    votes.push(createCouncilVote({
+      agent: "ExecutionReadinessAgent",
+      asset,
+      action: "PASS",
+      confidence: 88,
+      rationale: ignored > 0
+        ? `Pipeline disponible; ${ignored} tentative(s) sans effet/non confirmée(s) conservée(s) pour audit mais exclue(s) des limites d'exécution`
+        : "Pipeline d'exécution disponible et aucune duplication détectée",
+      metadata: {
+        effectiveExecutions24h: executionStats.total,
+        attempts24h: executionStats.attemptsTotal,
+        ignoredNonEffectiveAttempts: ignored,
+        policyBasis: executionStats.policyBasis
+      }
+    }));
   }
 
   // AuditAgent
@@ -17355,7 +17448,7 @@ app.get("/diagnostic", requireSecret, async (req, res) => {
       version: VERSION,
       time: nowIso(),
       trading_mode: TRADING_MODE,
-      message: "Diagnostic v10.20 : données, mémoire, automatismes, portefeuille, décision, risque, intent, exécution et vérification.",
+      message: "Diagnostic v10.22.4 : données, mémoire, automatismes, portefeuille, décision, risque, intents, tentatives et exécutions effectives.",
       configuration: envConfiguration(),
       portfolioSummary: context.portfolioSummary,
       realPortfolioSummary: PAPER_TRADING_ENABLED ? context.realSummary : undefined,
