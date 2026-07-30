@@ -1,5 +1,5 @@
 /**
- * LEO-AI SENTINEL v10.22.4 — Effective Execution Readiness
+ * LEO-AI SENTINEL v10.22.5 — Minimum Executable Order Floor
  * - Prix explicitement issus de l'API publique eToro
  * - Gestion week-end / horaires réguliers du marché US
  * - Cryptomonnaies analysables 24/7
@@ -118,6 +118,8 @@
  * - v10.22.4 : les limites 24 h et le délai entre ordres comptent uniquement les exécutions réellement confirmées
  * - v10.22.4 : les intents ORDER_NO_EFFECT, rejetés ou non prouvés restent audités mais ne bloquent plus les futurs BUY
  * - v10.22.4 : ExecutionReadinessAgent distingue désormais tentatives, intents actifs et exécutions effectives
+ * - v10.22.5 : un BUY fortement validé peut être relevé au minimum exécutable de 10 USD lorsque toutes les marges de risque et d'allocation autorisent réellement ce montant
+ * - v10.22.5 : aucun plancher n'est appliqué si la confiance ou le multiplicateur de risque est trop faible, si le cash est insuffisant, ou si l'allocation refuse 10 USD
  */
 
 const express = require("express");
@@ -154,7 +156,7 @@ function getOpenAIClient() {
   return openAIClient;
 }
 
-const VERSION = "v10.22.4-effective-execution-readiness";
+const VERSION = "v10.22.5-minimum-executable-order-floor";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
@@ -1119,6 +1121,19 @@ const ANTI_OVERFITTING_STATUS = Object.freeze({
 });
 
 const MIN_ORDER_USD = Math.max(1, Number(process.env.MIN_ORDER_USD || 10));
+// v10.22.5 — eToro peut ignorer un ordre inférieur au minimum exécutable sans
+// fournir d'identifiant métier. Le plancher ne force jamais un BUY faible : il
+// s'applique uniquement après validation complète du signal, du cash, de
+// l'allocation et des multiplicateurs de risque.
+const MIN_ORDER_FLOOR_ENABLED = process.env.MIN_ORDER_FLOOR_ENABLED !== "false";
+const MIN_ORDER_FLOOR_MIN_CONFIDENCE = Math.max(
+  60,
+  Math.min(100, Number(process.env.MIN_ORDER_FLOOR_MIN_CONFIDENCE || 75))
+);
+const MIN_ORDER_FLOOR_MIN_COMBINED_MULTIPLIER = Math.max(
+  0.05,
+  Math.min(1, Number(process.env.MIN_ORDER_FLOOR_MIN_COMBINED_MULTIPLIER || 0.35))
+);
 const MAX_CONSECUTIVE_FAILURES = Number(
   process.env.MAX_CONSECUTIVE_FAILURES || 3
 );
@@ -12081,6 +12096,60 @@ function combineBuySizingMultipliers({ technical = 1, intelligence = 1, macro = 
   };
 }
 
+function assessMinimumExecutableBuyFloor({
+  decision,
+  portfolioSummary,
+  allocationGuard,
+  baseDynamicAmount,
+  rawDynamicAmount,
+  sizing
+} = {}) {
+  const confidence = Number(decision?.confidence || 0);
+  const combinedMultiplier = Number(sizing?.combinedMultiplier || 0);
+  const total = Math.max(0, Number(portfolioSummary?.totalTrackedValue || 0));
+  const availableCash = Math.max(0, Number(portfolioSummary?.availableCash || 0));
+  const cashReserveUsd = total * MIN_CASH_RESERVE_PCT / 100;
+  const cashRoomUsd = Math.max(0, availableCash - cashReserveUsd);
+  const allocationRoomUsd = Math.max(0, Number(allocationGuard?.roomUsd || 0));
+  const reasons = [];
+
+  if (!MIN_ORDER_FLOOR_ENABLED) reasons.push("plancher minimum désactivé");
+  if (MAX_ORDER_USD < MIN_ORDER_USD) reasons.push("maximum inférieur au minimum");
+  if (!Number.isFinite(baseDynamicAmount) || baseDynamicAmount < MIN_ORDER_USD) {
+    reasons.push(`budget de base ${baseDynamicAmount || 0} USD inférieur au minimum`);
+  }
+  if (confidence < MIN_ORDER_FLOOR_MIN_CONFIDENCE) {
+    reasons.push(`confiance ${confidence} < ${MIN_ORDER_FLOOR_MIN_CONFIDENCE}`);
+  }
+  if (!Number.isFinite(combinedMultiplier) || combinedMultiplier < MIN_ORDER_FLOOR_MIN_COMBINED_MULTIPLIER) {
+    reasons.push(`multiplicateur ${combinedMultiplier || 0} < ${MIN_ORDER_FLOOR_MIN_COMBINED_MULTIPLIER}`);
+  }
+  if (cashRoomUsd + 0.0001 < MIN_ORDER_USD) {
+    reasons.push(`marge de cash ${roundNumber(cashRoomUsd, 2)} USD insuffisante`);
+  }
+  if (!allocationGuard?.ok || allocationRoomUsd + 0.0001 < MIN_ORDER_USD) {
+    reasons.push(`allocation n'autorise pas ${MIN_ORDER_USD} USD`);
+  }
+  if (!Number.isFinite(rawDynamicAmount) || rawDynamicAmount <= 0) {
+    reasons.push("montant ajusté nul ou invalide");
+  }
+
+  return {
+    eligible: reasons.length === 0,
+    amountUsd: reasons.length === 0 ? MIN_ORDER_USD : 0,
+    reasons,
+    confidence,
+    confidenceThreshold: MIN_ORDER_FLOOR_MIN_CONFIDENCE,
+    combinedMultiplier: roundNumber(combinedMultiplier, 4),
+    multiplierThreshold: MIN_ORDER_FLOOR_MIN_COMBINED_MULTIPLIER,
+    baseDynamicAmount: roundNumber(Number(baseDynamicAmount || 0), 2),
+    rawDynamicAmount: roundNumber(Number(rawDynamicAmount || 0), 2),
+    cashRoomUsd: roundNumber(cashRoomUsd, 2),
+    allocationRoomUsd: roundNumber(allocationRoomUsd, 2),
+    minimumOrderUsd: MIN_ORDER_USD
+  };
+}
+
 function sanitizeDecision(decision) {
   let rawDecision = String(decision?.decision || "HOLD").toUpperCase();
 
@@ -12216,7 +12285,13 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
   if (d.decision === "BUY") {
     if (agents.riskBudgetAgent?.newBuyBlocked) return hold(`RiskBudgetAgent bloque les achats: ${agents.riskBudgetAgent.blocks.join(", ")}`);
     if (executionStats.buys >= MAX_BUYS_24H) return hold(`Limite BUY 24h atteinte (${executionStats.buys}/${MAX_BUYS_24H})`);
-    const allocationGuard = allocationCheckForBuy(d.asset, summary, d.amount_usd || MAX_ORDER_USD);
+    // Vérifier directement que l'allocation permet au moins le minimum réellement
+    // exécutable, même si le modèle a proposé un montant fractionnaire inférieur.
+    const requestedAllocationUsd = Math.min(
+      MAX_ORDER_USD,
+      Math.max(MIN_ORDER_USD, Number(d.amount_usd || MAX_ORDER_USD))
+    );
+    const allocationGuard = allocationCheckForBuy(d.asset, summary, requestedAllocationUsd);
     if (PORTFOLIO_ALLOCATION_MODE === "enforced" && !allocationGuard.ok) return hold(allocationGuard.reason);
     const category = rules.category;
     const diversificationState = summary.diversificationState || {};
@@ -12237,7 +12312,10 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
     if (isInCooldown(d.asset)) return hold(`Cooldown actif sur ${d.asset}`);
     if (summary.uniquePositionsCount >= MAX_OPEN_POSITIONS) return hold(`Maximum d'actifs uniques atteint (${summary.uniquePositionsCount}/${MAX_OPEN_POSITIONS})`);
 
-    const baseDynamicAmount = dynamicBuyAmount(d, summary);
+    const baseDynamicAmount = dynamicBuyAmount(
+      { ...d, amount_usd: requestedAllocationUsd },
+      summary
+    );
     const technicalMultiplier = technicalSizingMultiplier(
       agents.technicalAnalysisAgent,
       agents.marketRegimeAgent,
@@ -12256,15 +12334,42 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
       council: councilMultiplier,
       riskSell: riskSellMultiplier
     });
-    const dynamicAmount = roundNumber(baseDynamicAmount * sizing.combinedMultiplier, 2);
+    const rawDynamicAmount = roundNumber(baseDynamicAmount * sizing.combinedMultiplier, 2);
+    let dynamicAmount = rawDynamicAmount;
+    let minimumOrderFloor = null;
+
     if (!Number.isFinite(dynamicAmount) || dynamicAmount < MIN_ORDER_USD) {
-      return hold(
-        `Montant ${dynamicAmount || 0} USD inférieur au minimum ${MIN_ORDER_USD} USD après ajustement des risques`,
-        "failed",
-        "BELOW_MIN_ORDER_AFTER_RISK_SCALING",
-        { baseDynamicAmount, sizing, minimumOrderUsd: MIN_ORDER_USD }
-      );
+      minimumOrderFloor = assessMinimumExecutableBuyFloor({
+        decision: d,
+        portfolioSummary: summary,
+        allocationGuard,
+        baseDynamicAmount,
+        rawDynamicAmount,
+        sizing
+      });
+      if (!minimumOrderFloor.eligible) {
+        return hold(
+          `Montant ${dynamicAmount || 0} USD inférieur au minimum ${MIN_ORDER_USD} USD après ajustement des risques; plancher refusé: ${minimumOrderFloor.reasons.join(", ")}`,
+          "failed",
+          "BELOW_MIN_ORDER_AFTER_RISK_SCALING",
+          { baseDynamicAmount, rawDynamicAmount, sizing, minimumOrderFloor, minimumOrderUsd: MIN_ORDER_USD }
+        );
+      }
+      dynamicAmount = minimumOrderFloor.amountUsd;
     }
+
+    // Dernière validation de l'allocation avec le montant réellement envoyé.
+    const finalAllocationGuard = allocationCheckForBuy(d.asset, summary, dynamicAmount);
+    if (PORTFOLIO_ALLOCATION_MODE === "enforced" && !finalAllocationGuard.ok) {
+      return hold(finalAllocationGuard.reason, "failed", "FINAL_ALLOCATION_RECHECK_FAILED", {
+        requestedAllocationUsd,
+        rawDynamicAmount,
+        dynamicAmount,
+        minimumOrderFloor,
+        finalAllocationGuard
+      });
+    }
+
     const finalDecision = {
       ...d,
       amount_usd: dynamicAmount,
@@ -12277,8 +12382,10 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
     return {
       approved: true,
       finalDecision,
-      reason: `BUY approuvé; ${allocationGuard.reason}; ${marketCheck.reason}; ${integrityCheck.reason}; ${technicalCheck.reason}; ${intelligenceCheck.reason}; ${macroCheck.reason}; ${councilCheck.reason}; ${riskSellCheck.reason}; dimensionnement ${sizing.method}, multiplicateur combiné ${sizing.combinedMultiplier}; montant ${dynamicAmount} USD`,
-      allocationGuard,
+      reason: `BUY approuvé; ${finalAllocationGuard.reason}; ${marketCheck.reason}; ${integrityCheck.reason}; ${technicalCheck.reason}; ${intelligenceCheck.reason}; ${macroCheck.reason}; ${councilCheck.reason}; ${riskSellCheck.reason}; dimensionnement ${sizing.method}, multiplicateur combiné ${sizing.combinedMultiplier}; montant brut ${rawDynamicAmount} USD; montant exécutable ${dynamicAmount} USD${minimumOrderFloor?.eligible ? " (plancher minimum validé)" : ""}`,
+      allocationGuard: finalAllocationGuard,
+      minimumOrderFloor,
+      rawDynamicAmount,
       riskBudget: agents.riskBudgetAgent,
       technicalSizingMultiplier: technicalMultiplier,
       intelligenceSizingMultiplier: intelligenceMultiplier,
@@ -16275,6 +16382,9 @@ app.get("/auto-trading-check", requireSecret, (req, res) => {
     orderPolicy: {
       minimumOrderUsd: MIN_ORDER_USD,
       maximumOrderUsd: MAX_ORDER_USD,
+      minimumOrderFloorEnabled: MIN_ORDER_FLOOR_ENABLED,
+      minimumOrderFloorMinConfidence: MIN_ORDER_FLOOR_MIN_CONFIDENCE,
+      minimumOrderFloorMinCombinedMultiplier: MIN_ORDER_FLOOR_MIN_COMBINED_MULTIPLIER,
       noEffectTimeoutMinutes: EXECUTION_NO_EFFECT_TIMEOUT_MINUTES,
       noEffectMinReconciliations: EXECUTION_NO_EFFECT_MIN_RECONCILIATIONS,
       noEffectCashToleranceUsd: EXECUTION_NO_EFFECT_CASH_TOLERANCE_USD
@@ -17448,7 +17558,7 @@ app.get("/diagnostic", requireSecret, async (req, res) => {
       version: VERSION,
       time: nowIso(),
       trading_mode: TRADING_MODE,
-      message: "Diagnostic v10.22.4 : données, mémoire, automatismes, portefeuille, décision, risque, intents, tentatives et exécutions effectives.",
+      message: "Diagnostic v10.22.5 : données, mémoire, automatismes, portefeuille, décision, risque, plancher d’ordre exécutable, intents, tentatives et exécutions effectives.",
       configuration: envConfiguration(),
       portfolioSummary: context.portfolioSummary,
       realPortfolioSummary: PAPER_TRADING_ENABLED ? context.realSummary : undefined,
