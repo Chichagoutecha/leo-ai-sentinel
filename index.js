@@ -148,7 +148,7 @@ function getOpenAIClient() {
   return openAIClient;
 }
 
-const VERSION = "v10.22.1-agent-token-fallback";
+const VERSION = "v10.22.2-agent-identity-close-order-fix";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
@@ -3381,11 +3381,13 @@ async function resolveEtoroPortfolioContext(portfolioResponse, summary, { force 
       const storedAgent = runtimeState.livePortfolioIdentity?.contextKind === "AGENT_PORTFOLIO"
         ? runtimeState.livePortfolioIdentity.agentPortfolio
         : null;
-      const virtualBalance = Number.isFinite(Number(ETORO_AGENT_VIRTUAL_BALANCE_USD))
-        ? Number(ETORO_AGENT_VIRTUAL_BALANCE_USD)
-        : (Number.isFinite(Number(storedAgent?.virtualBalanceUsd))
-            ? Number(storedAgent.virtualBalanceUsd)
-            : null);
+      // Number(null) vaut 0 en JavaScript : ne jamais interpréter une métadonnée
+      // absente comme un solde virtuel nul. En mode token-agent, si /agent-portfolios
+      // est interdit, la première référence fiable est la valeur totale du PnL REAL.
+      const configuredVirtualBalance = finitePositiveNumberOrNull(ETORO_AGENT_VIRTUAL_BALANCE_USD);
+      const storedVirtualBalance = finitePositiveNumberOrNull(storedAgent?.virtualBalanceUsd);
+      const observedVirtualBalance = finitePositiveNumberOrNull(summary?.totalTrackedValue);
+      const virtualBalance = configuredVirtualBalance ?? storedVirtualBalance ?? observedVirtualBalance;
       const syntheticAgentPortfolio = {
         agentPortfolioId: ETORO_EXPECTED_AGENT_PORTFOLIO_ID || storedAgent?.agentPortfolioId || null,
         agentPortfolioName: storedAgent?.agentPortfolioName || "Configured agent portfolio",
@@ -3394,7 +3396,11 @@ async function resolveEtoroPortfolioContext(portfolioResponse, summary, { force 
         agentPortfolioVirtualBalance: virtualBalance,
         createdAt: null,
         userTokens: [],
-        resolutionSource: "FORCED_AGENT_CONTEXT_FROM_REAL_PNL"
+        resolutionSource: configuredVirtualBalance
+          ? "FORCED_AGENT_CONTEXT_FROM_ENV_BALANCE"
+          : (storedVirtualBalance
+              ? "FORCED_AGENT_CONTEXT_FROM_CONFIRMED_BASELINE"
+              : "FORCED_AGENT_CONTEXT_FROM_REAL_PNL_BASELINE")
       };
       return {
         kind: "AGENT_PORTFOLIO",
@@ -3436,6 +3442,13 @@ async function resolveEtoroPortfolioContext(portfolioResponse, summary, { force 
     scopes: null,
     discovery
   };
+}
+
+function finitePositiveNumberOrNull(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
 }
 
 function normalizeConfidence(value) {
@@ -3606,8 +3619,8 @@ function buildLivePortfolioIdentitySnapshot(portfolioResponse, summary, portfoli
     agentPortfolioName: agentPortfolio.agentPortfolioName || null,
     agentPortfolioGcid: agentPortfolio.agentPortfolioGcid || null,
     mirrorId: agentPortfolio.mirrorId || null,
-    virtualBalanceUsd: Number.isFinite(Number(agentPortfolio.agentPortfolioVirtualBalance))
-      ? roundNumber(Number(agentPortfolio.agentPortfolioVirtualBalance), 4)
+    virtualBalanceUsd: finitePositiveNumberOrNull(agentPortfolio.agentPortfolioVirtualBalance) !== null
+      ? roundNumber(finitePositiveNumberOrNull(agentPortfolio.agentPortfolioVirtualBalance), 4)
       : null,
     resolutionSource: agentPortfolio.resolutionSource || null
   } : null;
@@ -3650,11 +3663,12 @@ function validateLivePortfolioIdentity(portfolioResponse, summary, { allowUnconf
   const expectedId = currentIsAgent
     ? (ETORO_EXPECTED_AGENT_PORTFOLIO_ID || stored?.portfolioId || null)
     : (ETORO_EXPECTED_PORTFOLIO_ID || stored?.portfolioId || null);
-  const metadataVirtualBalance = Number(portfolioContext?.agentPortfolio?.agentPortfolioVirtualBalance);
+  const metadataVirtualBalance = finitePositiveNumberOrNull(
+    portfolioContext?.agentPortfolio?.agentPortfolioVirtualBalance
+  );
+  const storedAgentVirtualBalance = finitePositiveNumberOrNull(stored?.agentPortfolio?.virtualBalanceUsd);
   const expectedValue = currentIsAgent
-    ? (Number.isFinite(metadataVirtualBalance)
-        ? metadataVirtualBalance
-        : (Number.isFinite(Number(stored?.agentPortfolio?.virtualBalanceUsd)) ? Number(stored.agentPortfolio.virtualBalanceUsd) : null))
+    ? (metadataVirtualBalance ?? storedAgentVirtualBalance)
     : (Number.isFinite(ETORO_EXPECTED_ACCOUNT_VALUE_USD)
         ? ETORO_EXPECTED_ACCOUNT_VALUE_USD
         : (Number.isFinite(Number(stored?.totalValueUsd)) ? Number(stored.totalValueUsd) : null));
@@ -3707,7 +3721,11 @@ function validateLivePortfolioIdentity(portfolioResponse, summary, { allowUnconf
       contextKind: current.contextKind,
       portfolioId: expectedId,
       totalValueUsd: Number.isFinite(expectedValue) ? roundNumber(expectedValue, 4) : null,
-      valueMeaning: currentIsAgent ? "AGENT_PORTFOLIO_VIRTUAL_BALANCE" : "ACCOUNT_EQUITY",
+      valueMeaning: currentIsAgent
+        ? (String(portfolioContext?.agentPortfolio?.resolutionSource || "").startsWith("FORCED_AGENT_CONTEXT")
+            ? "AGENT_CONFIRMED_REAL_PNL_BASELINE"
+            : "AGENT_PORTFOLIO_VIRTUAL_BALANCE")
+        : "ACCOUNT_EQUITY",
       tolerancePct: LIVE_PORTFOLIO_VALUE_TOLERANCE_PCT,
       minimumToleranceUsd: LIVE_PORTFOLIO_VALUE_MIN_TOLERANCE_USD
     },
@@ -3838,9 +3856,9 @@ async function verifyRealPortfolioBeforeExecution({ asset, side, amount = 0 } = 
     if (!hasOpenPosition(portfolio, safeAsset)) {
       return { ok: false, reason: `Aucune position REAL ouverte sur ${safeAsset}`, validation };
     }
-    if (hasCloseOrder(portfolio, safeAsset)) {
-      return { ok: false, reason: `Un ordre de clôture REAL existe déjà sur ${safeAsset}`, validation };
-    }
+    // La duplication SELL est protégée par les intents persistants et
+    // l'ExecutionVerifier. ordersForClose du PnL n'est pas traité comme un
+    // ordre en attente, car il reflète les lignes clôturables du portefeuille-agent.
   }
 
   return {
@@ -4499,7 +4517,11 @@ function extractPortfolioSummary(portfolioResponse) {
   for (const [category, value] of Object.entries(categoryValues)) categoryWeightsPct[category] = denominator > 0 ? roundNumber(value / denominator * 100, 3) : null;
 
   const pendingWarnings = [];
-  for (const order of [...openOrders, ...closeOrders]) {
+  // La documentation eToro utilise ordersForOpen/orders pour les ordres qui
+  // immobilisent du cash. Dans le PnL observé d'un token-agent, ordersForClose
+  // contient une ligne par position ouverte et ne constitue donc pas une preuve
+  // d'ordre SELL en attente. Ne pas créer de faux blocage à partir de ce tableau.
+  for (const order of openOrders) {
     if (order.ageHours !== null && order.ageHours >= PENDING_ORDER_WARNING_HOURS) pendingWarnings.push({ type: "PENDING_ORDER_TOO_OLD", asset: order.asset, orderId: order.orderId, ageHours: order.ageHours });
   }
 
@@ -4526,6 +4548,8 @@ function extractPortfolioSummary(portfolioResponse) {
     missingStarterPositions: Math.max(0, TARGET_STARTER_POSITIONS - uniqueOpenAssets.length),
     ordersForOpenCount: ordersForOpen.length,
     ordersForCloseCount: ordersForClose.length,
+    pendingCloseOrdersCount: 0,
+    ordersForCloseInterpretation: "POSITION_CLOSE_DESCRIPTORS_NOT_PENDING_PROOF",
     openPositions,
     aggregatedPositions,
     openOrders,
@@ -4868,11 +4892,12 @@ function hasOpenOrder(portfolioResponse, asset) {
 }
 
 function hasCloseOrder(portfolioResponse, asset) {
-  const clientPortfolio = getClientPortfolio(portfolioResponse);
-  const ordersForClose = clientPortfolio.ordersForClose || [];
-  const wantedId = WATCHLIST[asset];
-
-  return ordersForClose.some((o) => getInstrumentIdFromOrder(o) === wantedId);
+  // Conservé pour compatibilité diagnostique. Le tableau ordersForClose du PnL
+  // n'est pas une preuve suffisamment fiable d'un ordre SELL réellement pendant.
+  // Les protections anti-doublon reposent sur runtimeState.orderIntents.
+  void portfolioResponse;
+  void asset;
+  return false;
 }
 
 function buildAssetExecutionSnapshot(portfolioResponse, asset) {
@@ -10590,7 +10615,8 @@ function buildVotesForAsset({
   let executionBlock = null;
   if (activeIntent) executionBlock = `Intent ${activeIntent.status} déjà actif`;
   else if (!held && portfolioSummary?.ordersForOpenCount > 0) executionBlock = "Ordre d'achat déjà en attente";
-  else if (held && portfolioSummary?.ordersForCloseCount > 0) executionBlock = "Ordre de vente déjà en attente";
+  // Ne pas utiliser ordersForCloseCount comme veto : dans le PnL agent, ce
+  // tableau accompagne les positions ouvertes sans prouver une clôture pendante.
   else if (executionStats.total >= MAX_EXECUTED_ORDERS_24H) executionBlock = "Limite d'ordres 24h atteinte";
   else if (executionStats.hoursSinceLastExecution !== null && executionStats.hoursSinceLastExecution < MIN_HOURS_BETWEEN_EXECUTIONS) executionBlock = "Dernier ordre trop récent";
   else if (!held && isInCooldown(asset)) executionBlock = "Cooldown actif";
@@ -12059,8 +12085,8 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
   if (d.decision === "SELL") {
     if (executionStats.sells >= MAX_SELLS_24H) return hold(`Limite SELL 24h atteinte (${executionStats.sells}/${MAX_SELLS_24H})`);
     if (d.confidence < rules.sellThreshold) return hold(`Confiance SELL trop faible (${d.confidence} < ${rules.sellThreshold})`);
-    if (summary.ordersForCloseCount > 0) return hold("Ordre de vente déjà en attente");
-    if (hasCloseOrder(portfolioResponse, d.asset)) return hold(`Ordre de vente déjà en attente sur ${d.asset}`);
+    // Les doublons SELL sont bloqués par activeOrderIntentForAsset et la
+    // réconciliation persistante, pas par ordersForClose du PnL.
     if (!hasOpenPosition(portfolioResponse, d.asset)) return hold(`Aucune position ouverte sur ${d.asset}`);
     return {
       approved: true,
@@ -17219,7 +17245,7 @@ app.get("/diagnostic", requireSecret, async (req, res) => {
         marketRegime: context.marketRegimeAgent.regime,
         marketRegimeRiskMultiplier: context.marketRegimeAgent.riskMultiplier,
         hasOpenBuyOrder: context.portfolioSummary.ordersForOpenCount > 0,
-        hasOpenSellOrder: context.portfolioSummary.ordersForCloseCount > 0,
+        hasOpenSellOrder: context.portfolioSummary.pendingCloseOrdersCount > 0,
         recentExecutionBlock:
           executionStats.hoursSinceLastExecution !== null &&
           executionStats.hoursSinceLastExecution < MIN_HOURS_BETWEEN_EXECUTIONS,
