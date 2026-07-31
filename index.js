@@ -1,5 +1,5 @@
 /**
- * LEO-AI SENTINEL v10.22.5 — Minimum Executable Order Floor
+ * LEO-AI SENTINEL v10.22.6 — Progressive Starter & Risk-Scaled Sizing
  * - Prix explicitement issus de l'API publique eToro
  * - Gestion week-end / horaires réguliers du marché US
  * - Cryptomonnaies analysables 24/7
@@ -120,6 +120,10 @@
  * - v10.22.4 : ExecutionReadinessAgent distingue désormais tentatives, intents actifs et exécutions effectives
  * - v10.22.5 : un BUY fortement validé peut être relevé au minimum exécutable de 10 USD lorsque toutes les marges de risque et d'allocation autorisent réellement ce montant
  * - v10.22.5 : aucun plancher n'est appliqué si la confiance ou le multiplicateur de risque est trop faible, si le cash est insuffisant, ou si l'allocation refuse 10 USD
+ * - v10.22.6 : mode starter ramené à 6 actifs, seuil technique assoupli à 55 uniquement pour les actifs liquides du socle avec confiance >= 80
+ * - v10.22.6 : taille d'ordre progressive 10 -> 25 -> 50 -> jusqu'à 1% du portefeuille après preuves d'exécution confirmées
+ * - v10.22.6 : plafonds crypto/spéculatif progressifs et persistants, sans assouplir les sécurités d'identité, de données ou d'intents
+ * - v10.22.6 : diagnostic des trois meilleurs candidats, veto exact et condition manquante pour passer de HOLD à BUY
  */
 
 const express = require("express");
@@ -156,7 +160,7 @@ function getOpenAIClient() {
   return openAIClient;
 }
 
-const VERSION = "v10.22.5-minimum-executable-order-floor";
+const VERSION = "v10.22.6-progressive-starter-sizing";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
@@ -700,6 +704,40 @@ const MAX_CRYPTO_WEIGHT_PCT = Number(process.env.MAX_CRYPTO_WEIGHT_PCT || 35);
 const MAX_SPECULATIVE_WEIGHT_PCT = Number(
   process.env.MAX_SPECULATIVE_WEIGHT_PCT || 20
 );
+// v10.22.6 — plafonds progressifs. Les valeurs historiques ci-dessus restent
+// des plafonds absolus; les limites effectives sont plus basses au démarrage.
+const STARTER_MAX_CRYPTO_WEIGHT_PCT = Math.max(
+  5,
+  Math.min(MAX_CRYPTO_WEIGHT_PCT, Number(process.env.STARTER_MAX_CRYPTO_WEIGHT_PCT || 15))
+);
+const NORMAL_MAX_CRYPTO_WEIGHT_PCT = Math.max(
+  STARTER_MAX_CRYPTO_WEIGHT_PCT,
+  Math.min(MAX_CRYPTO_WEIGHT_PCT, Number(process.env.NORMAL_MAX_CRYPTO_WEIGHT_PCT || 18))
+);
+const PROVEN_MAX_CRYPTO_WEIGHT_PCT = Math.max(
+  NORMAL_MAX_CRYPTO_WEIGHT_PCT,
+  Math.min(MAX_CRYPTO_WEIGHT_PCT, Number(process.env.PROVEN_MAX_CRYPTO_WEIGHT_PCT || 22))
+);
+const STARTER_MAX_SPECULATIVE_WEIGHT_PCT = Math.max(
+  2,
+  Math.min(MAX_SPECULATIVE_WEIGHT_PCT, Number(process.env.STARTER_MAX_SPECULATIVE_WEIGHT_PCT || 10))
+);
+const PROVEN_MAX_SPECULATIVE_WEIGHT_PCT = Math.max(
+  STARTER_MAX_SPECULATIVE_WEIGHT_PCT,
+  Math.min(MAX_SPECULATIVE_WEIGHT_PCT, Number(process.env.PROVEN_MAX_SPECULATIVE_WEIGHT_PCT || 12))
+);
+const STARTER_MAX_SINGLE_SPECULATIVE_PCT = Math.max(
+  1,
+  Math.min(5, Number(process.env.STARTER_MAX_SINGLE_SPECULATIVE_PCT || 3))
+);
+const NORMAL_MAX_SINGLE_SPECULATIVE_PCT = Math.max(
+  STARTER_MAX_SINGLE_SPECULATIVE_PCT,
+  Math.min(7, Number(process.env.NORMAL_MAX_SINGLE_SPECULATIVE_PCT || 4))
+);
+const PROVEN_MAX_SINGLE_SPECULATIVE_PCT = Math.max(
+  NORMAL_MAX_SINGLE_SPECULATIVE_PCT,
+  Math.min(10, Number(process.env.PROVEN_MAX_SINGLE_SPECULATIVE_PCT || 5))
+);
 const MAX_DAILY_LOSS_PCT = Number(process.env.MAX_DAILY_LOSS_PCT || 3);
 const MAX_WEEKLY_LOSS_PCT = Number(process.env.MAX_WEEKLY_LOSS_PCT || 6);
 const MAX_DRAWDOWN_PCT = Number(process.env.MAX_DRAWDOWN_PCT || 10);
@@ -1202,9 +1240,47 @@ const AUTO_WATCH_DEDUP_MINUTES = Math.max(
 const REQUIRE_FRESH_RATE_FOR_EXECUTION =
   process.env.REQUIRE_FRESH_RATE_FOR_EXECUTION !== "false";
 
-const MAX_ORDER_USD = Math.max(MIN_ORDER_USD, Number(process.env.MAX_ORDER_USD || 10));
+// v10.22.6 — le plafond d'ordre devient progressif. MAX_ORDER_USD est conservé
+// comme compatibilité lorsque le mode progressif est désactivé; le nouveau plafond
+// absolu par défaut est 100 USD, soit environ 1% d'un portefeuille virtuel de 10k.
+const LEGACY_MAX_ORDER_USD = Math.max(MIN_ORDER_USD, Number(process.env.MAX_ORDER_USD || 10));
+const PROGRESSIVE_ORDER_SIZING_ENABLED = process.env.PROGRESSIVE_ORDER_SIZING_ENABLED !== "false";
+const PROGRESSIVE_VALIDATION_MAX_ORDER_USD = Math.max(
+  MIN_ORDER_USD,
+  Number(process.env.PROGRESSIVE_VALIDATION_MAX_ORDER_USD || 10)
+);
+const PROGRESSIVE_CONSTRUCTION_MAX_ORDER_USD = Math.max(
+  PROGRESSIVE_VALIDATION_MAX_ORDER_USD,
+  Number(process.env.PROGRESSIVE_CONSTRUCTION_MAX_ORDER_USD || 25)
+);
+const PROGRESSIVE_NORMAL_MAX_ORDER_USD = Math.max(
+  PROGRESSIVE_CONSTRUCTION_MAX_ORDER_USD,
+  Number(process.env.PROGRESSIVE_NORMAL_MAX_ORDER_USD || 50)
+);
+const PROGRESSIVE_PROVEN_MAX_PORTFOLIO_PCT = Math.max(
+  0.1,
+  Math.min(3, Number(process.env.PROGRESSIVE_PROVEN_MAX_PORTFOLIO_PCT || 1))
+);
+const PROGRESSIVE_HARD_MAX_ORDER_USD = Math.max(
+  PROGRESSIVE_NORMAL_MAX_ORDER_USD,
+  Number(process.env.PROGRESSIVE_HARD_MAX_ORDER_USD || 100)
+);
+const MAX_ORDER_USD = PROGRESSIVE_ORDER_SIZING_ENABLED
+  ? PROGRESSIVE_HARD_MAX_ORDER_USD
+  : LEGACY_MAX_ORDER_USD;
 const MAX_OPEN_POSITIONS = 12;
-const TARGET_STARTER_POSITIONS = 8;
+const TARGET_STARTER_POSITIONS = Math.max(
+  4,
+  Math.min(8, Number(process.env.TARGET_STARTER_POSITIONS || 6))
+);
+const STARTER_RELAXED_TECH_SCORE = Math.max(
+  50,
+  Math.min(60, Number(process.env.STARTER_RELAXED_TECH_SCORE || 55))
+);
+const STARTER_RELAXED_MIN_CONFIDENCE = Math.max(
+  75,
+  Math.min(95, Number(process.env.STARTER_RELAXED_MIN_CONFIDENCE || 80))
+);
 
 const BUY_COOLDOWN_HOURS = 3;
 const MAX_LOGS = 180;
@@ -1336,23 +1412,33 @@ const STARTER_PRIORITY = [
   "XLP",
   "BTC",
   "ETH",
-  "PLTR",
-  "XLE",
-  "JPM",
-  "QQQ",
   "BRK.B",
-  "PANW",
-  "CRWD",
+  "JPM",
+  "TLT",
+  "QQQ",
+  "MSFT",
   "GOOG",
   "AMZN",
+  "XLE",
+  "NVDA",
+  "AMD",
+  "ORCL",
+  "PANW",
+  "CRWD",
   "BABA",
+  "PLTR",
   "COIN",
   "SOL",
-  "TLT",
   "RKLB",
   "IONQ",
   "ASTS"
 ];
+
+// Seuls ces actifs liquides et diversifiants bénéficient du seuil technique
+// starter à 55. Les actifs spéculatifs conservent leurs exigences strictes.
+const STARTER_RELAXED_ASSETS = new Set([
+  "SPY", "GLD", "SHY", "XLV", "XLP", "BTC", "ETH", "BRK.B", "JPM", "TLT"
+]);
 
 const TECH_LIKE_CATEGORIES = new Set([
   "AI_BIG_TECH",
@@ -1673,6 +1759,12 @@ const runtimeState = {
   lastDecision: null,
   lastWatch: null,
   executionHistory: [],
+  executionMilestones: {
+    confirmedIntentIds: [],
+    confirmedBuys: 0,
+    confirmedSells: 0,
+    lastConfirmedAt: null
+  },
   lastMarketData: null,
   trendMemory: {},
   equityHistory: [],
@@ -1793,7 +1885,7 @@ MODES :
 
 RÈGLES ABSOLUES :
 - Jamais de levier, short ou all-in.
-- Maximum un ordre par scan et maximum 10 USD par ordre.
+- Maximum un ordre par scan et respecter strictement max_order_usd fourni dans le contexte.
 - Utiliser uniquement les actifs autorisés.
 - BUY uniquement si eligibleForTrade=true.
 - Ignorer les actifs MARKET_CLOSED sans bloquer ceux qui restent ouverts.
@@ -2080,6 +2172,15 @@ function compactLogForPersistence(log) {
     tradingMode: log.tradingMode || null,
     decision: log.decision ? sanitizeDecision(log.decision) : null,
     decision_raw: log.decision_raw ? sanitizeDecision(log.decision_raw) : null,
+    decisionDiagnostics: log.decisionDiagnostics ? {
+      generatedAt: log.decisionDiagnostics.generatedAt || null,
+      selectedDecision: log.decisionDiagnostics.selectedDecision ? sanitizeDecision(log.decisionDiagnostics.selectedDecision) : null,
+      orderPolicy: log.decisionDiagnostics.orderPolicy || null,
+      starterMode: Boolean(log.decisionDiagnostics.starterMode),
+      starterPositions: Number(log.decisionDiagnostics.starterPositions || 0),
+      starterTargetPositions: Number(log.decisionDiagnostics.starterTargetPositions || TARGET_STARTER_POSITIONS),
+      topCandidates: Array.isArray(log.decisionDiagnostics.topCandidates) ? log.decisionDiagnostics.topCandidates.slice(0, 3) : []
+    } : null,
     risk_reason: String(log.risk_reason || "").slice(0, 800),
     execution: compactExecutionForPersistence(log.execution),
     error: log.error || null
@@ -2170,6 +2271,7 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
       lastDecision: runtimeState.lastDecision || null,
       lastWatch: runtimeState.lastWatch || null,
       executionHistory: runtimeState.executionHistory || [],
+      executionMilestones: runtimeState.executionMilestones || null,
       trendMemory: runtimeState.trendMemory || {},
       equityHistory: (runtimeState.equityHistory || []).slice(-1500),
       performanceHistory: (runtimeState.performanceHistory || []).slice(-PERFORMANCE_HISTORY_LIMIT),
@@ -2259,6 +2361,7 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
     lastDecision: compactLogForPersistence(runtimeState.lastDecision),
     lastWatch: compactLogForPersistence(runtimeState.lastWatch),
     executionHistory: (runtimeState.executionHistory || []).slice(0, 50),
+    executionMilestones: runtimeState.executionMilestones || null,
     trendMemory: compactTrendMemory,
     equityHistory: (runtimeState.equityHistory || []).slice(-500),
     performanceHistory: (runtimeState.performanceHistory || []).slice(-Math.min(365, PERFORMANCE_HISTORY_LIMIT)),
@@ -2589,10 +2692,14 @@ function applyPersistentState(state) {
     runtimeState.lastRiskSellReport = state.lastRiskSellReport;
   }
   if (Array.isArray(state.auditTrail)) runtimeState.auditTrail = state.auditTrail.slice(0, 500);
+  if (state.executionMilestones && typeof state.executionMilestones === "object") {
+    runtimeState.executionMilestones = normalizeExecutionMilestones(state.executionMilestones);
+  }
   if (state.orderIntents && typeof state.orderIntents === "object") {
     runtimeState.orderIntents = Object.fromEntries(
       Object.entries(state.orderIntents).map(([id, intent]) => [id, migrateOrderIntent(intent)])
     );
+    rebuildExecutionMilestonesFromIntents();
   }
   if (Array.isArray(state.executionVerificationHistory)) {
     runtimeState.executionVerificationHistory = state.executionVerificationHistory
@@ -3248,6 +3355,136 @@ function getExecutionStats24h() {
     hoursSinceLastExecution,
     hoursSinceLastAttempt,
     policyBasis: "CONFIRMED_EFFECTIVE_EXECUTIONS_ONLY"
+  };
+}
+
+// v10.22.6 — registre cumulatif et idempotent des exécutions LIVE confirmées.
+// Il ne dépend pas de la fenêtre glissante de 24 h et reste persistant après
+// compaction/pruning des intents historiques.
+function normalizeExecutionMilestones(value = {}) {
+  const ids = Array.isArray(value.confirmedIntentIds)
+    ? [...new Set(value.confirmedIntentIds.map(String).filter(Boolean))].slice(-200)
+    : [];
+  return {
+    confirmedIntentIds: ids,
+    confirmedBuys: Math.max(0, Number(value.confirmedBuys || 0)),
+    confirmedSells: Math.max(0, Number(value.confirmedSells || 0)),
+    lastConfirmedAt: value.lastConfirmedAt || null
+  };
+}
+
+function registerConfirmedExecutionIntent(intent, { persist = true } = {}) {
+  if (!intent || normalizeExecutionIntentStatus(intent.status) !== EXECUTION_STATUS.CONFIRMED) return false;
+  if (String(intent.mode || "").toUpperCase() !== "LIVE") return false;
+  const id = String(intent.id || "").trim();
+  if (!id) return false;
+  const current = normalizeExecutionMilestones(runtimeState.executionMilestones || {});
+  if (current.confirmedIntentIds.includes(id)) {
+    runtimeState.executionMilestones = current;
+    return false;
+  }
+  current.confirmedIntentIds = [...current.confirmedIntentIds, id].slice(-200);
+  if (String(intent.type || "").toUpperCase() === "BUY") current.confirmedBuys += 1;
+  if (String(intent.type || "").toUpperCase() === "SELL") current.confirmedSells += 1;
+  current.lastConfirmedAt = intent.confirmedAt || intent.updatedAt || nowIso();
+  runtimeState.executionMilestones = current;
+  if (persist) scheduleSave();
+  return true;
+}
+
+function rebuildExecutionMilestonesFromIntents() {
+  runtimeState.executionMilestones = normalizeExecutionMilestones(runtimeState.executionMilestones || {});
+  for (const intent of Object.values(runtimeState.orderIntents || {})) {
+    registerConfirmedExecutionIntent(migrateOrderIntent(intent), { persist: false });
+  }
+  return runtimeState.executionMilestones;
+}
+
+function getExecutionMilestones() {
+  return normalizeExecutionMilestones(runtimeState.executionMilestones || {});
+}
+
+function hasCurrentExecutionAnomaly() {
+  const activeIntent = Object.values(runtimeState.orderIntents || {})
+    .some((intent) => isActiveExecutionStatus(intent?.status));
+  const stats = getExecutionStats24h();
+  return activeIntent || stats.pendingVerification > 0 || stats.uncertain > 0;
+}
+
+function getProgressiveOrderPolicy(portfolioSummary = {}) {
+  const milestones = getExecutionMilestones();
+  const confirmedTotal = milestones.confirmedBuys + milestones.confirmedSells;
+  const anomalyFree = !hasCurrentExecutionAnomaly();
+  const totalValue = Math.max(0, Number(portfolioSummary?.totalTrackedValue || 0));
+  let phase = "VALIDATION";
+  let phaseMaxOrderUsd = PROGRESSIVE_VALIDATION_MAX_ORDER_USD;
+  let reason = "Moins de 3 achats LIVE confirmés";
+
+  if (!PROGRESSIVE_ORDER_SIZING_ENABLED) {
+    phase = "LEGACY";
+    phaseMaxOrderUsd = LEGACY_MAX_ORDER_USD;
+    reason = "Dimensionnement progressif désactivé";
+  } else if (milestones.confirmedBuys >= 1 && milestones.confirmedSells >= 1 && anomalyFree) {
+    phase = "PROVEN_BUY_SELL";
+    const percentCap = totalValue > 0
+      ? totalValue * PROGRESSIVE_PROVEN_MAX_PORTFOLIO_PCT / 100
+      : PROGRESSIVE_NORMAL_MAX_ORDER_USD;
+    phaseMaxOrderUsd = Math.max(MIN_ORDER_USD, Math.min(PROGRESSIVE_HARD_MAX_ORDER_USD, percentCap));
+    reason = `Achat et vente LIVE confirmés; plafond ${PROGRESSIVE_PROVEN_MAX_PORTFOLIO_PCT}% du portefeuille`;
+  } else if (confirmedTotal >= 5 && anomalyFree) {
+    phase = "NORMAL";
+    phaseMaxOrderUsd = PROGRESSIVE_NORMAL_MAX_ORDER_USD;
+    reason = "Au moins 5 exécutions LIVE confirmées sans anomalie active";
+  } else if (milestones.confirmedBuys >= 3 && anomalyFree) {
+    phase = "CONSTRUCTION";
+    phaseMaxOrderUsd = PROGRESSIVE_CONSTRUCTION_MAX_ORDER_USD;
+    reason = "Au moins 3 achats LIVE confirmés sans anomalie active";
+  } else if (!anomalyFree) {
+    reason = "Anomalie/intention active: plafond de validation conservé";
+  }
+
+  const maxOrderUsd = roundNumber(Math.max(
+    MIN_ORDER_USD,
+    Math.min(PROGRESSIVE_HARD_MAX_ORDER_USD, phaseMaxOrderUsd)
+  ), 2);
+  return {
+    enabled: PROGRESSIVE_ORDER_SIZING_ENABLED,
+    phase,
+    reason,
+    minimumOrderUsd: MIN_ORDER_USD,
+    maximumOrderUsd: maxOrderUsd,
+    hardMaximumOrderUsd: PROGRESSIVE_HARD_MAX_ORDER_USD,
+    provenPortfolioPctCap: PROGRESSIVE_PROVEN_MAX_PORTFOLIO_PCT,
+    confirmedBuys: milestones.confirmedBuys,
+    confirmedSells: milestones.confirmedSells,
+    confirmedExecutions: confirmedTotal,
+    anomalyFree,
+    totalTrackedValueUsd: roundNumber(totalValue, 2)
+  };
+}
+
+function getProgressiveRiskCaps(portfolioSummary = {}) {
+  const orderPolicy = getProgressiveOrderPolicy(portfolioSummary);
+  let maxCryptoWeightPct = STARTER_MAX_CRYPTO_WEIGHT_PCT;
+  let maxSpeculativeWeightPct = STARTER_MAX_SPECULATIVE_WEIGHT_PCT;
+  let maxSingleSpeculativePct = STARTER_MAX_SINGLE_SPECULATIVE_PCT;
+
+  if (orderPolicy.phase === "NORMAL") {
+    maxCryptoWeightPct = NORMAL_MAX_CRYPTO_WEIGHT_PCT;
+    maxSingleSpeculativePct = NORMAL_MAX_SINGLE_SPECULATIVE_PCT;
+  } else if (orderPolicy.phase === "PROVEN_BUY_SELL") {
+    maxCryptoWeightPct = PROVEN_MAX_CRYPTO_WEIGHT_PCT;
+    maxSpeculativeWeightPct = PROVEN_MAX_SPECULATIVE_WEIGHT_PCT;
+    maxSingleSpeculativePct = PROVEN_MAX_SINGLE_SPECULATIVE_PCT;
+  }
+
+  return {
+    phase: orderPolicy.phase,
+    maxCryptoWeightPct: Math.min(MAX_CRYPTO_WEIGHT_PCT, maxCryptoWeightPct),
+    maxSpeculativeWeightPct: Math.min(MAX_SPECULATIVE_WEIGHT_PCT, maxSpeculativeWeightPct),
+    maxSingleSpeculativePct,
+    hardMaxCryptoWeightPct: MAX_CRYPTO_WEIGHT_PCT,
+    hardMaxSpeculativeWeightPct: MAX_SPECULATIVE_WEIGHT_PCT
   };
 }
 
@@ -4626,8 +4863,9 @@ function extractPortfolioSummary(portfolioResponse) {
   for (const [category, weight] of Object.entries(categoryWeightsPct)) if (weight > MAX_CATEGORY_WEIGHT_PCT) concentrationFlags.push({ type: "CATEGORY_OVERWEIGHT", category, weightPct: weight });
   const cryptoWeightPct = denominator > 0 ? roundNumber(cryptoValue / denominator * 100, 3) : 0;
   const speculativeWeightPct = denominator > 0 ? roundNumber(speculativeValue / denominator * 100, 3) : 0;
-  if (cryptoWeightPct > MAX_CRYPTO_WEIGHT_PCT) concentrationFlags.push({ type: "CRYPTO_OVERWEIGHT", weightPct: cryptoWeightPct });
-  if (speculativeWeightPct > MAX_SPECULATIVE_WEIGHT_PCT) concentrationFlags.push({ type: "SPECULATIVE_OVERWEIGHT", weightPct: speculativeWeightPct });
+  const progressiveRiskCaps = getProgressiveRiskCaps({ totalTrackedValue });
+  if (cryptoWeightPct > progressiveRiskCaps.maxCryptoWeightPct) concentrationFlags.push({ type: "CRYPTO_OVERWEIGHT", weightPct: cryptoWeightPct, limitPct: progressiveRiskCaps.maxCryptoWeightPct });
+  if (speculativeWeightPct > progressiveRiskCaps.maxSpeculativeWeightPct) concentrationFlags.push({ type: "SPECULATIVE_OVERWEIGHT", weightPct: speculativeWeightPct, limitPct: progressiveRiskCaps.maxSpeculativeWeightPct });
 
   const starterMode = uniqueOpenAssets.length < TARGET_STARTER_POSITIONS;
   const diversificationState = buildDiversificationState(uniqueOpenAssets, categoryCounts);
@@ -4667,6 +4905,7 @@ function extractPortfolioSummary(portfolioResponse) {
     speculativeValue: roundNumber(speculativeValue, 4),
     cryptoWeightPct,
     speculativeWeightPct,
+    progressiveRiskCaps,
     concentrationFlags,
     pendingWarnings
   };
@@ -4681,6 +4920,8 @@ function allocationBucketForAsset(asset) {
 
 function buildPortfolioAllocationPlan(portfolioSummary) {
   const policy = PORTFOLIO_ALLOCATION_POLICY;
+  const progressiveOrderPolicy = getProgressiveOrderPolicy(portfolioSummary);
+  const progressiveRiskCaps = getProgressiveRiskCaps(portfolioSummary);
   const totalValue = Math.max(0, Number(portfolioSummary?.totalTrackedValue || 0));
   const availableCash = Math.max(0, Number(portfolioSummary?.availableCash || 0));
   const cashWeightPct = totalValue > 0 ? roundNumber(availableCash / totalValue * 100, 4) : 0;
@@ -4699,7 +4940,10 @@ function buildPortfolioAllocationPlan(portfolioSummary) {
   for (const [bucket, targetPctRaw] of Object.entries(policy.bucketTargetsPct || {})) {
     const targetPct = Number(targetPctRaw || 0);
     const currentPct = Number(currentBucketWeights[bucket] || 0);
-    const band = policy.bucketBandsPct?.[bucket] || { minPct: 0, maxPct: 100 };
+    const baseBand = policy.bucketBandsPct?.[bucket] || { minPct: 0, maxPct: 100 };
+    const band = { minPct: Number(baseBand.minPct || 0), maxPct: Number(baseBand.maxPct || 100) };
+    if (bucket === "CRYPTO_MAJOR") band.maxPct = Math.min(band.maxPct, progressiveRiskCaps.maxCryptoWeightPct);
+    if (bucket === "SPECULATIVE") band.maxPct = Math.min(band.maxPct, progressiveRiskCaps.maxSpeculativeWeightPct);
     const gapPct = roundNumber(targetPct - currentPct, 4);
     let status = "IN_BAND";
     if (currentPct > Number(band.maxPct) + 0.0001) status = "OVER_MAX";
@@ -4726,7 +4970,10 @@ function buildPortfolioAllocationPlan(portfolioSummary) {
     const bucket = allocationBucketForAsset(asset);
     const currentPct = Number(currentAssetWeights[asset] || 0);
     const targetPct = Number(policy.assetTargetsPct?.[asset] || 0);
-    const maxPct = Number(policy.assetMaxPct?.[asset] || MAX_ASSET_WEIGHT_PCT);
+    let maxPct = Number(policy.assetMaxPct?.[asset] || MAX_ASSET_WEIGHT_PCT);
+    if (bucket === "SPECULATIVE") {
+      maxPct = Math.min(maxPct, progressiveRiskCaps.maxSingleSpeculativePct);
+    }
     const gapPct = roundNumber(targetPct - currentPct, 4);
     const bucketPlan = bucketPlans[bucket] || {
       currentPct: 0,
@@ -4781,7 +5028,8 @@ function buildPortfolioAllocationPlan(portfolioSummary) {
   const cashAboveTarget = cashWeightPct - ALLOCATION_MIN_GAP_PCT > policy.cashTargetPct;
   const targetCashUsd = totalValue * policy.cashTargetPct / 100;
   const excessCashUsd = Math.max(0, availableCash - targetCashUsd);
-  const estimatedOrdersAtCurrentCap = MAX_ORDER_USD > 0 ? Math.ceil(excessCashUsd / MAX_ORDER_USD) : null;
+  const currentMaxOrderUsd = progressiveOrderPolicy.maximumOrderUsd;
+  const estimatedOrdersAtCurrentCap = currentMaxOrderUsd > 0 ? Math.ceil(excessCashUsd / currentMaxOrderUsd) : null;
   const estimatedMinimumDaysAtDailyLimit = Number.isFinite(estimatedOrdersAtCurrentCap) && MAX_BUYS_24H > 0
     ? Math.ceil(estimatedOrdersAtCurrentCap / MAX_BUYS_24H)
     : null;
@@ -4811,7 +5059,8 @@ function buildPortfolioAllocationPlan(portfolioSummary) {
         : (cashBelowTarget ? "BELOW_TARGET" : (cashAboveTarget ? "ABOVE_TARGET" : "OK"))
     },
     feasibility: {
-      maxOrderUsd: MAX_ORDER_USD,
+      maxOrderUsd: currentMaxOrderUsd,
+      progressiveOrderPolicy,
       maxBuys24h: MAX_BUYS_24H,
       estimatedOrdersAtCurrentCap,
       estimatedMinimumDaysAtDailyLimit,
@@ -4831,8 +5080,11 @@ function buildPortfolioAllocationPlan(portfolioSummary) {
       requireUnderTargetForNewBuy: policy.requireUnderTargetForNewBuy,
       maxAssetWeightPct: MAX_ASSET_WEIGHT_PCT,
       maxCategoryWeightPct: MAX_CATEGORY_WEIGHT_PCT,
-      maxCryptoWeightPct: MAX_CRYPTO_WEIGHT_PCT,
-      maxSpeculativeWeightPct: MAX_SPECULATIVE_WEIGHT_PCT
+      maxCryptoWeightPct: progressiveRiskCaps.maxCryptoWeightPct,
+      maxSpeculativeWeightPct: progressiveRiskCaps.maxSpeculativeWeightPct,
+      maxSingleSpeculativePct: progressiveRiskCaps.maxSingleSpeculativePct,
+      hardMaxCryptoWeightPct: MAX_CRYPTO_WEIGHT_PCT,
+      hardMaxSpeculativeWeightPct: MAX_SPECULATIVE_WEIGHT_PCT
     }
   };
 }
@@ -4844,9 +5096,13 @@ function getPortfolioAllocationPlan(portfolioSummary) {
   return buildPortfolioAllocationPlan(portfolioSummary || {});
 }
 
-function allocationCheckForBuy(asset, portfolioSummary, wantedUsd = MAX_ORDER_USD) {
+function allocationCheckForBuy(asset, portfolioSummary, wantedUsd = null) {
   const safeAsset = String(asset || "").toUpperCase();
-  const wanted = Math.max(0, Math.min(Number(wantedUsd || 0), MAX_ORDER_USD));
+  const progressiveOrderPolicy = getProgressiveOrderPolicy(portfolioSummary);
+  const requested = wantedUsd === null || wantedUsd === undefined
+    ? progressiveOrderPolicy.maximumOrderUsd
+    : Number(wantedUsd || 0);
+  const wanted = Math.max(0, Math.min(requested, progressiveOrderPolicy.maximumOrderUsd));
   const plan = getPortfolioAllocationPlan(portfolioSummary);
   const row = plan.assetsByAsset?.[safeAsset] || null;
   if (!PORTFOLIO_ALLOCATION_ENGINE_ENABLED) {
@@ -4898,8 +5154,8 @@ function getPreferredNextAssets(portfolioSummary, marketSummary) {
   const allocationPlan = getPortfolioAllocationPlan(portfolioSummary);
   const allocationOrder = (allocationPlan.recommendedBuys || []).map((item) => item.asset);
   const orderedAssets = [...new Set([
-    ...allocationOrder,
-    ...STARTER_PRIORITY,
+    ...(portfolioSummary?.starterMode ? STARTER_PRIORITY : allocationOrder),
+    ...(portfolioSummary?.starterMode ? allocationOrder : STARTER_PRIORITY),
     ...Object.keys(WATCHLIST)
   ])];
 
@@ -5360,6 +5616,10 @@ function sleep(ms) {
 }
 
 function envConfiguration() {
+  const policyContext = {
+    totalTrackedValue: runtimeState.livePortfolioIdentity?.totalValueUsd || 0,
+    availableCash: runtimeState.livePortfolioIdentity?.availableCashUsd || 0
+  };
   return {
     version: VERSION,
     tradingMode: TRADING_MODE,
@@ -5633,12 +5893,13 @@ function envConfiguration() {
       directLiveInfluence: false
     },
     riskLimits: {
-      maxOrderUsd: MAX_ORDER_USD,
+      progressiveOrderPolicy: getProgressiveOrderPolicy(policyContext),
+      maxOrderUsd: getProgressiveOrderPolicy(policyContext).maximumOrderUsd,
       minCashReservePct: MIN_CASH_RESERVE_PCT,
       maxAssetWeightPct: MAX_ASSET_WEIGHT_PCT,
       maxCategoryWeightPct: MAX_CATEGORY_WEIGHT_PCT,
-      maxCryptoWeightPct: MAX_CRYPTO_WEIGHT_PCT,
-      maxSpeculativeWeightPct: MAX_SPECULATIVE_WEIGHT_PCT,
+      maxCryptoWeightPct: getProgressiveRiskCaps(policyContext).maxCryptoWeightPct,
+      maxSpeculativeWeightPct: getProgressiveRiskCaps(policyContext).maxSpeculativeWeightPct,
       maxDailyLossPct: MAX_DAILY_LOSS_PCT,
       maxWeeklyLossPct: MAX_WEEKLY_LOSS_PCT,
       maxDrawdownPct: MAX_DRAWDOWN_PCT
@@ -5839,6 +6100,9 @@ function updateOrderIntentStatus(id, status, details = {}) {
     statusHistory,
     updatedAt
   };
+  if (normalizedStatus === EXECUTION_STATUS.CONFIRMED) {
+    registerConfirmedExecutionIntent(runtimeState.orderIntents[id], { persist: false });
+  }
   scheduleSave();
   return runtimeState.orderIntents[id];
 }
@@ -8819,7 +9083,7 @@ async function buildTechnicalAnalysisReport({ portfolioSummary, marketSummary, p
   return report;
 }
 
-function technicalCheckForAsset(agent, marketRegimeAgent, asset, decision = "BUY", confidence = 0) {
+function technicalCheckForAsset(agent, marketRegimeAgent, asset, decision = "BUY", confidence = 0, portfolioSummary = null) {
   const executionStrategy = getExecutionStrategyParams(TRADING_MODE);
   const technicalBuyScoreMin = Number(executionStrategy.buyScoreMin || TECHNICAL_BUY_SCORE_MIN);
   if (!TECHNICAL_ANALYSIS_ENABLED) return { ok: true, reason: "Analyse technique désactivée" };
@@ -8839,10 +9103,24 @@ function technicalCheckForAsset(agent, marketRegimeAgent, asset, decision = "BUY
     if (snapshot.bearishVeto) return { ok: false, reason: `TechnicalAnalysisAgent bloque ${asset}: tendance de fond baissière` };
     if (snapshot.overboughtVeto) return { ok: false, reason: `TechnicalAnalysisAgent bloque ${asset}: surachat et extension excessive` };
     if (snapshot.fallingKnife) return { ok: false, reason: `TechnicalAnalysisAgent bloque ${asset}: risque de couteau qui tombe` };
-    if (snapshot.technicalScore < technicalBuyScoreMin) {
-      return { ok: false, reason: `Score technique trop faible sur ${asset} (${snapshot.technicalScore} < ${technicalBuyScoreMin})` };
-    }
     const category = ASSET_RULES[asset]?.category || "UNKNOWN";
+    const starterRelaxationEligible = Boolean(
+      portfolioSummary?.starterMode &&
+      STARTER_RELAXED_ASSETS.has(asset) &&
+      confidence >= STARTER_RELAXED_MIN_CONFIDENCE &&
+      !SPECULATIVE_CATEGORIES.has(category)
+    );
+    const effectiveTechnicalBuyScoreMin = starterRelaxationEligible
+      ? Math.min(technicalBuyScoreMin, STARTER_RELAXED_TECH_SCORE)
+      : technicalBuyScoreMin;
+    if (snapshot.technicalScore < effectiveTechnicalBuyScoreMin) {
+      return {
+        ok: false,
+        reason: `Score technique trop faible sur ${asset} (${snapshot.technicalScore} < ${effectiveTechnicalBuyScoreMin}${starterRelaxationEligible ? " seuil starter" : ""})`,
+        effectiveTechnicalBuyScoreMin,
+        starterRelaxationEligible
+      };
+    }
     const regime = marketRegimeAgent?.regime || "UNKNOWN";
     const speculative = SPECULATIVE_CATEGORIES.has(category);
     const cryptoSpeculative = category === "SPECULATIVE_CRYPTO";
@@ -8879,6 +9157,7 @@ function technicalCheckForAsset(agent, marketRegimeAgent, asset, decision = "BUY
   return {
     ok: true,
     reason: `TechnicalAnalysisAgent: score ${snapshot.technicalScore}, signal ${snapshot.signal}`,
+    effectiveTechnicalBuyScoreMin: decision === "BUY" ? (portfolioSummary?.starterMode && STARTER_RELAXED_ASSETS.has(asset) && confidence >= STARTER_RELAXED_MIN_CONFIDENCE ? Math.min(technicalBuyScoreMin, STARTER_RELAXED_TECH_SCORE) : technicalBuyScoreMin) : null,
     snapshot
   };
 }
@@ -10533,12 +10812,27 @@ function buildVotesForAsset({
       rationale: `Veto technique: score ${technical.technicalScore}, signal ${technical.signal}`,
       metadata: { bearishVeto: technical.bearishVeto, overboughtVeto: technical.overboughtVeto, fallingKnife: technical.fallingKnife, historicalDataVeto: technical.historicalDataVeto }
     }));
-  } else if (technical.buyEligible && Number(technical.technicalScore) >= TECHNICAL_BUY_SCORE_MIN) {
+  } else if (
+    (technical.buyEligible && Number(technical.technicalScore) >= TECHNICAL_BUY_SCORE_MIN) ||
+    (
+      portfolioSummary?.starterMode &&
+      STARTER_RELAXED_ASSETS.has(asset) &&
+      !SPECULATIVE_CATEGORIES.has(category) &&
+      Number(technical.technicalScore) >= STARTER_RELAXED_TECH_SCORE
+    )
+  ) {
+    const starterTechnicalVote = Boolean(
+      portfolioSummary?.starterMode &&
+      STARTER_RELAXED_ASSETS.has(asset) &&
+      Number(technical.technicalScore) < TECHNICAL_BUY_SCORE_MIN
+    );
     votes.push(createCouncilVote({
       agent: "TechnicalAnalysisAgent", asset, action: held ? "HOLD" : "BUY",
       confidence: Math.min(95, Math.max(60, Number(technical.technicalScore))),
-      rationale: `Score technique ${technical.technicalScore}; ${technical.signal}; multi-horizons ${technical.multiTimeframeBullish ? "haussier" : "neutre"}`,
-      metadata: { technicalScore: technical.technicalScore, signal: technical.signal, rsiDaily: technical.daily?.rsi14, atrDailyPct: technical.daily?.atr14Pct }
+      rationale: starterTechnicalVote
+        ? `Score technique starter ${technical.technicalScore}/${STARTER_RELAXED_TECH_SCORE}; ${technical.signal}; confirmation globale >= ${STARTER_RELAXED_MIN_CONFIDENCE} requise au RiskController`
+        : `Score technique ${technical.technicalScore}; ${technical.signal}; multi-horizons ${technical.multiTimeframeBullish ? "haussier" : "neutre"}`,
+      metadata: { technicalScore: technical.technicalScore, signal: technical.signal, starterTechnicalVote, rsiDaily: technical.daily?.rsi14, atrDailyPct: technical.daily?.atr14Pct }
     }));
   } else if (Number(technical.technicalScore) <= TECHNICAL_AVOID_SCORE_MAX) {
     votes.push(createCouncilVote({
@@ -10729,7 +11023,8 @@ function buildVotesForAsset({
         : `Actif déjà détenu; poids ${portfolioSummary?.assetWeightsPct?.[asset] ?? "?"}% / cible ${allocationAsset?.targetPct ?? "?"}%`
     }));
   } else {
-    const allocationGuard = allocationCheckForBuy(asset, portfolioSummary, MAX_ORDER_USD);
+    const progressiveOrderPolicy = getProgressiveOrderPolicy(portfolioSummary);
+    const allocationGuard = allocationCheckForBuy(asset, portfolioSummary, progressiveOrderPolicy.maximumOrderUsd);
     const concentration = portfolioSummary?.diversificationState || {};
     const techBlocked = category === "AI_BIG_TECH" && concentration.tooConcentratedInAIBigTech;
     const techLikeBlocked = TECH_LIKE_CATEGORIES.has(category) && concentration.tooConcentratedInTechLike;
@@ -10766,7 +11061,7 @@ function buildVotesForAsset({
   if (!held && riskBudgetAgent?.newBuyBlocked) {
     votes.push(createCouncilVote({ agent: "RiskBudgetAgent", asset, action: "VETO", confidence: 100, hardVeto: true, rationale: `Budget de risque bloqué: ${(riskBudgetAgent.blocks || []).join(", ")}` }));
   } else if (!held) {
-    const room = dynamicBuyAmount({ asset, amount_usd: MAX_ORDER_USD }, portfolioSummary);
+    const room = dynamicBuyAmount({ asset, amount_usd: getProgressiveOrderPolicy(portfolioSummary).maximumOrderUsd }, portfolioSummary);
     votes.push(createCouncilVote({
       agent: "RiskBudgetAgent", asset, action: room >= MIN_ORDER_USD ? "PASS" : "VETO",
       confidence: room >= MIN_ORDER_USD ? 84 : 96,
@@ -12049,7 +12344,12 @@ function dataIntegrityCheckForAsset(agent, asset) {
 }
 
 function dynamicBuyAmount(decision, portfolioSummary) {
-  const wanted = Math.min(Number(decision.amount_usd || MAX_ORDER_USD), MAX_ORDER_USD);
+  const progressiveOrderPolicy = getProgressiveOrderPolicy(portfolioSummary);
+  const progressiveRiskCaps = getProgressiveRiskCaps(portfolioSummary);
+  const wanted = Math.min(
+    Number(decision.amount_usd || progressiveOrderPolicy.maximumOrderUsd),
+    progressiveOrderPolicy.maximumOrderUsd
+  );
   const total = Math.max(Number(portfolioSummary.totalTrackedValue || 0), wanted);
   const availableCash = Number(portfolioSummary.availableCash);
   const reserve = total * MIN_CASH_RESERVE_PCT / 100;
@@ -12061,10 +12361,10 @@ function dynamicBuyAmount(decision, portfolioSummary) {
   const categoryRoom = Math.max(0, total * MAX_CATEGORY_WEIGHT_PCT / 100 - categoryValue);
   let room = Math.min(wanted, cashRoom, assetRoom, categoryRoom);
   if (CRYPTO_CATEGORIES.has(category)) {
-    room = Math.min(room, Math.max(0, total * MAX_CRYPTO_WEIGHT_PCT / 100 - Number(portfolioSummary.cryptoValue || 0)));
+    room = Math.min(room, Math.max(0, total * progressiveRiskCaps.maxCryptoWeightPct / 100 - Number(portfolioSummary.cryptoValue || 0)));
   }
   if (SPECULATIVE_CATEGORIES.has(category)) {
-    room = Math.min(room, Math.max(0, total * MAX_SPECULATIVE_WEIGHT_PCT / 100 - Number(portfolioSummary.speculativeValue || 0)));
+    room = Math.min(room, Math.max(0, total * progressiveRiskCaps.maxSpeculativeWeightPct / 100 - Number(portfolioSummary.speculativeValue || 0)));
   }
   if (PORTFOLIO_ALLOCATION_ENGINE_ENABLED && PORTFOLIO_ALLOCATION_MODE === "enforced") {
     const allocationGuard = allocationCheckForBuy(decision.asset, portfolioSummary, room);
@@ -12114,7 +12414,8 @@ function assessMinimumExecutableBuyFloor({
   const reasons = [];
 
   if (!MIN_ORDER_FLOOR_ENABLED) reasons.push("plancher minimum désactivé");
-  if (MAX_ORDER_USD < MIN_ORDER_USD) reasons.push("maximum inférieur au minimum");
+  const progressiveOrderPolicy = getProgressiveOrderPolicy(portfolioSummary);
+  if (progressiveOrderPolicy.maximumOrderUsd < MIN_ORDER_USD) reasons.push("maximum progressif inférieur au minimum");
   if (!Number.isFinite(baseDynamicAmount) || baseDynamicAmount < MIN_ORDER_USD) {
     reasons.push(`budget de base ${baseDynamicAmount || 0} USD inférieur au minimum`);
   }
@@ -12146,7 +12447,8 @@ function assessMinimumExecutableBuyFloor({
     rawDynamicAmount: roundNumber(Number(rawDynamicAmount || 0), 2),
     cashRoomUsd: roundNumber(cashRoomUsd, 2),
     allocationRoomUsd: roundNumber(allocationRoomUsd, 2),
-    minimumOrderUsd: MIN_ORDER_USD
+    minimumOrderUsd: MIN_ORDER_USD,
+    progressiveOrderPolicy
   };
 }
 
@@ -12259,7 +12561,8 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
     agents.marketRegimeAgent,
     d.asset,
     d.decision,
-    d.confidence
+    d.confidence,
+    summary
   );
   if (!technicalCheck.ok) return hold(technicalCheck.reason);
   const intelligenceCheck = intelligenceCheckForAsset(
@@ -12286,11 +12589,12 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
     if (agents.riskBudgetAgent?.newBuyBlocked) return hold(`RiskBudgetAgent bloque les achats: ${agents.riskBudgetAgent.blocks.join(", ")}`);
     if (executionStats.buys >= MAX_BUYS_24H) return hold(`Limite BUY 24h atteinte (${executionStats.buys}/${MAX_BUYS_24H})`);
     // Vérifier directement que l'allocation permet au moins le minimum réellement
-    // exécutable, même si le modèle a proposé un montant fractionnaire inférieur.
-    const requestedAllocationUsd = Math.min(
-      MAX_ORDER_USD,
-      Math.max(MIN_ORDER_USD, Number(d.amount_usd || MAX_ORDER_USD))
-    );
+    // exécutable, tout en respectant le plafond de la phase progressive courante.
+    const progressiveOrderPolicy = getProgressiveOrderPolicy(summary);
+    // Le plafond de phase sert de budget de base déterministe. Les multiplicateurs
+    // techniques, macro, conseil et risque réduisent ensuite ce budget; ils ne peuvent
+    // jamais l'augmenter au-delà de la phase courante.
+    const requestedAllocationUsd = progressiveOrderPolicy.maximumOrderUsd;
     const allocationGuard = allocationCheckForBuy(d.asset, summary, requestedAllocationUsd);
     if (PORTFOLIO_ALLOCATION_MODE === "enforced" && !allocationGuard.ok) return hold(allocationGuard.reason);
     const category = rules.category;
@@ -12396,7 +12700,8 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
       riskSellRecord: riskSellCheck.record,
       agentCouncilRecord: councilCheck.record,
       marketRegime: agents.marketRegimeAgent,
-      sizing
+      sizing,
+      progressiveOrderPolicy
     };
   }
 
@@ -12817,9 +13122,11 @@ async function executeSell(asset, marketData = null) {
 
 async function askDecisionAgent(portfolioSummary, marketSummary, trendSummary, source, foundationAgents) {
   const preferredNextAssets = getPreferredNextAssets(portfolioSummary, marketSummary);
+  const progressiveOrderPolicy = getProgressiveOrderPolicy(portfolioSummary);
   const payload = {
     source, time: nowIso(), version: VERSION, trading_mode: TRADING_MODE,
-    max_order_usd: MAX_ORDER_USD,
+    max_order_usd: progressiveOrderPolicy.maximumOrderUsd,
+    progressive_order_policy: progressiveOrderPolicy,
     starter_portfolio_mode: portfolioSummary.starterMode,
     preferred_next_assets: preferredNextAssets,
     watchlist: WATCHLIST,
@@ -12829,7 +13136,7 @@ async function askDecisionAgent(portfolioSummary, marketSummary, trendSummary, s
     foundation_agents: foundationAgents,
     agent_council: foundationAgents?.agentCouncil || runtimeState.lastAgentCouncil,
     execution_stats_24h: getExecutionStats24h(),
-    instruction: "Choisis une seule décision. Respecte le MultiAgentCouncil: aucun hard veto n'est contournable; en mode required, sélectionne uniquement APPROVED_BUY ou APPROVED_SELL. Explique les soutiens et oppositions."
+    instruction: "Choisis une seule décision. Respecte le MultiAgentCouncil: aucun hard veto n'est contournable; en mode required, sélectionne uniquement APPROVED_BUY ou APPROVED_SELL. Pour un BUY approuvé, utilise max_order_usd comme budget de phase; le RiskController appliquera ensuite les multiplicateurs et plafonds. Explique les soutiens et oppositions."
   };
 
   const schema = {
@@ -12841,7 +13148,7 @@ async function askDecisionAgent(portfolioSummary, marketSummary, trendSummary, s
       properties: {
         decision: { type: "string", enum: ["BUY", "SELL", "HOLD"] },
         asset: { type: "string", enum: [...Object.keys(WATCHLIST), "NONE"] },
-        amount_usd: { type: "number", minimum: 0, maximum: MAX_ORDER_USD },
+        amount_usd: { type: "number", minimum: 0, maximum: progressiveOrderPolicy.maximumOrderUsd },
         confidence: { type: "integer", minimum: 0, maximum: 100 },
         reason: { type: "string" },
         risk_check: { type: "string", enum: ["passed", "failed"] },
@@ -13117,6 +13424,63 @@ async function watchMarket(source = "manual-watch") {
   }
 }
 
+function buildDecisionDiagnostics(context, decisionRaw, control) {
+  const ranking = context?.agentCouncil?.ranking || context?.foundationAgents?.agentCouncil?.ranking || [];
+  const orderPolicy = getProgressiveOrderPolicy(context?.portfolioSummary || {});
+  const topCandidates = ranking.slice(0, 3).map((candidate) => {
+    const asset = candidate.asset;
+    const technical = context?.technicalAnalysisAgent?.assets?.[asset] || null;
+    const allocation = getPortfolioAllocationPlan(context?.portfolioSummary || {}).assetsByAsset?.[asset] || null;
+    const category = ASSET_RULES[asset]?.category || "UNKNOWN";
+    const starterRelaxationEligible = Boolean(
+      context?.portfolioSummary?.starterMode &&
+      STARTER_RELAXED_ASSETS.has(asset) &&
+      Number(candidate.confidence || 0) >= STARTER_RELAXED_MIN_CONFIDENCE &&
+      !SPECULATIVE_CATEGORIES.has(category)
+    );
+    const standardTechnicalMin = Number(getExecutionStrategyParams(TRADING_MODE).buyScoreMin || TECHNICAL_BUY_SCORE_MIN);
+    const requiredTechnicalScore = starterRelaxationEligible
+      ? Math.min(standardTechnicalMin, STARTER_RELAXED_TECH_SCORE)
+      : standardTechnicalMin;
+    const hardVetoes = (candidate.hardVetoes || []).map((item) => ({
+      agent: item.agent,
+      rationale: item.rationale || item.reason || null
+    }));
+    const missingConditions = [];
+    if (technical && Number(technical.technicalScore) < requiredTechnicalScore) {
+      missingConditions.push(`score technique ${technical.technicalScore}/${requiredTechnicalScore}`);
+    }
+    if (candidate.status !== "APPROVED_BUY" && hardVetoes.length) {
+      missingConditions.push(`lever veto: ${hardVetoes.map((item) => item.agent).join(", ")}`);
+    }
+    if (!allocation?.buyEligibleByAllocation) missingConditions.push("allocation non éligible");
+    return {
+      asset,
+      status: candidate.status,
+      recommendation: candidate.recommendation,
+      confidence: candidate.confidence,
+      technicalScore: technical?.technicalScore ?? null,
+      requiredTechnicalScore,
+      starterRelaxationEligible,
+      allocationBucket: allocation?.bucket || null,
+      allocationGapPct: allocation?.gapPct ?? null,
+      hardVetoes,
+      supportingAgents: candidate.supportingAgents || [],
+      opposingAgents: candidate.opposingAgents || [],
+      missingConditions: missingConditions.length ? missingConditions : ["aucune condition dure manquante"]
+    };
+  });
+  return {
+    generatedAt: nowIso(),
+    selectedDecision: sanitizeDecision(control?.finalDecision || decisionRaw || {}),
+    orderPolicy,
+    starterMode: Boolean(context?.portfolioSummary?.starterMode),
+    starterPositions: Number(context?.portfolioSummary?.uniquePositionsCount || 0),
+    starterTargetPositions: TARGET_STARTER_POSITIONS,
+    topCandidates
+  };
+}
+
 async function scanMarket(source = "manual-scan") {
   if (runtimeState.scanRunning) return { version: VERSION, skipped: true, reason: "Un scan est déjà en cours" };
   const duplicateGuard = automaticRunDedupCheck("scan", source);
@@ -13271,6 +13635,7 @@ async function scanMarket(source = "manual-scan") {
       recordEquitySnapshot(context.portfolioSummary, `${source}-post-execution`);
     }
 
+    const decisionDiagnostics = buildDecisionDiagnostics(context, decisionRaw, control);
     const result = {
       version: VERSION,
       source,
@@ -13286,12 +13651,14 @@ async function scanMarket(source = "manual-scan") {
       decisionAgentRaw: decisionRaw,
       riskController: control,
       decision: control.finalDecision,
+      decisionDiagnostics,
       execution,
       memory: memoryStatus()
     };
     addLog({
       source, event: "SCAN_COMPLETED", tradingMode: TRADING_MODE,
       decision: control.finalDecision, decision_raw: decisionRaw,
+      decisionDiagnostics,
       risk_reason: control.reason, execution,
       foundationAgents: context.foundationAgents,
       agentCouncil: context.agentCouncil || context.foundationAgents?.agentCouncil || null,
@@ -16353,6 +16720,12 @@ app.get("/auto-trading-check", requireSecret, (req, res) => {
     runtimeState.executionVerificationHistory.some((item) => item?.confirmed === true)
   );
   const automaticScanAvailable = Boolean(ENABLE_INTERNAL_TRADE_CRON);
+  const portfolioForPolicy = {
+    totalTrackedValue: runtimeState.livePortfolioIdentity?.totalValueUsd || 0,
+    availableCash: runtimeState.livePortfolioIdentity?.availableCashUsd || 0
+  };
+  const progressiveOrderPolicy = getProgressiveOrderPolicy(portfolioForPolicy);
+  const progressiveRiskCaps = getProgressiveRiskCaps(portfolioForPolicy);
   const liveExecutionConfigured = Boolean(
     TRADING_MODE === "LIVE" &&
     LIVE_EXECUTION_ARMED &&
@@ -16381,7 +16754,10 @@ app.get("/auto-trading-check", requireSecret, (req, res) => {
     lastExecution: latestExecution,
     orderPolicy: {
       minimumOrderUsd: MIN_ORDER_USD,
-      maximumOrderUsd: MAX_ORDER_USD,
+      maximumOrderUsd: progressiveOrderPolicy.maximumOrderUsd,
+      hardMaximumOrderUsd: PROGRESSIVE_HARD_MAX_ORDER_USD,
+      progressive: progressiveOrderPolicy,
+      progressiveRiskCaps,
       minimumOrderFloorEnabled: MIN_ORDER_FLOOR_ENABLED,
       minimumOrderFloorMinConfidence: MIN_ORDER_FLOOR_MIN_CONFIDENCE,
       minimumOrderFloorMinCombinedMultiplier: MIN_ORDER_FLOOR_MIN_COMBINED_MULTIPLIER,
@@ -16389,6 +16765,8 @@ app.get("/auto-trading-check", requireSecret, (req, res) => {
       noEffectMinReconciliations: EXECUTION_NO_EFFECT_MIN_RECONCILIATIONS,
       noEffectCashToleranceUsd: EXECUTION_NO_EFFECT_CASH_TOLERANCE_USD
     },
+    lastDecisionDiagnostics: runtimeState.lastDecision?.decisionDiagnostics || null,
+    executionMilestones: getExecutionMilestones(),
     counters: {
       executionHistory: runtimeState.executionHistory.length,
       orderIntents: Object.keys(runtimeState.orderIntents || {}).length,
@@ -17558,7 +17936,7 @@ app.get("/diagnostic", requireSecret, async (req, res) => {
       version: VERSION,
       time: nowIso(),
       trading_mode: TRADING_MODE,
-      message: "Diagnostic v10.22.5 : données, mémoire, automatismes, portefeuille, décision, risque, plancher d’ordre exécutable, intents, tentatives et exécutions effectives.",
+      message: "Diagnostic v10.22.6 : mode starter, seuil technique adaptatif, dimensionnement progressif, plafonds de risque, candidats, intents et preuves d’exécution.",
       configuration: envConfiguration(),
       portfolioSummary: context.portfolioSummary,
       realPortfolioSummary: PAPER_TRADING_ENABLED ? context.realSummary : undefined,
@@ -17601,6 +17979,10 @@ app.get("/diagnostic", requireSecret, async (req, res) => {
       paperPerformanceAgent: context.paperPerformanceAgent,
       lastBacktest: compactBacktestResult(runtimeState.lastBacktest),
       executionStats24h: executionStats,
+      executionMilestones: getExecutionMilestones(),
+      progressiveOrderPolicy: getProgressiveOrderPolicy(context.portfolioSummary),
+      progressiveRiskCaps: getProgressiveRiskCaps(context.portfolioSummary),
+      lastDecisionDiagnostics: runtimeState.lastDecision?.decisionDiagnostics || null,
       lastWatch: runtimeState.lastWatch,
       lastDecision: runtimeState.lastDecision,
       auditTail: runtimeState.auditTrail.slice(0, 10),
@@ -17673,6 +18055,13 @@ app.get("/watchlist", requireSecret, (req, res) => {
     watchlist: WATCHLIST,
     asset_rules: ASSET_RULES,
     starter_priority: STARTER_PRIORITY,
+    starter_relaxed_assets: [...STARTER_RELAXED_ASSETS],
+    starter_relaxed_technical_score: STARTER_RELAXED_TECH_SCORE,
+    starter_relaxed_min_confidence: STARTER_RELAXED_MIN_CONFIDENCE,
+    progressive_order_policy: getProgressiveOrderPolicy({
+      totalTrackedValue: runtimeState.livePortfolioIdentity?.totalValueUsd || 0,
+      availableCash: runtimeState.livePortfolioIdentity?.availableCashUsd || 0
+    }),
     tech_like_categories: [...TECH_LIKE_CATEGORIES],
     defensive_categories: [...DEFENSIVE_CATEGORIES],
     memory: memoryStatus()
@@ -17706,7 +18095,11 @@ app.get("/scan", requireSecret, async (req, res) => {
 app.get("/buy-test", requireSecret, async (req, res) => {
   try {
     const asset = String(req.query.asset || "").toUpperCase();
-    const amount = Number(req.query.amount || MAX_ORDER_USD);
+    const manualPolicy = getProgressiveOrderPolicy({
+      totalTrackedValue: runtimeState.livePortfolioIdentity?.totalValueUsd || 0,
+      availableCash: runtimeState.livePortfolioIdentity?.availableCashUsd || 0
+    });
+    const amount = Number(req.query.amount || manualPolicy.maximumOrderUsd);
     if (!asset || !WATCHLIST[asset]) return res.json({ error: "Actif invalide", allowed_assets: Object.keys(WATCHLIST) });
     if (TRADING_MODE === "LIVE" && req.query.confirm !== "LIVE") return res.json({ skipped: true, reason: "Ajoute &confirm=LIVE pour un ordre réel. Sans cela, aucun ordre n'est envoyé." });
     const marketData = await getMarketRates();
@@ -17782,7 +18175,11 @@ app.get("/live-preflight", requireSecret, async (req, res) => {
   try {
     const asset = String(req.query.asset || "SPY").toUpperCase();
     const side = String(req.query.side || "BUY").toUpperCase();
-    const amount = Number(req.query.amount || MAX_ORDER_USD);
+    const preflightPolicy = getProgressiveOrderPolicy({
+      totalTrackedValue: runtimeState.livePortfolioIdentity?.totalValueUsd || 0,
+      availableCash: runtimeState.livePortfolioIdentity?.availableCashUsd || 0
+    });
+    const amount = Number(req.query.amount || preflightPolicy.maximumOrderUsd);
     if (!WATCHLIST[asset]) {
       return res.status(400).json({ version: VERSION, error: "Actif invalide", allowedAssets: Object.keys(WATCHLIST) });
     }
