@@ -1,5 +1,5 @@
 /**
- * LEO-AI SENTINEL v10.22.6 — Progressive Starter & Risk-Scaled Sizing
+ * LEO-AI SENTINEL v10.22.7 — Real Copy Minimum & Progressive Starter
  * - Prix explicitement issus de l'API publique eToro
  * - Gestion week-end / horaires réguliers du marché US
  * - Cryptomonnaies analysables 24/7
@@ -124,6 +124,9 @@
  * - v10.22.6 : taille d'ordre progressive 10 -> 25 -> 50 -> jusqu'à 1% du portefeuille après preuves d'exécution confirmées
  * - v10.22.6 : plafonds crypto/spéculatif progressifs et persistants, sans assouplir les sécurités d'identité, de données ou d'intents
  * - v10.22.6 : diagnostic des trois meilleurs candidats, veto exact et condition manquante pour passer de HOLD à BUY
+ * - v10.22.7 : le minimum vise désormais 10 USD réellement répliqués sur la copie eToro, et non 10 USD virtuels dans le portefeuille-agent
+ * - v10.22.7 : conversion configurable du capital copié EUR/USD, marge de réplication et recalcul automatique du montant virtuel nécessaire
+ * - v10.22.7 : le plancher réel reste soumis au cash, aux plafonds d'allocation, aux données, aux veto de sécurité et à la vérification post-ordre
  */
 
 const express = require("express");
@@ -160,7 +163,7 @@ function getOpenAIClient() {
   return openAIClient;
 }
 
-const VERSION = "v10.22.6-progressive-starter-sizing";
+const VERSION = "v10.22.7-real-copy-minimum-sizing";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
@@ -1159,6 +1162,37 @@ const ANTI_OVERFITTING_STATUS = Object.freeze({
 });
 
 const MIN_ORDER_USD = Math.max(1, Number(process.env.MIN_ORDER_USD || 10));
+// v10.22.7 — MIN_ORDER_USD reste le minimum technique envoyé au portefeuille-agent.
+// Le minimum économique demandé par l’utilisateur est défini sur la copie réelle :
+// 10 USD répliqués au minimum. Comme l’API du token agent ne renvoie pas le capital
+// réellement copié, celui-ci est configurable dans Render et peut être mis à jour
+// lorsque des fonds sont ajoutés.
+const REAL_COPY_MINIMUM_SIZING_ENABLED = process.env.REAL_COPY_MINIMUM_SIZING_ENABLED !== "false";
+const MIN_REAL_COPIED_POSITION_USD = Math.max(
+  1,
+  Number(process.env.MIN_REAL_COPIED_POSITION_USD || 10)
+);
+const REAL_COPY_CAPITAL_AMOUNT = Math.max(
+  0,
+  Number(process.env.REAL_COPY_CAPITAL_AMOUNT || 173.94)
+);
+const REAL_COPY_CAPITAL_CURRENCY = ["EUR", "USD"].includes(
+  String(process.env.REAL_COPY_CAPITAL_CURRENCY || "EUR").trim().toUpperCase()
+)
+  ? String(process.env.REAL_COPY_CAPITAL_CURRENCY || "EUR").trim().toUpperCase()
+  : "EUR";
+const REAL_COPY_CAPITAL_USD_OVERRIDE = Math.max(
+  0,
+  Number(process.env.REAL_COPY_CAPITAL_USD || 0)
+);
+const REAL_COPY_EUR_USD_RATE = Math.max(
+  0.5,
+  Math.min(2, Number(process.env.REAL_COPY_EUR_USD_RATE || 1.15))
+);
+const REAL_COPY_REPLICATION_BUFFER_PCT = Math.max(
+  0,
+  Math.min(25, Number(process.env.REAL_COPY_REPLICATION_BUFFER_PCT || 5))
+);
 // v10.22.5 — eToro peut ignorer un ordre inférieur au minimum exécutable sans
 // fournir d'identifiant métier. Le plancher ne force jamais un BUY faible : il
 // s'applique uniquement après validation complète du signal, du cash, de
@@ -1240,9 +1274,9 @@ const AUTO_WATCH_DEDUP_MINUTES = Math.max(
 const REQUIRE_FRESH_RATE_FOR_EXECUTION =
   process.env.REQUIRE_FRESH_RATE_FOR_EXECUTION !== "false";
 
-// v10.22.6 — le plafond d'ordre devient progressif. MAX_ORDER_USD est conservé
-// comme compatibilité lorsque le mode progressif est désactivé; le nouveau plafond
-// absolu par défaut est 100 USD, soit environ 1% d'un portefeuille virtuel de 10k.
+// v10.22.7 — le plafond d'ordre reste progressif, mais doit pouvoir atteindre le
+// montant virtuel nécessaire pour produire au moins 10 USD sur la copie réelle.
+// Le plafond absolu configurable reste soumis aux limites d'allocation et de cash.
 const LEGACY_MAX_ORDER_USD = Math.max(MIN_ORDER_USD, Number(process.env.MAX_ORDER_USD || 10));
 const PROGRESSIVE_ORDER_SIZING_ENABLED = process.env.PROGRESSIVE_ORDER_SIZING_ENABLED !== "false";
 const PROGRESSIVE_VALIDATION_MAX_ORDER_USD = Math.max(
@@ -1263,7 +1297,7 @@ const PROGRESSIVE_PROVEN_MAX_PORTFOLIO_PCT = Math.max(
 );
 const PROGRESSIVE_HARD_MAX_ORDER_USD = Math.max(
   PROGRESSIVE_NORMAL_MAX_ORDER_USD,
-  Number(process.env.PROGRESSIVE_HARD_MAX_ORDER_USD || 100)
+  Number(process.env.PROGRESSIVE_HARD_MAX_ORDER_USD || 2500)
 );
 const MAX_ORDER_USD = PROGRESSIVE_ORDER_SIZING_ENABLED
   ? PROGRESSIVE_HARD_MAX_ORDER_USD
@@ -3411,55 +3445,138 @@ function hasCurrentExecutionAnomaly() {
   return activeIntent || stats.pendingVerification > 0 || stats.uncertain > 0;
 }
 
+function getConfiguredRealCopyCapitalUsd() {
+  if (Number.isFinite(REAL_COPY_CAPITAL_USD_OVERRIDE) && REAL_COPY_CAPITAL_USD_OVERRIDE > 0) {
+    return roundNumber(REAL_COPY_CAPITAL_USD_OVERRIDE, 2);
+  }
+  if (!Number.isFinite(REAL_COPY_CAPITAL_AMOUNT) || REAL_COPY_CAPITAL_AMOUNT <= 0) return 0;
+  return roundNumber(
+    REAL_COPY_CAPITAL_CURRENCY === "EUR"
+      ? REAL_COPY_CAPITAL_AMOUNT * REAL_COPY_EUR_USD_RATE
+      : REAL_COPY_CAPITAL_AMOUNT,
+    2
+  );
+}
+
+function getRealCopySizingPolicy(portfolioSummary = {}) {
+  const identityTotal = Number(runtimeState?.livePortfolioIdentity?.totalValueUsd || 0);
+  const totalTrackedValueUsd = Math.max(
+    0,
+    Number(portfolioSummary?.totalTrackedValue || 0),
+    identityTotal
+  );
+  const configuredCopyCapitalUsd = getConfiguredRealCopyCapitalUsd();
+  const targetCopiedPositionUsd = roundNumber(
+    MIN_REAL_COPIED_POSITION_USD * (1 + REAL_COPY_REPLICATION_BUFFER_PCT / 100),
+    2
+  );
+  const validInputs = Boolean(
+    !REAL_COPY_MINIMUM_SIZING_ENABLED ||
+    (configuredCopyCapitalUsd > 0 && totalTrackedValueUsd > 0)
+  );
+  const replicationRatio = validInputs && REAL_COPY_MINIMUM_SIZING_ENABLED
+    ? configuredCopyCapitalUsd / totalTrackedValueUsd
+    : 0;
+  const rawMinimumVirtualOrderUsd = replicationRatio > 0
+    ? targetCopiedPositionUsd / replicationRatio
+    : MIN_ORDER_USD;
+  const minimumVirtualOrderUsd = Math.max(
+    MIN_ORDER_USD,
+    Math.ceil(rawMinimumVirtualOrderUsd * 100) / 100
+  );
+  const estimatedCopiedAmountUsd = replicationRatio > 0
+    ? minimumVirtualOrderUsd * replicationRatio
+    : null;
+
+  return {
+    enabled: REAL_COPY_MINIMUM_SIZING_ENABLED,
+    valid: validInputs,
+    source: REAL_COPY_CAPITAL_USD_OVERRIDE > 0
+      ? "REAL_COPY_CAPITAL_USD"
+      : `REAL_COPY_CAPITAL_AMOUNT_${REAL_COPY_CAPITAL_CURRENCY}`,
+    configuredCopyCapitalAmount: REAL_COPY_CAPITAL_AMOUNT,
+    configuredCopyCapitalCurrency: REAL_COPY_CAPITAL_CURRENCY,
+    configuredCopyCapitalUsd,
+    eurUsdRate: REAL_COPY_CAPITAL_CURRENCY === "EUR" && REAL_COPY_CAPITAL_USD_OVERRIDE <= 0
+      ? REAL_COPY_EUR_USD_RATE
+      : null,
+    agentPortfolioValueUsd: roundNumber(totalTrackedValueUsd, 2),
+    replicationRatio: roundNumber(replicationRatio, 8),
+    minimumRealCopiedPositionUsd: MIN_REAL_COPIED_POSITION_USD,
+    replicationBufferPct: REAL_COPY_REPLICATION_BUFFER_PCT,
+    targetCopiedPositionUsd,
+    minimumVirtualOrderUsd: roundNumber(minimumVirtualOrderUsd, 2),
+    estimatedCopiedAmountUsd: estimatedCopiedAmountUsd === null
+      ? null
+      : roundNumber(estimatedCopiedAmountUsd, 2),
+    updateInstruction: "Après ajout/retrait de fonds, mettre à jour REAL_COPY_CAPITAL_AMOUNT (ou REAL_COPY_CAPITAL_USD) avec la valeur actuelle de la copie."
+  };
+}
+
 function getProgressiveOrderPolicy(portfolioSummary = {}) {
   const milestones = getExecutionMilestones();
   const confirmedTotal = milestones.confirmedBuys + milestones.confirmedSells;
   const anomalyFree = !hasCurrentExecutionAnomaly();
   const totalValue = Math.max(0, Number(portfolioSummary?.totalTrackedValue || 0));
+  const realCopySizing = getRealCopySizingPolicy(portfolioSummary);
+  const effectiveMinimumVirtualOrderUsd = realCopySizing.enabled && realCopySizing.valid
+    ? Math.max(MIN_ORDER_USD, Number(realCopySizing.minimumVirtualOrderUsd || MIN_ORDER_USD))
+    : MIN_ORDER_USD;
+  const effectiveHardMaximumOrderUsd = Math.max(
+    PROGRESSIVE_HARD_MAX_ORDER_USD,
+    effectiveMinimumVirtualOrderUsd
+  );
   let phase = "VALIDATION";
-  let phaseMaxOrderUsd = PROGRESSIVE_VALIDATION_MAX_ORDER_USD;
+  let phaseMaxOrderUsd = Math.max(PROGRESSIVE_VALIDATION_MAX_ORDER_USD, effectiveMinimumVirtualOrderUsd);
   let reason = "Moins de 3 achats LIVE confirmés";
 
   if (!PROGRESSIVE_ORDER_SIZING_ENABLED) {
     phase = "LEGACY";
-    phaseMaxOrderUsd = LEGACY_MAX_ORDER_USD;
+    phaseMaxOrderUsd = Math.max(LEGACY_MAX_ORDER_USD, effectiveMinimumVirtualOrderUsd);
     reason = "Dimensionnement progressif désactivé";
   } else if (milestones.confirmedBuys >= 1 && milestones.confirmedSells >= 1 && anomalyFree) {
     phase = "PROVEN_BUY_SELL";
     const percentCap = totalValue > 0
       ? totalValue * PROGRESSIVE_PROVEN_MAX_PORTFOLIO_PCT / 100
       : PROGRESSIVE_NORMAL_MAX_ORDER_USD;
-    phaseMaxOrderUsd = Math.max(MIN_ORDER_USD, Math.min(PROGRESSIVE_HARD_MAX_ORDER_USD, percentCap));
-    reason = `Achat et vente LIVE confirmés; plafond ${PROGRESSIVE_PROVEN_MAX_PORTFOLIO_PCT}% du portefeuille`;
+    phaseMaxOrderUsd = Math.max(
+      effectiveMinimumVirtualOrderUsd,
+      Math.min(effectiveHardMaximumOrderUsd, percentCap)
+    );
+    reason = `Achat et vente LIVE confirmés; plafond ${PROGRESSIVE_PROVEN_MAX_PORTFOLIO_PCT}% du portefeuille, sans descendre sous le minimum réel copié`;
   } else if (confirmedTotal >= 5 && anomalyFree) {
     phase = "NORMAL";
-    phaseMaxOrderUsd = PROGRESSIVE_NORMAL_MAX_ORDER_USD;
+    phaseMaxOrderUsd = Math.max(PROGRESSIVE_NORMAL_MAX_ORDER_USD, effectiveMinimumVirtualOrderUsd);
     reason = "Au moins 5 exécutions LIVE confirmées sans anomalie active";
   } else if (milestones.confirmedBuys >= 3 && anomalyFree) {
     phase = "CONSTRUCTION";
-    phaseMaxOrderUsd = PROGRESSIVE_CONSTRUCTION_MAX_ORDER_USD;
+    phaseMaxOrderUsd = Math.max(PROGRESSIVE_CONSTRUCTION_MAX_ORDER_USD, effectiveMinimumVirtualOrderUsd);
     reason = "Au moins 3 achats LIVE confirmés sans anomalie active";
   } else if (!anomalyFree) {
     reason = "Anomalie/intention active: plafond de validation conservé";
   }
 
   const maxOrderUsd = roundNumber(Math.max(
-    MIN_ORDER_USD,
-    Math.min(PROGRESSIVE_HARD_MAX_ORDER_USD, phaseMaxOrderUsd)
+    effectiveMinimumVirtualOrderUsd,
+    Math.min(effectiveHardMaximumOrderUsd, phaseMaxOrderUsd)
   ), 2);
   return {
     enabled: PROGRESSIVE_ORDER_SIZING_ENABLED,
     phase,
     reason,
     minimumOrderUsd: MIN_ORDER_USD,
+    minimumExecutableVirtualOrderUsd: roundNumber(effectiveMinimumVirtualOrderUsd, 2),
+    minimumRealCopiedPositionUsd: MIN_REAL_COPIED_POSITION_USD,
     maximumOrderUsd: maxOrderUsd,
-    hardMaximumOrderUsd: PROGRESSIVE_HARD_MAX_ORDER_USD,
+    hardMaximumOrderUsd: roundNumber(effectiveHardMaximumOrderUsd, 2),
+    configuredHardMaximumOrderUsd: PROGRESSIVE_HARD_MAX_ORDER_USD,
     provenPortfolioPctCap: PROGRESSIVE_PROVEN_MAX_PORTFOLIO_PCT,
     confirmedBuys: milestones.confirmedBuys,
     confirmedSells: milestones.confirmedSells,
     confirmedExecutions: confirmedTotal,
     anomalyFree,
-    totalTrackedValueUsd: roundNumber(totalValue, 2)
+    totalTrackedValueUsd: roundNumber(totalValue, 2),
+    realCopySizing
   };
 }
 
@@ -4173,8 +4290,16 @@ async function verifyRealPortfolioBeforeExecution({ asset, side, amount = 0 } = 
     if (hasOpenOrder(portfolio, safeAsset)) {
       return { ok: false, reason: `Le portefeuille REAL possède déjà un ordre d'achat sur ${safeAsset}`, validation };
     }
-    if (!Number.isFinite(safeAmount) || safeAmount < MIN_ORDER_USD) {
-      return { ok: false, reason: `Montant LIVE invalide: ${safeAmount}`, validation };
+    const liveOrderPolicy = getProgressiveOrderPolicy(summary);
+    const minimumExecutableVirtualOrderUsd = Number(liveOrderPolicy.minimumExecutableVirtualOrderUsd || MIN_ORDER_USD);
+    if (!liveOrderPolicy.realCopySizing?.valid) {
+      return { ok: false, reason: "Configuration du capital réel copié invalide", validation, liveOrderPolicy };
+    }
+    if (!Number.isFinite(safeAmount) || safeAmount < minimumExecutableVirtualOrderUsd) {
+      return { ok: false, reason: `Montant LIVE invalide: ${safeAmount} USD < minimum virtuel ${minimumExecutableVirtualOrderUsd} USD nécessaire pour répliquer au moins ${MIN_REAL_COPIED_POSITION_USD} USD`, validation, liveOrderPolicy };
+    }
+    if (safeAmount > Number(liveOrderPolicy.maximumOrderUsd || 0) + 0.0001) {
+      return { ok: false, reason: `Montant LIVE ${safeAmount} USD supérieur au plafond courant ${liveOrderPolicy.maximumOrderUsd} USD`, validation, liveOrderPolicy };
     }
     if (Number(validation.availableCash) < safeAmount) {
       return { ok: false, reason: `Cash REAL insuffisant (${validation.availableCash} USD < ${safeAmount} USD)`, validation };
@@ -5125,12 +5250,13 @@ function allocationCheckForBuy(asset, portfolioSummary, wantedUsd = null) {
   roomUsd = roundNumber(Math.max(0, roomUsd), 2);
 
   const blockers = [];
-  if (plan.hardCashMinimumBreached || cashRoomUsd < MIN_ORDER_USD) blockers.push("réserve de cash minimale");
+  const minimumExecutableVirtualOrderUsd = Number(progressiveOrderPolicy.minimumExecutableVirtualOrderUsd || MIN_ORDER_USD);
+  if (plan.hardCashMinimumBreached || cashRoomUsd < minimumExecutableVirtualOrderUsd) blockers.push("réserve de cash minimale");
   if (Number(row.currentPct) >= Number(row.maxPct) - 0.0001) blockers.push(`plafond actif ${row.maxPct}%`);
   const bucket = plan.buckets?.[row.bucket];
   if (bucket && Number(bucket.currentPct) >= Number(bucket.maxPct) - 0.0001) blockers.push(`plafond poche ${row.bucket} ${bucket.maxPct}%`);
   if (ALLOCATION_REQUIRE_UNDER_TARGET_FOR_NEW_BUY && Number(row.gapPct) <= ALLOCATION_MIN_GAP_PCT) blockers.push(`actif non sous-pondéré (écart ${row.gapPct}%)`);
-  if (roomUsd < MIN_ORDER_USD) blockers.push(`marge allouable ${roomUsd} USD < minimum ${MIN_ORDER_USD} USD`);
+  if (roomUsd < minimumExecutableVirtualOrderUsd) blockers.push(`marge allouable ${roomUsd} USD < minimum virtuel ${minimumExecutableVirtualOrderUsd} USD pour viser ${MIN_REAL_COPIED_POSITION_USD} USD réels`);
 
   const enforced = PORTFOLIO_ALLOCATION_MODE === "enforced";
   const ok = !enforced || blockers.length === 0;
@@ -5630,6 +5756,7 @@ function envConfiguration() {
     etoroPortfolioEndpoint: getEtoroPortfolioEndpoint(ETORO_ACCOUNT_ENV),
     livePortfolioPreflightEnabled: LIVE_PORTFOLIO_PREFLIGHT_ENABLED,
     livePortfolioMaxAgeSeconds: LIVE_PORTFOLIO_MAX_AGE_SECONDS,
+    realCopySizing: getRealCopySizingPolicy(policyContext),
     livePortfolioIdentity: {
       required: LIVE_PORTFOLIO_IDENTITY_REQUIRED,
       confirmed: Boolean(runtimeState.livePortfolioIdentity),
@@ -11063,10 +11190,12 @@ function buildVotesForAsset({
   } else if (!held) {
     const room = dynamicBuyAmount({ asset, amount_usd: getProgressiveOrderPolicy(portfolioSummary).maximumOrderUsd }, portfolioSummary);
     votes.push(createCouncilVote({
-      agent: "RiskBudgetAgent", asset, action: room >= MIN_ORDER_USD ? "PASS" : "VETO",
-      confidence: room >= MIN_ORDER_USD ? 84 : 96,
-      hardVeto: room < MIN_ORDER_USD,
-      rationale: room >= MIN_ORDER_USD ? `Budget disponible jusqu'à ${room} USD` : `Budget insuffisant: ${room} USD`,
+      agent: "RiskBudgetAgent", asset, action: room >= getProgressiveOrderPolicy(portfolioSummary).minimumExecutableVirtualOrderUsd ? "PASS" : "VETO",
+      confidence: room >= getProgressiveOrderPolicy(portfolioSummary).minimumExecutableVirtualOrderUsd ? 84 : 96,
+      hardVeto: room < getProgressiveOrderPolicy(portfolioSummary).minimumExecutableVirtualOrderUsd,
+      rationale: room >= getProgressiveOrderPolicy(portfolioSummary).minimumExecutableVirtualOrderUsd
+        ? `Budget disponible jusqu'à ${room} USD; minimum virtuel réel-copie ${getProgressiveOrderPolicy(portfolioSummary).minimumExecutableVirtualOrderUsd} USD`
+        : `Budget insuffisant: ${room} USD < minimum virtuel ${getProgressiveOrderPolicy(portfolioSummary).minimumExecutableVirtualOrderUsd} USD`,
       metadata: { dynamicRoomUsd: room, availableCash: portfolioSummary?.availableCash }
     }));
   } else {
@@ -12415,8 +12544,10 @@ function assessMinimumExecutableBuyFloor({
 
   if (!MIN_ORDER_FLOOR_ENABLED) reasons.push("plancher minimum désactivé");
   const progressiveOrderPolicy = getProgressiveOrderPolicy(portfolioSummary);
-  if (progressiveOrderPolicy.maximumOrderUsd < MIN_ORDER_USD) reasons.push("maximum progressif inférieur au minimum");
-  if (!Number.isFinite(baseDynamicAmount) || baseDynamicAmount < MIN_ORDER_USD) {
+  const minimumExecutableVirtualOrderUsd = Number(progressiveOrderPolicy.minimumExecutableVirtualOrderUsd || MIN_ORDER_USD);
+  if (!progressiveOrderPolicy.realCopySizing?.valid) reasons.push("configuration du capital réel copié invalide");
+  if (progressiveOrderPolicy.maximumOrderUsd < minimumExecutableVirtualOrderUsd) reasons.push("maximum progressif inférieur au minimum réel-copie");
+  if (!Number.isFinite(baseDynamicAmount) || baseDynamicAmount < minimumExecutableVirtualOrderUsd) {
     reasons.push(`budget de base ${baseDynamicAmount || 0} USD inférieur au minimum`);
   }
   if (confidence < MIN_ORDER_FLOOR_MIN_CONFIDENCE) {
@@ -12425,11 +12556,11 @@ function assessMinimumExecutableBuyFloor({
   if (!Number.isFinite(combinedMultiplier) || combinedMultiplier < MIN_ORDER_FLOOR_MIN_COMBINED_MULTIPLIER) {
     reasons.push(`multiplicateur ${combinedMultiplier || 0} < ${MIN_ORDER_FLOOR_MIN_COMBINED_MULTIPLIER}`);
   }
-  if (cashRoomUsd + 0.0001 < MIN_ORDER_USD) {
-    reasons.push(`marge de cash ${roundNumber(cashRoomUsd, 2)} USD insuffisante`);
+  if (cashRoomUsd + 0.0001 < minimumExecutableVirtualOrderUsd) {
+    reasons.push(`marge de cash ${roundNumber(cashRoomUsd, 2)} USD insuffisante pour ${minimumExecutableVirtualOrderUsd} USD`);
   }
-  if (!allocationGuard?.ok || allocationRoomUsd + 0.0001 < MIN_ORDER_USD) {
-    reasons.push(`allocation n'autorise pas ${MIN_ORDER_USD} USD`);
+  if (!allocationGuard?.ok || allocationRoomUsd + 0.0001 < minimumExecutableVirtualOrderUsd) {
+    reasons.push(`allocation n'autorise pas ${minimumExecutableVirtualOrderUsd} USD virtuels`);
   }
   if (!Number.isFinite(rawDynamicAmount) || rawDynamicAmount <= 0) {
     reasons.push("montant ajusté nul ou invalide");
@@ -12437,7 +12568,7 @@ function assessMinimumExecutableBuyFloor({
 
   return {
     eligible: reasons.length === 0,
-    amountUsd: reasons.length === 0 ? MIN_ORDER_USD : 0,
+    amountUsd: reasons.length === 0 ? minimumExecutableVirtualOrderUsd : 0,
     reasons,
     confidence,
     confidenceThreshold: MIN_ORDER_FLOOR_MIN_CONFIDENCE,
@@ -12448,6 +12579,8 @@ function assessMinimumExecutableBuyFloor({
     cashRoomUsd: roundNumber(cashRoomUsd, 2),
     allocationRoomUsd: roundNumber(allocationRoomUsd, 2),
     minimumOrderUsd: MIN_ORDER_USD,
+    minimumExecutableVirtualOrderUsd,
+    minimumRealCopiedPositionUsd: MIN_REAL_COPIED_POSITION_USD,
     progressiveOrderPolicy
   };
 }
@@ -12642,7 +12775,8 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
     let dynamicAmount = rawDynamicAmount;
     let minimumOrderFloor = null;
 
-    if (!Number.isFinite(dynamicAmount) || dynamicAmount < MIN_ORDER_USD) {
+    const minimumExecutableVirtualOrderUsd = Number(progressiveOrderPolicy.minimumExecutableVirtualOrderUsd || MIN_ORDER_USD);
+    if (!Number.isFinite(dynamicAmount) || dynamicAmount < minimumExecutableVirtualOrderUsd) {
       minimumOrderFloor = assessMinimumExecutableBuyFloor({
         decision: d,
         portfolioSummary: summary,
@@ -12653,10 +12787,10 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
       });
       if (!minimumOrderFloor.eligible) {
         return hold(
-          `Montant ${dynamicAmount || 0} USD inférieur au minimum ${MIN_ORDER_USD} USD après ajustement des risques; plancher refusé: ${minimumOrderFloor.reasons.join(", ")}`,
+          `Montant ${dynamicAmount || 0} USD inférieur au minimum virtuel ${minimumExecutableVirtualOrderUsd} USD nécessaire pour viser au moins ${MIN_REAL_COPIED_POSITION_USD} USD sur la copie; plancher refusé: ${minimumOrderFloor.reasons.join(", ")}`,
           "failed",
           "BELOW_MIN_ORDER_AFTER_RISK_SCALING",
-          { baseDynamicAmount, rawDynamicAmount, sizing, minimumOrderFloor, minimumOrderUsd: MIN_ORDER_USD }
+          { baseDynamicAmount, rawDynamicAmount, sizing, minimumOrderFloor, minimumOrderUsd: MIN_ORDER_USD, minimumExecutableVirtualOrderUsd, minimumRealCopiedPositionUsd: MIN_REAL_COPIED_POSITION_USD }
         );
       }
       dynamicAmount = minimumOrderFloor.amountUsd;
@@ -12733,8 +12867,8 @@ async function executeBuy(asset, amount, marketData = null) {
   }
 
   const instrumentId = WATCHLIST[asset];
-  const safeAmount = Math.min(Number(amount || MAX_ORDER_USD), MAX_ORDER_USD);
-  if (!instrumentId || safeAmount < MIN_ORDER_USD) return { skipped: true, reason: "Actif ou montant invalide" };
+  const safeAmount = Number(amount || 0);
+  if (!instrumentId || !Number.isFinite(safeAmount) || safeAmount < MIN_ORDER_USD) return { skipped: true, reason: "Actif ou montant invalide" };
   if (!LIVE_PORTFOLIO_PREFLIGHT_ENABLED) {
     return { skipped: true, mode: "LIVE", reason: "LIVE_PORTFOLIO_PREFLIGHT_ENABLED=false : exécution bloquée par sécurité" };
   }
@@ -16702,6 +16836,12 @@ app.get("/auto-trading-check", requireSecret, (req, res) => {
   if (runtimeState.livePortfolioIdentity?.agentPortfolio?.resolutionSource === "FORCED_AGENT_CONTEXT_FROM_REAL_PNL") {
     warnings.push("Métadonnées /agent-portfolios indisponibles : identité liée au token eToro et au PnL REAL validé. Le 403 de découverte reste advisory-only.");
   }
+  if (REAL_COPY_MINIMUM_SIZING_ENABLED && REAL_COPY_CAPITAL_CURRENCY === "EUR" && REAL_COPY_CAPITAL_USD_OVERRIDE <= 0 && !process.env.REAL_COPY_EUR_USD_RATE) {
+    warnings.push(`Conversion EUR/USD par défaut utilisée (${REAL_COPY_EUR_USD_RATE}). Pour plus de précision, renseigne REAL_COPY_EUR_USD_RATE ou REAL_COPY_CAPITAL_USD.`);
+  }
+  if (REAL_COPY_MINIMUM_SIZING_ENABLED && !process.env.REAL_COPY_CAPITAL_AMOUNT && REAL_COPY_CAPITAL_USD_OVERRIDE <= 0) {
+    warnings.push(`Capital copié par défaut utilisé (${REAL_COPY_CAPITAL_AMOUNT} ${REAL_COPY_CAPITAL_CURRENCY}). Mets-le à jour après tout ajout ou retrait de fonds.`);
+  }
   if (TRADING_MODE === "LIVE" && missingEnvironment.length > 0) {
     blockers.push(`Variables indispensables absentes : ${missingEnvironment.join(", ")}.`);
   } else if (missingEnvironment.length > 0) {
@@ -16726,6 +16866,10 @@ app.get("/auto-trading-check", requireSecret, (req, res) => {
   };
   const progressiveOrderPolicy = getProgressiveOrderPolicy(portfolioForPolicy);
   const progressiveRiskCaps = getProgressiveRiskCaps(portfolioForPolicy);
+  const realCopySizing = progressiveOrderPolicy.realCopySizing;
+  if (TRADING_MODE === "LIVE" && REAL_COPY_MINIMUM_SIZING_ENABLED && !realCopySizing?.valid) {
+    blockers.push("Configuration du capital réel copié invalide : renseigne REAL_COPY_CAPITAL_AMOUNT ou REAL_COPY_CAPITAL_USD.");
+  }
   const liveExecutionConfigured = Boolean(
     TRADING_MODE === "LIVE" &&
     LIVE_EXECUTION_ARMED &&
@@ -16755,8 +16899,11 @@ app.get("/auto-trading-check", requireSecret, (req, res) => {
     orderPolicy: {
       minimumOrderUsd: MIN_ORDER_USD,
       maximumOrderUsd: progressiveOrderPolicy.maximumOrderUsd,
-      hardMaximumOrderUsd: PROGRESSIVE_HARD_MAX_ORDER_USD,
+      hardMaximumOrderUsd: progressiveOrderPolicy.hardMaximumOrderUsd,
       progressive: progressiveOrderPolicy,
+      realCopySizing,
+      minimumRealCopiedPositionUsd: MIN_REAL_COPIED_POSITION_USD,
+      minimumExecutableVirtualOrderUsd: progressiveOrderPolicy.minimumExecutableVirtualOrderUsd,
       progressiveRiskCaps,
       minimumOrderFloorEnabled: MIN_ORDER_FLOOR_ENABLED,
       minimumOrderFloorMinConfidence: MIN_ORDER_FLOOR_MIN_CONFIDENCE,
@@ -17936,7 +18083,7 @@ app.get("/diagnostic", requireSecret, async (req, res) => {
       version: VERSION,
       time: nowIso(),
       trading_mode: TRADING_MODE,
-      message: "Diagnostic v10.22.6 : mode starter, seuil technique adaptatif, dimensionnement progressif, plafonds de risque, candidats, intents et preuves d’exécution.",
+      message: "Diagnostic v10.22.7 : minimum de 10 USD sur la copie réelle, conversion capital copié, mode starter, dimensionnement progressif, plafonds de risque, candidats, intents et preuves d’exécution.",
       configuration: envConfiguration(),
       portfolioSummary: context.portfolioSummary,
       realPortfolioSummary: PAPER_TRADING_ENABLED ? context.realSummary : undefined,
@@ -18906,6 +19053,8 @@ module.exports = {
   buildPortfolioAllocationPolicy,
   buildPortfolioAllocationPlan,
   getPortfolioAllocationPlan,
+  getRealCopySizingPolicy,
+  getProgressiveOrderPolicy,
   allocationCheckForBuy,
   allocationBucketForAsset,
   PORTFOLIO_ALLOCATION_POLICY,
