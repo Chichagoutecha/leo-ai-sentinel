@@ -1,11 +1,11 @@
 {
   "name": "leo-ai-sentinel",
-  "version": "10.22.8",
-  "description": "LEO-AI SENTINEL with secure eToro execution diagnostics and circuit breaker",
+  "version": "10.22.9",
+  "description": "LEO-AI SENTINEL with eToro execution diagnostics and persistent AI cost controls",
   "main": "index.js",
   "scripts": {
-    "start": "node -r ./etoro-execution-diagnostics.js index.js",
-    "check": "node --check index.js && node --check etoro-execution-diagnostics.js",
+    "start": "node -r ./etoro-execution-diagnostics.js -r ./ai-cost-optimizer.js index.js",
+    "check": "node --check index.js && node --check etoro-execution-diagnostics.js && node --check ai-cost-optimizer.js",
     "test": "node --test test-v10.10.js"
   },
   "dependencies": {
