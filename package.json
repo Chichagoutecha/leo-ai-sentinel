@@ -1,11 +1,11 @@
 {
   "name": "leo-ai-sentinel",
-  "version": "10.22.9",
-  "description": "LEO-AI SENTINEL with eToro execution diagnostics and persistent AI cost controls",
+  "version": "10.23.0",
+  "description": "LEO-AI SENTINEL with eToro diagnostics, AI cost controls and read-only Shadow Intelligence Lab",
   "main": "index.js",
   "scripts": {
-    "start": "node -r ./etoro-execution-diagnostics.js -r ./ai-cost-optimizer.js index.js",
-    "check": "node --check index.js && node --check etoro-execution-diagnostics.js && node --check ai-cost-optimizer.js",
+    "start": "node -r ./etoro-execution-diagnostics.js -r ./ai-cost-optimizer.js -r ./shadow-intelligence-lab.js index.js",
+    "check": "node --check index.js && node --check etoro-execution-diagnostics.js && node --check ai-cost-optimizer.js && node --check shadow-intelligence-lab.js",
     "test": "node --test test-v10.10.js"
   },
   "dependencies": {
