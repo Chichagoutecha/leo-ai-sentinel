@@ -1,0 +1,27 @@
+name: v10.22.10 safety quality
+
+on:
+  pull_request:
+    paths:
+      - 'etoro-execution-diagnostics-v10.22.10.js'
+      - 'test-etoro-execution-diagnostics-v10.22.10.js'
+      - 'package.json'
+      - '.github/workflows/quality-v10.22.10.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
