@@ -1,0 +1,37 @@
+name: Shadow Lab quality
+
+on:
+  pull_request:
+    paths:
+      - 'shadow-*.js'
+      - 'shadow-*.json'
+      - 'test-shadow-*.js'
+      - 'SHADOW_LAB.md'
+      - 'package.json'
+      - '.github/workflows/quality-shadow-lab.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - name: Assert LIVE core is unchanged in this PR
+        shell: bash
+        run: |
+          git fetch --no-tags origin main --depth=1
+          if git diff --name-only origin/main...HEAD | grep -Eq '^index\.js$'; then
+            echo 'index.js must remain unchanged in Shadow Lab PR'
+            exit 1
+          fi
