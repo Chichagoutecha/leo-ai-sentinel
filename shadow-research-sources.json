@@ -1,0 +1,43 @@
+{
+  "version": "1.0",
+  "purpose": "Source contracts for Shadow Research Layer. These sources are research-only and can never place or authorize LIVE orders.",
+  "sources": {
+    "ALPACA": {
+      "role": "independent_market_confirmation",
+      "defaultReliability": 0.9,
+      "acceptedKinds": ["MARKET_CONFIRMATION", "LIQUIDITY", "VOLATILITY", "TECHNICAL_CONFIRMATION"],
+      "pluginUse": "Historical/current stock and crypto bars, quotes and trades for cross-checking eToro signals."
+    },
+    "QUARTR": {
+      "role": "primary_company_fundamentals",
+      "defaultReliability": 0.95,
+      "acceptedKinds": ["FUNDAMENTAL", "EARNINGS", "GUIDANCE", "BALANCE_SHEET", "CASH_FLOW", "MANAGEMENT_COMMENTARY"],
+      "pluginUse": "Company-reported financials, filings, presentations and earnings transcripts."
+    },
+    "EXA": {
+      "role": "news_and_research_discovery",
+      "defaultReliability": 0.68,
+      "acceptedKinds": ["NEWS", "CATALYST", "RISK", "THEME", "RESEARCH"],
+      "pluginUse": "Discovery of current news, research, emerging companies and catalysts; evidence must be cross-checked before promotion."
+    },
+    "ETORO_SHADOW": {
+      "role": "broker_market_observation",
+      "defaultReliability": 0.88,
+      "acceptedKinds": ["MARKET_CONFIRMATION", "LIQUIDITY", "VOLATILITY", "TECHNICAL_CONFIRMATION"],
+      "pluginUse": "Read-only eToro shadow prices and instrument metadata."
+    },
+    "MANUAL_RESEARCH": {
+      "role": "human_or_chatgpt_research_note",
+      "defaultReliability": 0.55,
+      "acceptedKinds": ["NEWS", "CATALYST", "RISK", "THEME", "RESEARCH", "FUNDAMENTAL"],
+      "pluginUse": "Auditable research notes; never sufficient alone for promotion."
+    }
+  },
+  "promotionRules": {
+    "minimumIndependentSources": 2,
+    "minimumResearchScore": 70,
+    "minimumConfidence": 0.65,
+    "automaticLivePromotion": false,
+    "automaticShadowUniverseMutation": false
+  }
+}
