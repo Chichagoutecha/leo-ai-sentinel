@@ -5,8 +5,8 @@
   "main": "index.js",
   "scripts": {
     "start": "node -r ./etoro-execution-diagnostics.js -r ./ai-cost-optimizer.js -r ./shadow-intelligence-lab.js index.js",
-    "check": "node --check index.js && node --check etoro-execution-diagnostics.js && node --check ai-cost-optimizer.js && node --check shadow-intelligence-lab.js",
-    "test": "node --test test-v10.10.js"
+    "check": "node --check index.js && node --check etoro-execution-diagnostics.js && node --check ai-cost-optimizer.js && node --check shadow-intelligence-lab.js && node --check test-shadow-intelligence-lab.js",
+    "test": "node --test test-v10.10.js test-shadow-intelligence-lab.js"
   },
   "dependencies": {
     "express": "^4.18.2",
