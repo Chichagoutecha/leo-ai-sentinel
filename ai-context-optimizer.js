@@ -18,12 +18,16 @@ const MAX_STRING_CHARS = clampInt(process.env.AI_CONTEXT_MAX_STRING_CHARS, 900, 
 const MAX_GENERIC_ARRAY = clampInt(process.env.AI_CONTEXT_MAX_GENERIC_ARRAY, 16, 4, 64);
 const MAX_CRITICAL_ARRAY = clampInt(process.env.AI_CONTEXT_MAX_CRITICAL_ARRAY, 64, 16, 160);
 
+// Only keys whose semantics are clearly historical/reconstructible belong here.
+// Generic names such as `payload`, `raw` or `rawData` are deliberately excluded:
+// they may contain current provider/adaptor safety facts and therefore must pass
+// through the normal recursive compactor + safety-fingerprint verification.
 const NOISY_EXACT = new Set([
   'history','histories','scanhistory','watchhistory','executionverificationhistory',
   'performancehistory','equityhistory','agentcouncilhistory','macrocreditregimehistory',
-  'researchEvents'.toLowerCase(),'pointintimearchive','audittrail','logs','trendmemory',
-  'scientifictrials','runs','leaderboard','raw','rawdata','payload','candles','bars',
-  'pricehistory','historicaldata','pointintimeindex'
+  'researchevents','pointintimearchive','audittrail','logs','trendmemory',
+  'scientifictrials','runs','leaderboard','candles','bars','pricehistory',
+  'historicaldata','pointintimeindex'
 ]);
 const CRITICAL_ARRAY_RE = /(position|order|reason|veto|approved|block|risk|health|execution|candidate|council|divergence|provider)/i;
 const IMPORTANT_VALUE_RE = /(VETO|BLOCK|BREAKER|ERROR|FAIL|UNSAFE|STALE|CLOSED|REJECT|INCONCLUSIVE|RISK|AI_FAILURES|ORDER_NO_EFFECT|SELL|BUY)/i;
@@ -66,8 +70,19 @@ function itemImportance(item) {
 }
 function compactNoisyArray(value, key, depth) {
   if (!Array.isArray(value)) return compactValue(value, key, depth + 1);
-  const retain = value.slice(-2).map((v) => compactValue(v, key, depth + 1));
-  return { compacted: true, originalCount: value.length, latest: retain };
+  if (value.length <= 4) return value.map((v) => compactValue(v, key, depth + 1));
+
+  // Runtime histories do not all share the same orientation: some use push()
+  // (newest at end), others unshift() (newest at front). Never guess. Keep both
+  // edges and expose the fact that the middle was omitted. This avoids feeding an
+  // old record as if it were the latest one while still making the history tiny.
+  return {
+    compacted: true,
+    originalCount: value.length,
+    first: value.slice(0, 2).map((v) => compactValue(v, key, depth + 1)),
+    last: value.slice(-2).map((v) => compactValue(v, key, depth + 1)),
+    omittedMiddleCount: Math.max(0, value.length - 4)
+  };
 }
 function compactArray(value, key, depth) {
   if (!Array.isArray(value)) return value;
