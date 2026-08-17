@@ -1,0 +1,23 @@
+name: Stage 14 Portfolio Optimizer 2 Quality
+on:
+  pull_request:
+    paths:
+      - 'shadow-portfolio-optimizer-v2.js'
+      - 'test-shadow-portfolio-optimizer-v2.js'
+      - 'PORTFOLIO_OPTIMIZER_STAGE14.md'
+      - '.github/workflows/quality-stage14-portfolio-optimizer.yml'
+permissions: { contents: read }
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: node --check shadow-portfolio-optimizer-v2.js && node --check test-shadow-portfolio-optimizer-v2.js
+      - run: node --test test-shadow-portfolio-optimizer-v2.js
+      - run: git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js
+      - run: |
+          if grep -Eqi 'trading/execution|LIVE_EXECUTION_ARMED\s*=|new OpenAI|execute(Buy|Sell)\(' shadow-portfolio-optimizer-v2.js; then
+            echo 'Unexpected LIVE/OpenAI/execution coupling'; exit 1; fi
