@@ -21,7 +21,7 @@ Each scenario passes through Stage 12 Macro Intelligence → Stage 13 Event Risk
 5. Portfolio target weights must sum to 1 and obey the configured per-asset cap.
 6. An infeasible portfolio cap must fail closed as `INCONCLUSIVE`; it must never silently violate the cap.
 7. Institutional risk must reject incomplete history for any positively weighted asset.
-8. Institutional risk must reject missing or incomplete stress scenarios.
+8. Institutional risk must reject a missing stress-test set and reject stress scenarios that omit any positively weighted asset.
 9. Invalid timestamps, malformed top-level payloads and invalid numeric options must never crash stages 11–15.
 10. Non-finite return values must never leak `NaN`/`Infinity` into portfolio or institutional-risk metrics.
 11. Crisis risk must not be scored safer than the calm deterministic panel.
