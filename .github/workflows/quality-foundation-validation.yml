@@ -1,0 +1,64 @@
+name: Foundation Validation Quality
+
+on:
+  pull_request:
+    paths:
+      - 'foundation-validation-cockpit.js'
+      - 'test-foundation-validation-cockpit.js'
+      - 'etoro-execution-diagnostics-v10.22.10.js'
+      - 'test-etoro-execution-diagnostics-v10.22.10.js'
+      - 'shadow-*.js'
+      - 'test-shadow-*.js'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'FOUNDATION_VALIDATION_V10.23.5.md'
+      - '.github/workflows/quality-foundation-validation.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax checks
+        run: npm run check
+
+      - name: Unit and integration safety tests
+        run: npm test
+
+      - name: Prove production index is untouched by this rehearsal
+        shell: bash
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js
+
+      - name: Prove rehearsal start uses safe Stage 1 diagnostic
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const pkg = require('./package.json');
+          const start = String(pkg.scripts?.start || '');
+          if (!start.includes('-r ./etoro-execution-diagnostics-v10.22.10.js')) {
+            throw new Error('Safe v10.22.10 execution diagnostics are not preloaded.');
+          }
+          if (start.includes('-r ./etoro-execution-diagnostics.js')) {
+            throw new Error('Legacy v10.22.8 execution diagnostics must not be preloaded in the rehearsal stack.');
+          }
+          if (!start.includes('-r ./foundation-validation-cockpit.js')) {
+            throw new Error('Foundation Validation Cockpit is not preloaded.');
+          }
+          console.log('Safe Stage 1 + Cockpit rehearsal preload confirmed.');
+          NODE
