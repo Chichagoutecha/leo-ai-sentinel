@@ -1,0 +1,53 @@
+name: Execution Evidence Observer Quality
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Syntax checks
+        run: |
+          node --check etoro-execution-evidence-observer.js
+          node --check test-etoro-execution-evidence-observer.js
+      - name: Evidence observer regressions
+        run: node --test test-etoro-execution-evidence-observer.js
+      - name: Prove parent production runtime is untouched
+        shell: bash
+        run: |
+          git fetch origin v10.22.10.1-production-safety-release-candidate --depth=1
+          git diff --exit-code origin/v10.22.10.1-production-safety-release-candidate...HEAD -- index.js package.json ai-cost-optimizer.js ai-luna-temperature-compat.js ai-context-optimizer.js production-ai-preflight.js etoro-execution-diagnostics-v10.22.10.js
+      - name: Prove observer adds no provider calls or LIVE authority
+        shell: bash
+        run: |
+          grep -Fq "providerCallsAdded: 0" etoro-execution-evidence-observer.js
+          grep -Fq "requestsBlocked: 0" etoro-execution-evidence-observer.js
+          grep -Fq "responsesMutated: 0" etoro-execution-evidence-observer.js
+          grep -Fq "canTrade: false" etoro-execution-evidence-observer.js
+          grep -Fq "canAuthorizeLive: false" etoro-execution-evidence-observer.js
+          if grep -Eqi 'LIVE_EXECUTION_ARMED\s*=|executeBuy\s*\(|executeSell\s*\(|/trading/execution/.+fetch' etoro-execution-evidence-observer.js; then
+            echo 'Unexpected trading authority or independent execution call in observer.'
+            exit 1
+          fi
+      - name: Prove observer is not silently activated
+        run: |
+          node - <<'NODE'
+          const pkg = require('./package.json');
+          const start = String(pkg.scripts?.start || '');
+          if (start.includes('etoro-execution-evidence-observer.js')) throw new Error('Observer must remain out of default production start pending separate authorization.');
+          NODE
