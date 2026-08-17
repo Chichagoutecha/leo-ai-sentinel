@@ -10,6 +10,7 @@ on:
       - 'shadow-institutional-risk-engine.js'
       - 'critical-shadow-validation-11-15.js'
       - 'test-critical-shadow-validation-11-15.js'
+      - 'test-critical-input-hardening-11-15.js'
       - 'CRITICAL_VALIDATION_11_15_V10.25.1.md'
       - '.github/workflows/quality-critical-validation-11-15.yml'
 
@@ -41,12 +42,16 @@ jobs:
           node --check shadow-institutional-risk-engine.js
           node --check critical-shadow-validation-11-15.js
           node --check test-critical-shadow-validation-11-15.js
+          node --check test-critical-input-hardening-11-15.js
 
       - name: Existing stages 11-15 unit tests
         run: node --test test-shadow-macro-intelligence-agent.js test-shadow-event-risk-calendar.js test-shadow-market-regime-engine-v2.js test-shadow-portfolio-optimizer-v2.js test-shadow-institutional-risk-engine.js
 
       - name: Cross-stage deterministic stress validation
         run: node --test test-critical-shadow-validation-11-15.js
+
+      - name: Adversarial runtime input hardening
+        run: node --test test-critical-input-hardening-11-15.js
 
       - name: Emit validation snapshot and require pass
         run: |
@@ -65,7 +70,7 @@ jobs:
       - name: Prove validation harness has no LIVE authority
         shell: bash
         run: |
-          if grep -Eqi 'canTrade\s*:\s*true|canAuthorizeLive\s*:\s*true|livePromotionAllowed\s*:\s*true|LIVE_EXECUTION_ARMED\s*=' critical-shadow-validation-11-15.js; then
+          if grep -Eqi 'canTrade\s*:\s*true|canAuthorizeLive\s*:\s*true|livePromotionAllowed\s*:\s*true|LIVE_EXECUTION_ARMED\s*=' critical-shadow-validation-11-15.js test-critical-input-hardening-11-15.js; then
             echo 'Unexpected LIVE authority in critical validation harness.'
             exit 1
           fi
