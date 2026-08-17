@@ -24,7 +24,6 @@ const DEFAULT_STRESS = Object.freeze({
 
 function safeObject(v){return v&&typeof v==='object'&&!Array.isArray(v)?v:{};}
 function num(v,f=0){const n=Number(v);return Number.isFinite(n)?n:f;}
-function clamp(n,min,max){return Math.max(min,Math.min(max,num(n,min)));}
 function iso(v){const t=Date.parse(v);return Number.isFinite(t)?new Date(t).toISOString():null;}
 function avg(a){const x=(Array.isArray(a)?a:[]).map(Number).filter(Number.isFinite);return x.length?x.reduce((p,q)=>p+q,0)/x.length:null;}
 function probabilitySum(p){return Object.values(safeObject(p)).reduce((a,b)=>a+num(b),0);}
@@ -36,7 +35,7 @@ function observation(value, at, sourceGroup, maxAgeDays){
 function macroInput(values, at){
   const v=safeObject(values);
   return {
-    policyRate:observation(v.policyRate??4,'CENTRAL_BANK'.startsWith('X')?at:at,'CENTRAL_BANK',120),
+    policyRate:observation(v.policyRate??4,at,'CENTRAL_BANK',120),
     inflationYoY:observation(v.inflationYoY??2.4,at,'STATISTICS_A',45),
     coreInflationYoY:observation(v.coreInflationYoY??2.5,at,'STATISTICS_A',45),
     unemployment:observation(v.unemployment??4.1,at,'STATISTICS_B',45),
@@ -52,16 +51,15 @@ function macroInput(values, at){
 }
 
 function validateReplayRows(rows){
-  if(!Array.isArray(rows)||rows.length<4)return{ok:false,reason:'INSUFFICIENT_REPLAY_ROWS',rows:0};
-  let previous=-Infinity;
-  const seen=new Set();
+  if(!Array.isArray(rows)||rows.length<4)return{ok:false,reason:'INSUFFICIENT_REPLAY_ROWS',rows:Array.isArray(rows)?rows.length:0};
+  let previous=-Infinity;const seen=new Set();
   for(let i=0;i<rows.length;i++){
-    const at=iso(rows[i]?.at);if(!at)return{ok:false,reason:'INVALID_TIMESTAMP',index:i};
+    const row=rows[i];const at=iso(row?.at);if(!at)return{ok:false,reason:'INVALID_TIMESTAMP',index:i};
     const ms=Date.parse(at);if(seen.has(ms))return{ok:false,reason:'DUPLICATE_TIMESTAMP',index:i};
     if(ms<=previous)return{ok:false,reason:'NON_MONOTONIC_TIME',index:i};
     seen.add(ms);previous=ms;
-    if(!safeObject(rows[i]?.market)||!safeObject(rows[i]?.macro))return{ok:false,reason:'MISSING_POINT_IN_TIME_INPUT',index:i};
-    if(!safeObject(rows[i]?.returns)||!safeObject(rows[i]?.stressScenarios||DEFAULT_STRESS))return{ok:false,reason:'MISSING_RISK_INPUT',index:i};
+    if(!Object.keys(safeObject(row?.market)).length||!Object.keys(safeObject(row?.macro)).length)return{ok:false,reason:'MISSING_POINT_IN_TIME_INPUT',index:i};
+    if(!Object.keys(safeObject(row?.returns)).length)return{ok:false,reason:'MISSING_RISK_INPUT',index:i};
   }
   return{ok:true,reason:null,rows:rows.length};
 }
@@ -70,16 +68,17 @@ function replayStages11to15(rows, options={}){
   const validation=validateReplayRows(rows);
   const safety={shadowOnly:true,networkCalls:0,openAiCalls:0,executionCalls:0,canTrade:false,canAuthorizeLive:false,livePromotionAllowed:false};
   if(!validation.ok)return{version:VERSION,status:'INCONCLUSIVE',reason:validation.reason,validation,results:[],metrics:{},checks:{},safety};
-  const opts=safeObject(options);let previousRegime='NEUTRAL';const results=[];
+  const opts=safeObject(options);const maxWeight=num(opts.maxWeight,.25);const minObservations=num(opts.minObservations,60);
+  let previousRegime='NEUTRAL';const results=[];
   for(const row of rows){
     const at=iso(row.at);const macro=analyzeMacro(macroInput(row.macro,at),{now:at});
     const eventRisk=evaluateEventRisk(Array.isArray(row.events)?row.events:[],{now:at,symbol:String(row.symbol||'SPY')});
     const regime=evaluateRegime({macro,market:row.market,eventRisk},{now:at,previousRegime,hysteresisMargin:num(opts.hysteresisMargin,.06)});
     previousRegime=regime.regime;
     const currentWeights=safeObject(row.currentWeights);const effectiveCurrent=Object.keys(currentWeights).length?currentWeights:DEFAULT_WEIGHTS;
-    const optimizer=optimizePortfolio({returns:row.returns,expectedReturns:safeObject(row.expectedReturns),currentWeights:effectiveCurrent,dataQuality:safeObject(row.dataQuality)},{maxWeight:num(opts.maxWeight,.25),minObservations:num(opts.minObservations,60),now:at});
+    const optimizer=optimizePortfolio({returns:row.returns,expectedReturns:safeObject(row.expectedReturns),currentWeights:effectiveCurrent,dataQuality:safeObject(row.dataQuality)},{maxWeight,minObservations,now:at});
     const riskWeights=optimizer.status==='READY_FOR_SHADOW_REVIEW'?optimizer.targetWeights:effectiveCurrent;
-    const risk=assessInstitutionalRisk({weights:riskWeights,returns:row.returns,stressScenarios:row.stressScenarios||DEFAULT_STRESS},{minObservations:num(opts.minObservations,60),now:at});
+    const risk=assessInstitutionalRisk({weights:riskWeights,returns:row.returns,stressScenarios:row.stressScenarios||DEFAULT_STRESS},{minObservations,now:at});
     results.push({at,phase:String(row.phase||'UNLABELED'),macro,eventRisk,regime,optimizer,risk});
   }
   const phases={};for(const r of results){if(!phases[r.phase])phases[r.phase]=[];phases[r.phase].push(r);}
@@ -96,7 +95,7 @@ function replayStages11to15(rows, options={}){
   const finiteRegime=results.every(r=>Number.isFinite(r.regime.riskMultiplier)&&Math.abs(probabilitySum(r.regime.probabilities)-1)<.001);
   const finitePortfolio=results.every(r=>r.optimizer.status!=='READY_FOR_SHADOW_REVIEW'||(
     Math.abs(Object.values(r.optimizer.targetWeights).reduce((a,b)=>a+b,0)-1)<1e-8&&
-    Object.values(r.optimizer.targetWeights).every(w=>Number.isFinite(w)&&w<=num(opts.maxWeight,.25)+1e-8)
+    Object.values(r.optimizer.targetWeights).every(w=>Number.isFinite(w)&&w<=maxWeight+1e-8)
   ));
   const finiteRisk=results.every(r=>r.risk.status==='INCONCLUSIVE'||[
     r.risk.score,r.risk.shadowRiskMultiplier,r.risk.metrics?.historicalVaR95,r.risk.metrics?.historicalCVaR95,r.risk.metrics?.annualizedVolatility,r.risk.metrics?.maxDrawdown,r.risk.worstStressReturn
@@ -148,7 +147,7 @@ function buildHistoricalStyleFixture(){
   return phases.map((phase,i)=>{
     const at=new Date(start+i*86400000).toISOString();const localStep=phase==='RECOVERY'?i-26:i;
     const d=phaseDefinition(phase,localStep);const returns=deterministicReturns(i+11,phase,90);
-    const expectedReturns=Object.fromEntries(SYMBOLS.map((s,si)=>[s,phase==='CREDIT_STRESS'?(s==='GLD'||s==='TLT'?.00035:-.0001):(.00025+si*.00002)]));
+    const expectedReturns=Object.fromEntries(SYMBOLS.map((s,si)=>[s,phase==='CREDIT_STRESS'?((s==='GLD'||s==='TLT')?.00035:-.0001):(.00025+si*.00002)]));
     const events=phase==='INFLATION_SHOCK'&&i===13?[{id:'cpi-fixture',type:'CPI',symbol:'MARKET',startAt:at,confidence:.99,source:'PRIMARY_FIXTURE',sourceGroup:'PRIMARY_FIXTURE',sourceClass:'PRIMARY',title:'Synthetic CPI replay marker'}]:[];
     return{at,phase,macro:d.macro,market:d.market,events,returns,expectedReturns,currentWeights:{...DEFAULT_WEIGHTS},dataQuality:Object.fromEntries(SYMBOLS.map(s=>[s,1])),stressScenarios:DEFAULT_STRESS};
   });
