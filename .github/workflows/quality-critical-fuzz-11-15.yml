@@ -1,0 +1,47 @@
+name: Critical 11-15 Property Fuzz Quality
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Syntax checks
+        run: |
+          node --check critical-shadow-fuzz-11-15.js
+          node --check test-critical-shadow-fuzz-11-15.js
+          node --check shadow-macro-intelligence-agent.js
+          node --check shadow-event-risk-calendar.js
+          node --check shadow-market-regime-engine-v2.js
+          node --check shadow-portfolio-optimizer-v2.js
+          node --check shadow-institutional-risk-engine.js
+      - name: Existing critical 11-15 regression
+        run: |
+          node --test test-critical-shadow-validation-11-15.js
+          node --test test-critical-input-hardening-11-15.js
+      - name: Deterministic property fuzz gate
+        run: node --test test-critical-shadow-fuzz-11-15.js
+      - name: Prove production core is untouched
+        run: git diff --exit-code v10.25.1-critical-11-15-validation...HEAD -- index.js package.json
+      - name: Prove no provider or LIVE authority
+        shell: bash
+        run: |
+          if grep -Eqi 'api\.openai\.com|public-api\.etoro\.com|LIVE_EXECUTION_ARMED\s*=|fetch\s*\(' critical-shadow-fuzz-11-15.js; then
+            echo 'Unexpected provider/network/LIVE authority in fuzz harness.'
+            exit 1
+          fi
+          grep -Fq 'canTrade:false' critical-shadow-fuzz-11-15.js
+          grep -Fq 'canAuthorizeLive:false' critical-shadow-fuzz-11-15.js
