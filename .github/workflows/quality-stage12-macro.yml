@@ -1,0 +1,28 @@
+name: Stage 12 Macro Intelligence Quality
+on:
+  pull_request:
+    paths:
+      - 'shadow-macro-intelligence-agent.js'
+      - 'test-shadow-macro-intelligence-agent.js'
+      - 'MACRO_INTELLIGENCE_AGENT_STAGE12.md'
+      - '.github/workflows/quality-stage12-macro.yml'
+permissions:
+  contents: read
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: Syntax
+        run: node --check shadow-macro-intelligence-agent.js && node --check test-shadow-macro-intelligence-agent.js
+      - name: Tests
+        run: node --test test-shadow-macro-intelligence-agent.js
+      - name: Prove index untouched
+        run: git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js
+      - name: Prove Shadow isolation
+        run: |
+          if grep -Eqi 'trading/execution|LIVE_EXECUTION_ARMED\s*=|new OpenAI|chat\.completions' shadow-macro-intelligence-agent.js; then
+            echo 'Unexpected LIVE/OpenAI/execution coupling'; exit 1; fi
