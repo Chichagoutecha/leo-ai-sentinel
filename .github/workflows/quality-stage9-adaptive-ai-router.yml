@@ -1,0 +1,22 @@
+name: Stage 9 Adaptive AI Router Quality
+on:
+  pull_request:
+    paths:
+      - 'shadow-adaptive-ai-router.js'
+      - 'test-shadow-adaptive-ai-router.js'
+      - 'ADAPTIVE_AI_ROUTER_STAGE9.md'
+      - '.github/workflows/quality-stage9-adaptive-ai-router.yml'
+permissions: { contents: read }
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: node --check shadow-adaptive-ai-router.js && node --check test-shadow-adaptive-ai-router.js
+      - run: node --test test-shadow-adaptive-ai-router.js
+      - run: git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js
+      - run: |
+          if grep -Eqi 'chat\.completions|responses\.create|trading/execution|LIVE_EXECUTION_ARMED\s*=|execute(Buy|Sell)\(' shadow-adaptive-ai-router.js; then echo 'Router must remain policy-only'; exit 1; fi
