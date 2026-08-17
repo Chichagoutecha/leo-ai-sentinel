@@ -3,6 +3,7 @@ const test=require('node:test');
 const assert=require('node:assert/strict');
 const { runCriticalValidation, returnsSet }=require('./critical-shadow-validation-11-15');
 const { cappedNormalize, optimizePortfolio }=require('./shadow-portfolio-optimizer-v2');
+const { assessInstitutionalRisk }=require('./shadow-institutional-risk-engine');
 
 test('critical stages 11-15 pass deterministic cross-scenario validation',()=>{
   const result=runCriticalValidation();
@@ -37,6 +38,32 @@ test('Stage 14 fails closed instead of silently breaching an infeasible cap',()=
   assert.equal(result.reason,'CONSTRAINT_INFEASIBLE');
   assert.deepEqual(result.targetWeights,{});
   assert.equal(result.safety.canTrade,false);
+});
+
+test('Stage 15 fails closed when a weighted asset lacks enough history',()=>{
+  const r=returnsSet(false);
+  const result=assessInstitutionalRisk({
+    weights:{SPY:.7,QQQ:.3},
+    returns:{SPY:r.SPY,QQQ:r.QQQ.slice(0,20)},
+    stressScenarios:{CRASH:{SPY:-.2,QQQ:-.3}}
+  },{minObservations:60,now:'2026-08-17T10:00:00.000Z'});
+  assert.equal(result.status,'INCONCLUSIVE');
+  assert.equal(result.reason,'INCOMPLETE_WEIGHTED_HISTORY');
+  assert.ok(result.insufficientHistory.some(x=>x.symbol==='QQQ'));
+  assert.equal(result.safety.canTrade,false);
+});
+
+test('Stage 15 fails closed when stress coverage omits a weighted asset',()=>{
+  const r=returnsSet(false);
+  const result=assessInstitutionalRisk({
+    weights:{SPY:.7,QQQ:.3},
+    returns:{SPY:r.SPY,QQQ:r.QQQ},
+    stressScenarios:{CRASH:{SPY:-.2}}
+  },{minObservations:60,now:'2026-08-17T10:00:00.000Z'});
+  assert.equal(result.status,'INCONCLUSIVE');
+  assert.equal(result.reason,'INCOMPLETE_STRESS_COVERAGE');
+  assert.deepEqual(result.incompleteStressScenarios[0].missingSymbols,['QQQ']);
+  assert.equal(result.safety.canAuthorizeLive,false);
 });
 
 test('FOMC window can block a new buy but never creates SELL authority',()=>{
