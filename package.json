@@ -1,14 +1,15 @@
 {
   "name": "leo-ai-sentinel",
   "version": "10.22.9",
-  "description": "LEO-AI SENTINEL with concurrency-hardened persistent AI cost controls, GPT-5.6 Luna compatibility and production AI preload preflight",
+  "description": "LEO-AI SENTINEL with concurrency-hardened AI cost controls, GPT-5.6 Luna compatibility, decision-context budgeting and production preflight",
   "main": "index.js",
   "scripts": {
-    "start": "node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./production-ai-preflight.js index.js",
-    "check": "node --check index.js && node --check ai-cost-optimizer.js && node --check ai-luna-temperature-compat.js && node --check production-ai-preflight.js && node --check test-ai-luna-temperature-compat.js && node --check test-ai-luna-preload-integration.js && node --check test-production-ai-preflight.js && node --check test-ai-cost-concurrency-reservation.js && node --check test-ai-cost-missing-usage.js && node --check test-ai-cost-secret-redaction.js",
-    "test": "node --test test-ai-luna-temperature-compat.js test-production-ai-preflight.js test-ai-cost-secret-redaction.js",
+    "start": "node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js -r ./production-ai-preflight.js index.js",
+    "check": "node --check index.js && node --check ai-cost-optimizer.js && node --check ai-luna-temperature-compat.js && node --check ai-context-optimizer.js && node --check production-ai-preflight.js && node --check test-ai-luna-temperature-compat.js && node --check test-ai-luna-preload-integration.js && node --check test-ai-context-optimizer.js && node --check test-ai-context-preload-integration.js && node --check test-production-ai-preflight.js && node --check test-ai-cost-concurrency-reservation.js && node --check test-ai-cost-missing-usage.js && node --check test-ai-cost-secret-redaction.js",
+    "test": "node --test test-ai-luna-temperature-compat.js test-production-ai-preflight.js test-ai-cost-secret-redaction.js test-ai-context-optimizer.js",
     "test:ai-preload": "node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js --test test-ai-luna-preload-integration.js",
-    "test:production-preflight": "node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./production-ai-preflight.js -e \"if (!global.__LEO_PRODUCTION_AI_PREFLIGHT__().ok) process.exit(1);\"",
+    "test:ai-context-preload": "AI_REQUEST_CACHE_MINUTES=0 node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js --test test-ai-context-preload-integration.js",
+    "test:production-preflight": "node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js -r ./production-ai-preflight.js -e \"if (!global.__LEO_PRODUCTION_AI_PREFLIGHT__().ok) process.exit(1);\"",
     "test:ai-cost-concurrency": "AI_MONTHLY_BUDGET_USD=0.1 AI_OUTPUT_PRICE_PER_MTOK_USD=40 AI_REQUEST_CACHE_MINUTES=0 node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js --test test-ai-cost-concurrency-reservation.js",
     "test:ai-cost-missing-usage": "AI_MONTHLY_BUDGET_USD=1 AI_REQUEST_CACHE_MINUTES=0 node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js --test test-ai-cost-missing-usage.js"
   },
