@@ -86,6 +86,42 @@ test('unsafe oversize payload falls back to original instead of deleting current
   assert.equal(result.payload, payload);
 });
 
+test('opaque current payload/raw keys are not discarded because they may carry current safety facts', () => {
+  const payload = largeDecisionPayload();
+  payload.foundation_agents.ProviderAdapter = {
+    payload: { symbol: 'SPY', status: 'BLOCKED', hardVeto: true, reason: 'CURRENT_PROVIDER_BLOCK' },
+    raw: { symbol: 'GLD', approved: false, reason: 'CURRENT_RAW_REJECT' },
+    rawData: { symbol: 'QQQ', tradable: false, reason: 'CURRENT_RAWDATA_CLOSED' }
+  };
+  const result = mod.compactDecisionPayload(payload);
+  assert.equal(result.ok, true, result.reason);
+  assert.equal(result.payload.foundation_agents.ProviderAdapter.payload.hardVeto, true);
+  assert.equal(result.payload.foundation_agents.ProviderAdapter.payload.reason, 'CURRENT_PROVIDER_BLOCK');
+  assert.equal(result.payload.foundation_agents.ProviderAdapter.raw.approved, false);
+  assert.equal(result.payload.foundation_agents.ProviderAdapter.raw.reason, 'CURRENT_RAW_REJECT');
+  assert.equal(result.payload.foundation_agents.ProviderAdapter.rawData.tradable, false);
+  assert.equal(result.payload.foundation_agents.ProviderAdapter.rawData.reason, 'CURRENT_RAWDATA_CLOSED');
+});
+
+test('historical arrays preserve both edges because runtime histories use mixed orientation', () => {
+  const payload = largeDecisionPayload();
+  payload.portfolio_summary.performanceHistory = [
+    { id: 'front-newest', value: 1 },
+    { id: 'front-2', value: 2 },
+    { id: 'middle-1', value: 3 },
+    { id: 'middle-2', value: 4 },
+    { id: 'tail-2', value: 5 },
+    { id: 'tail-newest', value: 6 }
+  ];
+  const result = mod.compactDecisionPayload(payload);
+  assert.equal(result.ok, true, result.reason);
+  const history = result.payload.portfolio_summary.performanceHistory;
+  assert.equal(history.compacted, true);
+  assert.deepEqual(history.first.map((x) => x.id), ['front-newest', 'front-2']);
+  assert.deepEqual(history.last.map((x) => x.id), ['tail-2', 'tail-newest']);
+  assert.equal(history.omittedMiddleCount, 2);
+});
+
 test('wrapper state explicitly has no strategy, sizing, eToro or LIVE mutation authority', () => {
   const state = global.__LEO_AI_CONTEXT_STATE__();
   assert.equal(state.safety.strategyModified, false);
