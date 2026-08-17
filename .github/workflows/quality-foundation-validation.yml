@@ -9,6 +9,9 @@ on:
       - 'test-foundation-calibration-bench.js'
       - 'etoro-execution-diagnostics-v10.22.10.js'
       - 'test-etoro-execution-diagnostics-v10.22.10.js'
+      - 'ai-luna-temperature-compat.js'
+      - 'test-ai-luna-temperature-compat.js'
+      - 'test-ai-luna-preload-integration.js'
       - 'shadow-*.js'
       - 'test-shadow-*.js'
       - 'package.json'
@@ -42,29 +45,47 @@ jobs:
       - name: Unit and integration safety tests
         run: npm test
 
+      - name: Optimizer + Luna compatibility integration regression
+        run: npm run test:ai-preload
+
       - name: Prove production index is untouched by this rehearsal
         shell: bash
         run: |
           git fetch origin "${{ github.base_ref }}" --depth=1
           git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js
 
-      - name: Prove rehearsal preload safety
+      - name: Prove rehearsal preload safety and ordering
         shell: bash
         run: |
           node - <<'NODE'
           const pkg = require('./package.json');
           const start = String(pkg.scripts?.start || '');
-          if (!start.includes('-r ./etoro-execution-diagnostics-v10.22.10.js')) {
-            throw new Error('Safe v10.22.10 execution diagnostics are not preloaded.');
+          const safeDiag = '-r ./etoro-execution-diagnostics-v10.22.10.js';
+          const legacyDiag = '-r ./etoro-execution-diagnostics.js';
+          const optimizer = '-r ./ai-cost-optimizer.js';
+          const lunaCompat = '-r ./ai-luna-temperature-compat.js';
+          const calibration = '-r ./foundation-calibration-bench.js';
+          const cockpit = '-r ./foundation-validation-cockpit.js';
+
+          for (const required of [safeDiag, optimizer, lunaCompat, calibration, cockpit]) {
+            if (!start.includes(required)) throw new Error(`Required preload missing: ${required}`);
           }
-          if (start.includes('-r ./etoro-execution-diagnostics.js')) {
+          if (start.includes(legacyDiag)) {
             throw new Error('Legacy v10.22.8 execution diagnostics must not be preloaded in the rehearsal stack.');
           }
-          if (!start.includes('-r ./foundation-calibration-bench.js')) {
-            throw new Error('Foundation Calibration Bench is not preloaded.');
+          if (!(start.indexOf(optimizer) < start.indexOf(lunaCompat))) {
+            throw new Error('AI cost optimizer must load before the Luna compatibility shim.');
           }
-          if (!start.includes('-r ./foundation-validation-cockpit.js')) {
-            throw new Error('Foundation Validation Cockpit is not preloaded.');
+          if (!(start.indexOf(lunaCompat) < start.lastIndexOf('index.js'))) {
+            throw new Error('Luna compatibility shim must load before index.js.');
           }
-          console.log('Safe Stage 1 + Calibration + Cockpit rehearsal preload confirmed.');
+          console.log('Safe Stage 1 + AI compatibility + Calibration + Cockpit preload order confirmed.');
           NODE
+
+      - name: Prove no direct LIVE promotion surface was added
+        shell: bash
+        run: |
+          if grep -Eqi 'LIVE_EXECUTION_ARMED\s*=|automaticLivePromotion\s*:\s*true|livePromotionAllowed\s*:\s*true' foundation-validation-cockpit.js foundation-calibration-bench.js ai-luna-temperature-compat.js; then
+            echo 'Unexpected LIVE promotion surface found in rehearsal-only modules.'
+            exit 1
+          fi
