@@ -1,0 +1,82 @@
+name: Production AI Runtime Preflight Quality
+
+on:
+  pull_request:
+    paths:
+      - 'package.json'
+      - 'production-ai-preflight.js'
+      - 'test-production-ai-preflight.js'
+      - 'PRODUCTION_AI_PREFLIGHT_V10.22.9.3.md'
+      - '.github/workflows/quality-production-runtime-preflight.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax and unit tests
+        run: |
+          npm run check
+          npm test
+
+      - name: Optimizer plus Luna regression
+        run: npm run test:ai-preload
+
+      - name: Correct production preflight composition passes
+        run: npm run test:production-preflight
+
+      - name: Missing preloads fail startup preflight
+        shell: bash
+        run: |
+          if node -r ./production-ai-preflight.js -e "process.exit(0)"; then
+            echo 'Preflight unexpectedly accepted missing optimizer/Luna preloads.'
+            exit 1
+          fi
+
+      - name: Prove default start includes fail-fast preflight in correct order
+        run: |
+          node - <<'NODE'
+          const pkg=require('./package.json');
+          const start=String(pkg.scripts.start||'');
+          const a='-r ./ai-cost-optimizer.js';
+          const b='-r ./ai-luna-temperature-compat.js';
+          const c='-r ./production-ai-preflight.js';
+          if(!(start.indexOf(a)>=0&&start.indexOf(a)<start.indexOf(b)&&start.indexOf(b)<start.indexOf(c)&&start.indexOf(c)<start.lastIndexOf('index.js')))throw new Error(`Unsafe preload order: ${start}`);
+          if(start.includes('etoro-execution-diagnostics.js'))throw new Error('Legacy eToro diagnostic found in default start.');
+          NODE
+
+      - name: Prove production implementation files are untouched
+        shell: bash
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js ai-cost-optimizer.js ai-luna-temperature-compat.js etoro-execution-diagnostics.js
+
+      - name: Prove preflight itself cannot trade or call providers
+        shell: bash
+        run: |
+          if grep -Eqi 'canTrade\s*:\s*true|canAuthorizeLive\s*:\s*true|LIVE_EXECUTION_ARMED\s*=' production-ai-preflight.js; then
+            echo 'Unexpected LIVE authority in production preflight.'
+            exit 1
+          fi
+          if grep -Fqi '/trading/execution/' production-ai-preflight.js; then
+            echo 'Unexpected eToro execution endpoint in preflight.'
+            exit 1
+          fi
+          if grep -Eqi 'chat\.completions\.create|global\.fetch\s*\(' production-ai-preflight.js; then
+            echo 'Unexpected provider call surface in preflight.'
+            exit 1
+          fi
