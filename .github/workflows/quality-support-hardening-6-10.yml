@@ -1,0 +1,71 @@
+name: Support Stages 6-10 Runtime Hardening Quality
+
+on:
+  pull_request:
+    paths:
+      - 'shadow-opportunity-discovery-v2.js'
+      - 'shadow-dynamic-universe-manager.js'
+      - 'shadow-profitability-cost-guard.js'
+      - 'shadow-adaptive-ai-router.js'
+      - 'shadow-ai-value-experiment.js'
+      - 'test-support-runtime-hardening-6-10.js'
+      - 'test-full-shadow-functional-integration-6-15.js'
+      - 'SUPPORT_HARDENING_6_10_V10.25.2.md'
+      - '.github/workflows/quality-support-hardening-6-10.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax checks
+        run: |
+          node --check shadow-opportunity-discovery-v2.js
+          node --check shadow-dynamic-universe-manager.js
+          node --check shadow-profitability-cost-guard.js
+          node --check shadow-adaptive-ai-router.js
+          node --check shadow-ai-value-experiment.js
+          node --check test-support-runtime-hardening-6-10.js
+          node --check test-full-shadow-functional-integration-6-15.js
+
+      - name: Existing stage 6-10 tests
+        run: node --test test-shadow-opportunity-discovery-v2.js test-shadow-dynamic-universe-manager.js test-shadow-profitability-cost-guard.js test-shadow-adaptive-ai-router.js test-shadow-ai-value-experiment.js
+
+      - name: Adversarial runtime hardening tests
+        run: node --test test-support-runtime-hardening-6-10.js
+
+      - name: Full functional Shadow integration 6-15
+        run: node --test test-full-shadow-functional-integration-6-15.js
+
+      - name: Prove production strategy and start command untouched
+        shell: bash
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js package.json
+
+      - name: Prove support modules remain research-only
+        shell: bash
+        run: |
+          files='shadow-opportunity-discovery-v2.js shadow-dynamic-universe-manager.js shadow-profitability-cost-guard.js shadow-adaptive-ai-router.js shadow-ai-value-experiment.js'
+          if grep -Eqi 'canTrade\s*:\s*true|canAuthorizeLive\s*:\s*true|automaticLivePromotion\s*:\s*true|LIVE_EXECUTION_ARMED\s*=' $files; then
+            echo 'Unexpected LIVE authority in support-stage modules.'
+            exit 1
+          fi
+          if grep -Eqi "require\(['\"]openai['\"]\)|/trading/execution/|fetch\s*\(" $files; then
+            echo 'Unexpected network/model/execution client in support-stage modules.'
+            exit 1
+          fi
