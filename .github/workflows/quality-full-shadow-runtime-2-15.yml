@@ -1,0 +1,73 @@
+name: Full Shadow Runtime 2-15 Quality
+
+on:
+  pull_request:
+    paths:
+      - 'shadow-*.js'
+      - 'test-shadow-full-stack-preflight-2-15.js'
+      - 'test-full-shadow-functional-integration-6-15.js'
+      - 'FULL_SHADOW_RUNTIME_2_15_V10.25.4.md'
+      - '.github/workflows/quality-full-shadow-runtime-2-15.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax check full stack preflight
+        run: |
+          node --check shadow-full-stack-preflight.js
+          node --check test-shadow-full-stack-preflight-2-15.js
+          node --check test-full-shadow-functional-integration-6-15.js
+
+      - name: Full process composition preflight 2-15
+        run: node --test test-shadow-full-stack-preflight-2-15.js
+
+      - name: Functional handoff integration 6-15
+        run: node --test test-full-shadow-functional-integration-6-15.js
+
+      - name: Foundation adversarial runtime regression 2-5
+        run: node --test test-foundation-runtime-hardening-2-5.js
+
+      - name: Support adversarial runtime regression 6-10
+        run: node --test test-support-runtime-hardening-6-10.js
+
+      - name: Critical adversarial runtime regression 11-15
+        run: node --test test-critical-input-hardening-11-15.js test-critical-shadow-validation-11-15.js
+
+      - name: Prove production entrypoint and start command untouched
+        shell: bash
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js package.json
+
+      - name: Prove full preflight has zero LIVE authority
+        shell: bash
+        run: |
+          files='shadow-full-stack-preflight.js test-shadow-full-stack-preflight-2-15.js'
+          if grep -Eqi 'canTrade\s*:\s*true|canAuthorizeLive\s*:\s*true|livePromotionAllowed\s*:\s*true|LIVE_EXECUTION_ARMED\s*=' $files; then
+            echo 'Unexpected LIVE authority in full Shadow preflight.'
+            exit 1
+          fi
+          if grep -Fqi '/trading/execution/' shadow-full-stack-preflight.js; then
+            echo 'Unexpected execution endpoint in full Shadow preflight.'
+            exit 1
+          fi
+          if grep -Fqi "require('openai')" shadow-full-stack-preflight.js || grep -Fqi 'require("openai")' shadow-full-stack-preflight.js; then
+            echo 'Unexpected OpenAI dependency in full Shadow preflight.'
+            exit 1
+          fi
