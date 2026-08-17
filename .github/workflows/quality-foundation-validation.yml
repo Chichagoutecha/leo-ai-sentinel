@@ -14,6 +14,7 @@ on:
       - 'package.json'
       - 'package-lock.json'
       - 'FOUNDATION_VALIDATION_V10.23.5.md'
+      - 'FOUNDATION_CALIBRATION_V10.23.5.md'
       - '.github/workflows/quality-foundation-validation.yml'
 
 permissions:
