@@ -1,7 +1,7 @@
 'use strict';
 
 /** LEO-AI SENTINEL — Stage 13 Event Risk Calendar (Shadow only). */
-const VERSION = 'v10.24.1-event-risk-calendar';
+const VERSION = 'v10.24.1.1-event-risk-runtime-safe';
 const WINDOWS = Object.freeze({
   EARNINGS: { preMin: 1440, postMin: 240, severity: 'BLOCK_NEW_BUY' },
   FOMC: { preMin: 360, postMin: 180, severity: 'BLOCK_NEW_BUY' },
@@ -18,10 +18,12 @@ let state = { evaluations: 0, invalidEvents: 0, duplicatesRemoved: 0, last: null
 function sanitize(s, max = 200) { return String(s ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max); }
 function iso(v) { const t = Date.parse(v); return Number.isFinite(t) ? new Date(t).toISOString() : null; }
 function normType(v) { const t = String(v || 'OTHER').toUpperCase(); return WINDOWS[t] ? t : 'OTHER'; }
-function keyOf(e) { return `${normType(e.type)}|${String(e.symbol || 'MARKET').toUpperCase()}|${iso(e.startAt) || 'INVALID'}|${sanitize(e.sourceGroup || e.source || 'UNKNOWN',80)}`; }
+function safeDate(value) { const t = value instanceof Date ? value.getTime() : Date.parse(value); return Number.isFinite(t) ? new Date(t) : new Date(); }
+function safeObject(value) { return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
+function keyOf(e) { return `${normType(e?.type)}|${String(e?.symbol || 'MARKET').toUpperCase()}|${iso(e?.startAt) || 'INVALID'}|${sanitize(e?.sourceGroup || e?.source || 'UNKNOWN',80)}`; }
 
 function normalizeEvent(raw) {
-  if (!raw || typeof raw !== 'object') return null;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const startAt = iso(raw.startAt);
   if (!startAt) return null;
   const type = normType(raw.type);
@@ -40,18 +42,21 @@ function normalizeEvent(raw) {
 }
 
 function dedupeEvents(events = []) {
-  const map = new Map(); let removed = 0;
-  for (const raw of events) {
-    const e = normalizeEvent(raw); if (!e) continue;
+  const source = Array.isArray(events) ? events : [];
+  const map = new Map(); let removed = 0; let invalid = 0;
+  for (const raw of source) {
+    const e = normalizeEvent(raw); if (!e) { invalid += 1; continue; }
     const key = keyOf(e);
     if (!map.has(key) || (map.get(key).confidence < e.confidence)) map.set(key, e); else removed += 1;
   }
-  return { events: [...map.values()], removed };
+  state.invalidEvents += invalid;
+  return { events: [...map.values()], removed, invalid };
 }
 
 function evaluateEventRisk(events = [], context = {}) {
-  const now = new Date(context.now || Date.now());
-  const symbol = String(context.symbol || 'MARKET').toUpperCase();
+  const ctx = safeObject(context);
+  const now = safeDate(ctx.now);
+  const symbol = String(ctx.symbol || 'MARKET').toUpperCase();
   const d = dedupeEvents(events); state.duplicatesRemoved += d.removed;
   let severity = 'CLEAR'; const active = [];
   for (const e of d.events) {
@@ -80,4 +85,4 @@ function evaluateEventRisk(events = [], context = {}) {
 function getState() { return { version: VERSION, stats: { ...state }, safety: { shadowOnly: true, canTrade: false, canAuthorizeLive: false, networkClientPresent: false } }; }
 global.__LEO_EVENT_RISK_STATE__ = getState;
 global.__LEO_EVENT_RISK_EVALUATE__ = evaluateEventRisk;
-module.exports = { VERSION, WINDOWS, normalizeEvent, dedupeEvents, evaluateEventRisk, getState };
+module.exports = { VERSION, WINDOWS, safeDate, normalizeEvent, dedupeEvents, evaluateEventRisk, getState };

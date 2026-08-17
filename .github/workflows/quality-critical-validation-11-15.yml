@@ -1,0 +1,76 @@
+name: Critical Stages 11-15 Validation Quality
+
+on:
+  pull_request:
+    paths:
+      - 'shadow-macro-intelligence-agent.js'
+      - 'shadow-event-risk-calendar.js'
+      - 'shadow-market-regime-engine-v2.js'
+      - 'shadow-portfolio-optimizer-v2.js'
+      - 'shadow-institutional-risk-engine.js'
+      - 'critical-shadow-validation-11-15.js'
+      - 'test-critical-shadow-validation-11-15.js'
+      - 'test-critical-input-hardening-11-15.js'
+      - 'CRITICAL_VALIDATION_11_15_V10.25.1.md'
+      - '.github/workflows/quality-critical-validation-11-15.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax check critical modules
+        run: |
+          node --check shadow-macro-intelligence-agent.js
+          node --check shadow-event-risk-calendar.js
+          node --check shadow-market-regime-engine-v2.js
+          node --check shadow-portfolio-optimizer-v2.js
+          node --check shadow-institutional-risk-engine.js
+          node --check critical-shadow-validation-11-15.js
+          node --check test-critical-shadow-validation-11-15.js
+          node --check test-critical-input-hardening-11-15.js
+
+      - name: Existing stages 11-15 unit tests
+        run: node --test test-shadow-macro-intelligence-agent.js test-shadow-event-risk-calendar.js test-shadow-market-regime-engine-v2.js test-shadow-portfolio-optimizer-v2.js test-shadow-institutional-risk-engine.js
+
+      - name: Cross-stage deterministic stress validation
+        run: node --test test-critical-shadow-validation-11-15.js
+
+      - name: Adversarial runtime input hardening
+        run: node --test test-critical-input-hardening-11-15.js
+
+      - name: Emit validation snapshot and require pass
+        run: |
+          node - <<'NODE'
+          const result = require('./critical-shadow-validation-11-15').runCriticalValidation();
+          console.log(JSON.stringify({status:result.status,checks:result.checks,failures:result.failures}, null, 2));
+          if (result.status !== 'TECHNICALLY_VALIDATED_FOR_EMPIRICAL_SHADOW') process.exit(1);
+          NODE
+
+      - name: Prove production strategy and start command untouched
+        shell: bash
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js package.json
+
+      - name: Prove validation harness has no LIVE authority
+        shell: bash
+        run: |
+          if grep -Eqi 'canTrade\s*:\s*true|canAuthorizeLive\s*:\s*true|livePromotionAllowed\s*:\s*true|LIVE_EXECUTION_ARMED\s*=' critical-shadow-validation-11-15.js test-critical-input-hardening-11-15.js; then
+            echo 'Unexpected LIVE authority in critical validation harness.'
+            exit 1
+          fi
