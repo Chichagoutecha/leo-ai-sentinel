@@ -1,0 +1,100 @@
+name: Foundation Validation Quality
+
+on:
+  pull_request:
+    paths:
+      - 'foundation-validation-cockpit.js'
+      - 'test-foundation-validation-cockpit.js'
+      - 'foundation-calibration-bench.js'
+      - 'test-foundation-calibration-bench.js'
+      - 'foundation-runtime-preflight.js'
+      - 'test-foundation-runtime-preflight.js'
+      - 'etoro-execution-diagnostics-v10.22.10.js'
+      - 'test-etoro-execution-diagnostics-v10.22.10.js'
+      - 'ai-luna-temperature-compat.js'
+      - 'test-ai-luna-temperature-compat.js'
+      - 'test-ai-luna-preload-integration.js'
+      - 'shadow-*.js'
+      - 'test-shadow-*.js'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'FOUNDATION_VALIDATION_V10.23.5.md'
+      - 'FOUNDATION_CALIBRATION_V10.23.5.md'
+      - '.github/workflows/quality-foundation-validation.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax checks
+        run: npm run check
+
+      - name: Unit and integration safety tests
+        run: npm test
+
+      - name: Optimizer + Luna compatibility integration regression
+        run: npm run test:ai-preload
+
+      - name: Prove production index is untouched by this rehearsal
+        shell: bash
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js
+
+      - name: Prove rehearsal preload safety and ordering
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const pkg = require('./package.json');
+          const start = String(pkg.scripts?.start || '');
+          const safeDiag = '-r ./etoro-execution-diagnostics-v10.22.10.js';
+          const legacyDiag = '-r ./etoro-execution-diagnostics.js';
+          const optimizer = '-r ./ai-cost-optimizer.js';
+          const lunaCompat = '-r ./ai-luna-temperature-compat.js';
+          const calibration = '-r ./foundation-calibration-bench.js';
+          const cockpit = '-r ./foundation-validation-cockpit.js';
+          const preflight = '-r ./foundation-runtime-preflight.js';
+
+          for (const required of [safeDiag, optimizer, lunaCompat, calibration, cockpit, preflight]) {
+            if (!start.includes(required)) throw new Error(`Required preload missing: ${required}`);
+          }
+          if (start.includes(legacyDiag)) {
+            throw new Error('Legacy v10.22.8 execution diagnostics must not be preloaded in the rehearsal stack.');
+          }
+          if (!(start.indexOf(optimizer) < start.indexOf(lunaCompat))) {
+            throw new Error('AI cost optimizer must load before the Luna compatibility shim.');
+          }
+          if (!(start.indexOf(lunaCompat) < start.indexOf(cockpit))) {
+            throw new Error('Luna compatibility must be active before foundation validation starts.');
+          }
+          if (!(start.indexOf(cockpit) < start.indexOf(preflight))) {
+            throw new Error('Runtime preflight must run after the validation cockpit is loaded.');
+          }
+          if (!(start.indexOf(preflight) < start.lastIndexOf('index.js'))) {
+            throw new Error('Runtime preflight must complete before index.js starts.');
+          }
+          console.log('Safe Stage 1 + AI compatibility + Calibration + Cockpit + Preflight order confirmed.');
+          NODE
+
+      - name: Prove no direct LIVE promotion surface was added
+        shell: bash
+        run: |
+          if grep -Eqi 'LIVE_EXECUTION_ARMED\s*=|automaticLivePromotion\s*:\s*true|livePromotionAllowed\s*:\s*true|readyForLivePromotion\s*:\s*true' foundation-validation-cockpit.js foundation-calibration-bench.js foundation-runtime-preflight.js ai-luna-temperature-compat.js; then
+            echo 'Unexpected LIVE promotion surface found in rehearsal-only modules.'
+            exit 1
+          fi
