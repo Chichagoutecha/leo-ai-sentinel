@@ -5,6 +5,7 @@ on:
     paths:
       - 'ai-luna-temperature-compat.js'
       - 'test-ai-luna-temperature-compat.js'
+      - 'test-ai-luna-preload-integration.js'
       - '.github/workflows/quality-luna-temperature-compat.yml'
 
 permissions:
@@ -27,10 +28,13 @@ jobs:
         run: npm ci
 
       - name: Syntax check
-        run: node --check ai-luna-temperature-compat.js && node --check test-ai-luna-temperature-compat.js
+        run: node --check ai-luna-temperature-compat.js && node --check test-ai-luna-temperature-compat.js && node --check test-ai-luna-preload-integration.js
 
       - name: Compatibility unit tests
         run: node --test test-ai-luna-temperature-compat.js
+
+      - name: Optimizer + Luna preload integration test
+        run: node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js --test test-ai-luna-preload-integration.js
 
       - name: Prove production strategy file is untouched
         shell: bash
