@@ -1,0 +1,22 @@
+name: Stage 8 Profitability Cost Quality
+on:
+  pull_request:
+    paths:
+      - 'shadow-profitability-cost-guard.js'
+      - 'test-shadow-profitability-cost-guard.js'
+      - 'PROFITABILITY_COST_GUARD_STAGE8.md'
+      - '.github/workflows/quality-stage8-profitability-cost.yml'
+permissions: { contents: read }
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: node --check shadow-profitability-cost-guard.js && node --check test-shadow-profitability-cost-guard.js
+      - run: node --test test-shadow-profitability-cost-guard.js
+      - run: git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js
+      - run: |
+          if grep -Eqi 'LIVE_EXECUTION_ARMED\s*=|trading/execution|new OpenAI|execute(Buy|Sell)\(' shadow-profitability-cost-guard.js; then echo 'Unexpected LIVE coupling'; exit 1; fi
