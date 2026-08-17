@@ -112,6 +112,20 @@ test('business identifiers acknowledge the order but do not confirm a position',
   assert.equal(result.retryAllowed, false);
 });
 
+test('fresh unchanged portfolio overrides a mere business acknowledgement and remains not found', () => {
+  const result = classifyV2ForPersistentIntent({
+    httpStatus: 200,
+    data: { token: 'tok-unchanged', orderId: 993, referenceId: 'ref-993' },
+    portfolioEvidence: { checked: true, unchanged: true, evidence: ['NO_POSITION_OR_ORDER_PROOF'] }
+  });
+  assert.equal(result.businessAcknowledged, true);
+  assert.equal(result.status, EXECUTION_STATUS.NOT_FOUND);
+  assert.equal(result.confirmed, false);
+  assert.equal(result.requiresReconciliation, true);
+  assert.equal(result.canCountAsEffectiveExecution, false);
+  assert.equal(result.retryAllowed, false);
+});
+
 test('HTTP 2xx without unified evidence plus verified unchanged portfolio remains not found', () => {
   const result = classifyV2ForPersistentIntent({
     httpStatus: 200,
