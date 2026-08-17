@@ -4,9 +4,12 @@ const assert=require('node:assert/strict');
 
 process.env.SHADOW_LAB_ENABLED='false';
 process.env.SHADOW_RESEARCH_ENABLED='false';
-process.env.SHADOW_ALPACA_VALIDATOR_ENABLED='false';
-process.env.SHADOW_QUARTR_FUNDAMENTAL_ENABLED='false';
-process.env.SHADOW_EXA_CATALYST_ENABLED='false';
+process.env.SHADOW_ALPACA_VALIDATOR_ENABLED='true';
+process.env.SHADOW_QUARTR_FUNDAMENTAL_ENABLED='true';
+process.env.SHADOW_EXA_CATALYST_ENABLED='true';
+process.env.SHADOW_ALPACA_STATE_FILE=`/tmp/leo-alpaca-guard-${process.pid}.json`;
+process.env.SHADOW_QUARTR_STATE_FILE=`/tmp/leo-quartr-guard-${process.pid}.json`;
+process.env.SHADOW_EXA_STATE_FILE=`/tmp/leo-exa-guard-${process.pid}.json`;
 
 const lab=require('./shadow-intelligence-lab');
 const research=require('./shadow-research-layer');
@@ -31,13 +34,12 @@ test('Shadow Research junk evidence cannot become promotion eligible',()=>{
   for(const input of [null,{}, {source:'ALPACA'}, {source:'UNKNOWN',symbol:'SPY',kind:'NEWS'}])assert.throws(()=>research.normalizeEvidence(input));
 });
 
-test('Stage 3 Alpaca public boundary catches malformed adapter payloads fail-closed',()=>{
+test('Stage 3 Alpaca public boundary catches malformed adapter payloads fail-closed',async()=>{
   for(const args of [[null,null,null],[{}, {}, {nowMs:'bad'}],[{symbol:'SPY',mid:'bad'},{snapshots:{}},{nowMs:Infinity}]]){
     let r;assert.doesNotThrow(()=>{r=alpaca.compareMarketObservations(...args);});
     assert.equal(r.status,'INCONCLUSIVE');assert.equal(r.canTrade,false);assert.equal(r.canAuthorizeLive,false);assert.deepEqual(alpaca.evidenceFromValidation(r),[]);
   }
-  let asyncResult;assert.doesNotThrow(()=>{asyncResult=global.__LEO_ALPACA_VALIDATE__(null,null,null);});
-  return Promise.resolve(asyncResult).then(r=>{assert.equal(r.ok,false);assert.equal(r.report.canTrade,false);});
+  const r=await global.__LEO_ALPACA_VALIDATE__(null,null,null);assert.equal(r.ok,false);assert.equal(r.report.canTrade,false);assert.deepEqual(r.evidence,[]);
 });
 
 test('Stage 4 Quartr public boundary catches malformed bundles fail-closed',async()=>{
@@ -45,7 +47,7 @@ test('Stage 4 Quartr public boundary catches malformed bundles fail-closed',asyn
     let r;assert.doesNotThrow(()=>{r=quartr.scoreFundamentalBundle(input,{nowMs:'bad'});});
     assert.equal(r.status,'INCONCLUSIVE');assert.equal(r.canTrade,false);assert.equal(r.canAuthorizeLive,false);assert.deepEqual(quartr.evidenceFromFundamentalReport(r),[]);
   }
-  const r=await global.__LEO_QUARTR_FUNDAMENTAL_INGEST__(null,{nowMs:'bad'});assert.equal(r.ok,false);assert.equal(r.report.canTrade,false);
+  const r=await global.__LEO_QUARTR_FUNDAMENTAL_INGEST__(null,{nowMs:'bad'});assert.equal(r.ok,false);assert.equal(r.report.canTrade,false);assert.deepEqual(r.evidence,[]);
 });
 
 test('Stage 5 Exa public boundary catches malformed batches fail-closed',async()=>{
@@ -53,7 +55,7 @@ test('Stage 5 Exa public boundary catches malformed batches fail-closed',async()
     let r;assert.doesNotThrow(()=>{r=exa.analyzeEventGroup(input,{nowMs:'bad'});});
     assert.ok(['INCONCLUSIVE','STALE'].includes(r.status));assert.equal(r.canTrade,false);assert.equal(r.canAuthorizeLive,false);assert.deepEqual(exa.evidenceFromEventReport(r),[]);
   }
-  const r=await global.__LEO_EXA_CATALYST_INGEST__([null],{nowMs:'bad'});assert.equal(r.ok,false);assert.deepEqual(r.evidence,[]);
+  const r=await global.__LEO_EXA_CATALYST_INGEST__([null],{nowMs:'bad'});assert.equal(r.ok,true);assert.deepEqual(r.evidence,[]);assert.deepEqual(r.reports,[]);
 });
 
 test('Exa injection and secret URL stripping remain active behind guard',()=>{
