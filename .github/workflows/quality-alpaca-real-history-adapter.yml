@@ -1,0 +1,53 @@
+name: Alpaca Real History Adapter Quality
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Syntax checks
+        run: |
+          node --check shadow-alpaca-history-adapter.js
+          node --check test-shadow-alpaca-history-adapter.js
+          node --check shadow-real-history-contract-11-15.js
+      - name: Existing real-history contract regressions
+        run: |
+          node --test test-shadow-real-history-contract-11-15.js
+          node --test test-shadow-historical-replay-11-15.js
+      - name: Alpaca adapter tests
+        run: node --test test-shadow-alpaca-history-adapter.js
+      - name: Prove production core is untouched
+        shell: bash
+        run: |
+          if git rev-parse HEAD^2 >/dev/null 2>&1; then
+            git diff --exit-code HEAD^1 HEAD^2 -- index.js package.json
+          else
+            git fetch origin v10.25.7-real-history-contract --depth=1
+            git diff --exit-code FETCH_HEAD HEAD -- index.js package.json
+          fi
+      - name: Prove adapter has no provider or LIVE authority
+        shell: bash
+        run: |
+          if grep -Eqi 'api\.alpaca|api\.openai\.com|public-api\.etoro\.com|LIVE_EXECUTION_ARMED\s*=|fetch\s*\(|child_process|execSync|spawnSync' shadow-alpaca-history-adapter.js; then
+            echo 'Unexpected provider/network/process/LIVE authority in Alpaca history adapter.'
+            exit 1
+          fi
+          grep -Fq 'canTrade:false' shadow-alpaca-history-adapter.js
+          grep -Fq 'canAuthorizeLive:false' shadow-alpaca-history-adapter.js
+          grep -Fq 'livePromotionAllowed:false' shadow-alpaca-history-adapter.js
