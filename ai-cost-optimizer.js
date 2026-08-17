@@ -1,9 +1,9 @@
 'use strict';
 
-/** LEO-AI SENTINEL v10.22.9 — cost guard for OpenAI Chat Completions. */
+/** LEO-AI SENTINEL v10.22.9.4 — hardened cost guard for OpenAI Chat Completions. */
 const crypto = require('crypto');
 
-const VERSION = 'v10.22.9-ai-cost-optimizer';
+const VERSION = 'v10.22.9.4-ai-cost-concurrency-hardening';
 const ENABLED = process.env.AI_COST_OPTIMIZER_ENABLED !== 'false';
 const PRIMARY_MODEL = String(process.env.AI_PRIMARY_MODEL || 'gpt-5.6-luna').trim();
 const FORCE_PRIMARY = process.env.AI_FORCE_PRIMARY_MODEL !== 'false';
@@ -13,7 +13,7 @@ const MAX_COMPLETION_TOKENS = Math.round(num('AI_MAX_COMPLETION_TOKENS', 1200, 1
 const CACHE_MINUTES = num('AI_REQUEST_CACHE_MINUTES', 20, 0, 180);
 const CACHE_MS = CACHE_MINUTES * 60 * 1000;
 
-// GPT-5.6 Luna standard pricing published by OpenAI on 2026-07-30.
+// GPT-5.6 Luna pricing configuration. Defaults may be overridden explicitly by environment.
 const LUNA_INPUT = num('AI_INPUT_PRICE_PER_MTOK_USD', 0.20, 0, 1000);
 const LUNA_CACHED_INPUT = num('AI_CACHED_INPUT_PRICE_PER_MTOK_USD', 0.02, 0, 1000);
 const LUNA_OUTPUT = num('AI_OUTPUT_PRICE_PER_MTOK_USD', 1.20, 0, 1000);
@@ -32,6 +32,7 @@ let cache = new Map();
 let providerBreakerUntil = 0;
 let providerBreakerReason = null;
 let lastEvent = null;
+let inFlightProjectedUsd = 0;
 
 function num(name, fallback, min, max) {
   const v = Number(process.env[name]);
@@ -62,13 +63,29 @@ function ensureDay() {
     state.daily = { day: day(), calls: 0, successfulCalls: 0, failedCalls: 0, blockedCalls: 0 };
   }
 }
+function redactSecrets(value) {
+  let text = String(value ?? '');
+  const known = [
+    process.env.OPENAI_API_KEY,
+    process.env.ETORO_API_KEY,
+    process.env.ETORO_USER_KEY,
+    process.env.BOT_SECRET,
+    UPSTASH_TOKEN
+  ].filter((x) => typeof x === 'string' && x.length >= 8);
+  for (const secret of known) text = text.split(secret).join('[REDACTED]');
+  text = text
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, '[REDACTED]')
+    .replace(/((?:api[_-]?key|token|authorization)\s*[:=]\s*)[^\s,;]+/gi, '$1[REDACTED]')
+    .replace(/(bearer\s+)[A-Za-z0-9._~+\/-]{8,}/gi, '$1[REDACTED]');
+  return text.slice(0, 1000);
+}
 function safeError(error) {
   return error ? {
-    name: error.name || null,
-    message: String(error.message || error).slice(0, 1000),
+    name: redactSecrets(error.name || null),
+    message: redactSecrets(error.message || error),
     status: error.status || null,
-    code: error.code || error.error?.code || null,
-    type: error.type || error.error?.type || null
+    code: redactSecrets(error.code || error.error?.code || null),
+    type: redactSecrets(error.type || error.error?.type || null)
   } : null;
 }
 function log(event, details = {}, level = 'log') {
@@ -123,21 +140,32 @@ function prices(model) {
     output: num('AI_UNKNOWN_MODEL_OUTPUT_PRICE_PER_MTOK_USD', 30, 0, 1000)
   };
 }
+function finiteNonNegative(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, n) : 0;
+}
 function cost(model, input, cached, output) {
   const p = prices(model);
-  const i = Math.max(0, Number(input || 0));
-  const c = Math.max(0, Math.min(i, Number(cached || 0)));
-  return ((i - c) / 1e6) * p.input + (c / 1e6) * p.cached + (Math.max(0, Number(output || 0)) / 1e6) * p.output;
+  const i = finiteNonNegative(input);
+  const c = Math.min(i, finiteNonNegative(cached));
+  return ((i - c) / 1e6) * p.input + (c / 1e6) * p.cached + (finiteNonNegative(output) / 1e6) * p.output;
 }
 function estimateInput(params) {
   try {
     let chars = 0;
-    for (const m of (params?.messages || [])) {
+    for (const m of (Array.isArray(params?.messages) ? params.messages : [])) {
       chars += String(m?.role || '').length;
       chars += typeof m?.content === 'string' ? m.content.length : JSON.stringify(m?.content || '').length;
     }
-    return Math.max(1, Math.ceil(chars / 3.5));
+    for (const extra of [params?.response_format, params?.tools, params?.tool_choice]) {
+      if (extra != null) chars += JSON.stringify(extra).length;
+    }
+    // Intentionally conservative to reduce the chance of budget under-reservation.
+    return Math.max(1, Math.ceil((chars / 3.5) * 1.25));
   } catch { return 5000; }
+}
+function projectedCallCost(params) {
+  return cost(params?.model, estimateInput(params), 0, MAX_COMPLETION_TOKENS);
 }
 function fingerprint(params) {
   try {
@@ -170,6 +198,9 @@ function optimizedParams(original = {}) {
   }
   return params;
 }
+function releaseReservation(value) {
+  inFlightProjectedUsd = Math.max(0, inFlightProjectedUsd - finiteNonNegative(value));
+}
 async function gate(params) {
   await load(); ensureDay(); cleanCache();
   if (Date.now() < providerBreakerUntil) {
@@ -182,7 +213,7 @@ async function gate(params) {
     const hit = cache.get(fp);
     if (hit && Date.now() - hit.at <= CACHE_MS) {
       state.cacheHits++; await save(); log('CACHE_HIT', { model: params.model, cacheMinutes: CACHE_MINUTES, monthCostUsd: money(state.monthCostUsd) });
-      return { cached: hit.response, fp };
+      return { cached: hit.response, fp, reservedProjectedUsd: 0 };
     }
   }
   if (state.daily.calls >= MAX_CALLS_PER_DAY) {
@@ -190,26 +221,35 @@ async function gate(params) {
     state.blockedCalls++; state.daily.blockedCalls++; await save(); log('CALL_BLOCKED', meta, 'warn');
     throw budgetError('AI_DAILY_CALL_LIMIT_REACHED', 'Plafond quotidien des appels IA atteint; aucun ordre ne doit être créé sans nouvelle analyse.', meta);
   }
-  const projected = cost(params.model, estimateInput(params), 0, MAX_COMPLETION_TOKENS);
-  if (state.monthCostUsd + projected > MONTHLY_BUDGET_USD) {
-    const meta = { reason: 'MONTHLY_BUDGET', monthCostUsd: money(state.monthCostUsd), projectedCallUsd: money(projected), monthlyBudgetUsd: MONTHLY_BUDGET_USD };
+  const projected = projectedCallCost(params);
+  if (state.monthCostUsd + inFlightProjectedUsd + projected > MONTHLY_BUDGET_USD) {
+    const meta = {
+      reason: 'MONTHLY_BUDGET', monthCostUsd: money(state.monthCostUsd),
+      inFlightProjectedUsd: money(inFlightProjectedUsd), projectedCallUsd: money(projected),
+      monthlyBudgetUsd: MONTHLY_BUDGET_USD
+    };
     state.blockedCalls++; state.daily.blockedCalls++; await save(); log('CALL_BLOCKED', meta, 'warn');
-    throw budgetError('AI_MONTHLY_BUDGET_EXCEEDED', 'Budget mensuel IA atteint; le bot doit rester en HOLD jusqu’au mois suivant ou à une hausse explicite du budget.', meta);
+    throw budgetError('AI_MONTHLY_BUDGET_EXCEEDED', 'Budget mensuel IA atteint ou réservé par des appels en cours; aucun ordre ne doit être créé sans nouvelle analyse.', meta);
   }
+  inFlightProjectedUsd += projected;
   state.calls++; state.daily.calls++; state.lastCallAt = iso(); state.lastModel = params.model; await save();
-  return { cached: null, fp };
+  return { cached: null, fp, reservedProjectedUsd: projected };
 }
 function usage(response) {
   const u = response?.usage || {};
+  const input = finiteNonNegative(u.prompt_tokens ?? u.input_tokens ?? 0);
   return {
-    input: Number(u.prompt_tokens ?? u.input_tokens ?? 0) || 0,
-    cached: Number(u.prompt_tokens_details?.cached_tokens ?? u.input_tokens_details?.cached_tokens ?? 0) || 0,
-    output: Number(u.completion_tokens ?? u.output_tokens ?? 0) || 0
+    input,
+    cached: Math.min(input, finiteNonNegative(u.prompt_tokens_details?.cached_tokens ?? u.input_tokens_details?.cached_tokens ?? 0)),
+    output: finiteNonNegative(u.completion_tokens ?? u.output_tokens ?? 0)
   };
 }
-function money(v) { return Math.round(Number(v || 0) * 1e6) / 1e6; }
-async function success(params, response, fp) {
-  const u = usage(response); const callCost = cost(params.model, u.input, u.cached, u.output);
+function money(v) { return Math.round(finiteNonNegative(v) * 1e6) / 1e6; }
+async function success(params, response, fp, reservedProjectedUsd = 0) {
+  const u = usage(response);
+  const usageMissing = !response?.usage || (u.input === 0 && u.output === 0);
+  const measuredCost = cost(params.model, u.input, u.cached, u.output);
+  const callCost = usageMissing ? Math.max(finiteNonNegative(reservedProjectedUsd), projectedCallCost(params)) : measuredCost;
   state.successfulCalls++; state.daily.successfulCalls++; state.inputTokens += u.input;
   state.cachedInputTokens += u.cached; state.outputTokens += u.output; state.monthCostUsd += callCost;
   state.lastSuccessAt = iso(); state.lastErrorCode = null; state.lastModel = response?.model || params.model;
@@ -218,6 +258,7 @@ async function success(params, response, fp) {
   log('CALL_COMPLETED', {
     requestedModel: params.model, responseModel: response?.model || null,
     inputTokens: u.input, cachedInputTokens: u.cached, outputTokens: u.output,
+    usageMissing, costBasis: usageMissing ? 'CONSERVATIVE_RESERVED_FALLBACK' : 'PROVIDER_USAGE',
     callCostUsd: money(callCost), monthCostUsd: money(state.monthCostUsd),
     monthlyBudgetUsd: MONTHLY_BUDGET_USD, budgetRemainingUsd: money(Math.max(0, MONTHLY_BUDGET_USD - state.monthCostUsd)),
     dailyCalls: state.daily.calls, maxCallsPerDay: MAX_CALLS_PER_DAY
@@ -226,7 +267,7 @@ async function success(params, response, fp) {
 async function failure(params, error) {
   await load();
   state.failedCalls++; state.daily.failedCalls++; state.lastErrorAt = iso();
-  state.lastErrorCode = error?.code || error?.error?.code || error?.status || 'UNKNOWN_ERROR';
+  state.lastErrorCode = redactSecrets(error?.code || error?.error?.code || error?.status || 'UNKNOWN_ERROR');
   const status = Number(error?.status || 0); const code = String(error?.code || error?.error?.code || '');
   if (status === 429) {
     const longQuota = /quota|credit|billing/i.test(`${code} ${error?.message || ''}`);
@@ -244,15 +285,23 @@ class CostOptimizedOpenAI extends OriginalOpenAI {
     const create = this.chat.completions.create.bind(this.chat.completions);
     this.chat.completions.create = async (originalParams, requestOptions) => {
       const params = optimizedParams(originalParams || {});
+      let g;
       try {
-        const g = await gate(params);
-        if (g.cached) return g.cached;
-        const response = await create(params, requestOptions);
-        await success(params, response, g.fp);
-        return response;
+        g = await gate(params);
       } catch (e) {
         if (e?.name !== 'LeoAICostBudgetError') await failure(params, e);
         throw e;
+      }
+      if (g.cached) return g.cached;
+      try {
+        const response = await create(params, requestOptions);
+        await success(params, response, g.fp, g.reservedProjectedUsd);
+        return response;
+      } catch (e) {
+        await failure(params, e);
+        throw e;
+      } finally {
+        releaseReservation(g.reservedProjectedUsd);
       }
     };
   }
@@ -275,7 +324,8 @@ global.__LEO_AI_COST_STATE__ = async () => {
     requestCacheMinutes: CACHE_MINUTES, persistent: REDIS,
     providerBreakerActive: Date.now() < providerBreakerUntil,
     providerBreakerUntil: providerBreakerUntil ? new Date(providerBreakerUntil).toISOString() : null,
-    providerBreakerReason, state: { ...state, daily: { ...state.daily } }, lastEvent
+    providerBreakerReason, inFlightProjectedUsd: money(inFlightProjectedUsd),
+    state: { ...state, daily: { ...state.daily } }, lastEvent
   };
 };
 
@@ -283,8 +333,9 @@ log('STARTED', {
   enabled: ENABLED, primaryModel: PRIMARY_MODEL, forcePrimaryModel: FORCE_PRIMARY,
   monthlyBudgetUsd: MONTHLY_BUDGET_USD, maxCallsPerDay: MAX_CALLS_PER_DAY,
   maxCompletionTokens: MAX_COMPLETION_TOKENS, requestCacheMinutes: CACHE_MINUTES,
-  persistentBudgetStore: REDIS, liveExecutionArmedModified: false,
-  strategyModified: false, etoroModified: false, secretsLogged: false
+  persistentBudgetStore: REDIS, concurrentBudgetReservations: true,
+  missingUsageConservativeFallback: true, errorSecretRedaction: true,
+  liveExecutionArmedModified: false, strategyModified: false, etoroModified: false, secretsLogged: false
 });
 
-module.exports = { VERSION, prices, cost, estimateInput, optimizedParams };
+module.exports = { VERSION, prices, cost, estimateInput, projectedCallCost, optimizedParams, usage, redactSecrets, safeError };

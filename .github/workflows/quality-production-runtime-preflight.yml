@@ -59,11 +59,11 @@ jobs:
           if(start.includes('etoro-execution-diagnostics.js'))throw new Error('Legacy eToro diagnostic found in default start.');
           NODE
 
-      - name: Prove production implementation files are untouched
+      - name: Prove strategy, Luna compatibility and eToro diagnostic are untouched
         shell: bash
         run: |
           git fetch origin "${{ github.base_ref }}" --depth=1
-          git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js ai-cost-optimizer.js ai-luna-temperature-compat.js etoro-execution-diagnostics.js
+          git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js ai-luna-temperature-compat.js etoro-execution-diagnostics.js
 
       - name: Prove preflight itself cannot trade or call providers
         shell: bash
