@@ -13,6 +13,8 @@ jobs:
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -35,7 +37,10 @@ jobs:
       - name: Deterministic property fuzz gate
         run: node --test test-critical-shadow-fuzz-11-15.js
       - name: Prove production core is untouched
-        run: git diff --exit-code v10.25.1-critical-11-15-validation...HEAD -- index.js package.json
+        shell: bash
+        run: |
+          git fetch origin v10.25.1-critical-11-15-validation --depth=1
+          git diff --exit-code origin/v10.25.1-critical-11-15-validation...HEAD -- index.js package.json
       - name: Prove no provider or LIVE authority
         shell: bash
         run: |
