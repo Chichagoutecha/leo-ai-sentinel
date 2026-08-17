@@ -1,0 +1,49 @@
+name: Shadow Roadmap 6-15 Integration Quality
+on:
+  pull_request:
+    paths:
+      - 'shadow-*.js'
+      - 'test-shadow-*.js'
+      - 'package.json'
+      - 'SHADOW_ROADMAP_6_15_INTEGRATION.md'
+      - '.github/workflows/quality-shadow-roadmap-6-15.yml'
+permissions: { contents: read }
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Full syntax gate
+        run: npm run check
+      - name: Full unit suite
+        run: npm test
+      - name: Production AI preload regression
+        run: npm run test:ai-preload
+      - name: Combined roadmap preflight
+        run: npm run test:shadow-roadmap-preflight
+      - name: Research-only roadmap command
+        run: npm run start:shadow-roadmap
+      - name: Prove production strategy file untouched
+        run: git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js
+      - name: Prove production start is not roadmap rehearsal
+        run: |
+          node - <<'NODE'
+          const pkg=require('./package.json');
+          const prod=String(pkg.scripts.start||'');
+          const shadow=String(pkg.scripts['start:shadow-roadmap']||'');
+          if (!prod.includes('etoro-execution-diagnostics-v10.22.10.js')) throw new Error('Production rehearsal lost safe eToro diagnostics');
+          if (prod.includes('shadow-roadmap-6-15-preflight.js') || prod.includes('shadow-institutional-risk-engine.js')) throw new Error('Roadmap modules leaked into production start');
+          if (shadow.includes('index.js')) throw new Error('Shadow roadmap command must never start trading app');
+          if (shadow.includes('etoro-execution-diagnostics') || shadow.includes('ai-cost-optimizer')) throw new Error('Shadow roadmap preflight should not load production execution/AI adapters');
+          NODE
+      - name: Prove all roadmap modules remain non-LIVE
+        run: |
+          files='shadow-macro-intelligence-agent.js shadow-event-risk-calendar.js shadow-market-regime-engine-v2.js shadow-portfolio-optimizer-v2.js shadow-institutional-risk-engine.js shadow-opportunity-discovery-v2.js shadow-dynamic-universe-manager.js shadow-profitability-cost-guard.js shadow-adaptive-ai-router.js shadow-ai-value-experiment.js shadow-roadmap-6-15-preflight.js'
+          if grep -Eqi 'LIVE_EXECUTION_ARMED\s*=|trading/execution|executeBuy\(|executeSell\(|livePromotionAllowed\s*:\s*true|canAuthorizeLive\s*:\s*true' $files; then
+            echo 'Unexpected LIVE/execution authority in roadmap stack'; exit 1; fi
