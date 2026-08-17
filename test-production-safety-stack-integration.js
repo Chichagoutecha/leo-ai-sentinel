@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-test('safe eToro breaker coexists with GPT-5.6 Luna AI stack without blocking close routes', async () => {
+test('exact eToro open breaker coexists with GPT-5.6 Luna AI stack without blocking close or cancel-like routes', async () => {
   const providerCalls = [];
   global.fetch = async (input, init = {}) => {
     const url = String(input?.url || input);
@@ -32,6 +32,7 @@ test('safe eToro breaker coexists with GPT-5.6 Luna AI stack without blocking cl
 
   const openUrl = 'https://public-api.etoro.com/api/v1/trading/execution/market-open-orders/by-amount';
   const closeUrl = 'https://public-api.etoro.com/api/v1/trading/execution/market-close-orders/positions/123';
+  const cancelLikeUrl = 'https://public-api.etoro.com/api/v1/trading/execution/market-open-orders/123';
 
   const firstOpen = await global.fetch(openUrl, {
     method: 'POST',
@@ -41,7 +42,8 @@ test('safe eToro breaker coexists with GPT-5.6 Luna AI stack without blocking cl
   assert.equal(firstOpen.status, 200);
   const stateAfterOpen = global.__LEO_ETORO_EXECUTION_DIAGNOSTICS_STATE__();
   assert.equal(stateAfterOpen.breakerActive, true);
-  assert.equal(stateAfterOpen.breakerScope, 'NEW_OPEN_ORDERS_ONLY');
+  assert.equal(stateAfterOpen.breakerScope, 'EXACT_NEW_OPEN_POST_ENDPOINTS_ONLY');
+  assert.equal(stateAfterOpen.closeReduceCancelNeverBlocked, true);
 
   const providerCountBeforeBlockedOpen = providerCalls.length;
   const secondOpen = await global.fetch(openUrl, {
@@ -59,6 +61,14 @@ test('safe eToro breaker coexists with GPT-5.6 Luna AI stack without blocking cl
   });
   assert.equal(close.status, 200);
   assert.equal(providerCalls.at(-1).url, closeUrl, 'close must reach provider while open-order breaker is active');
+
+  const cancelLike = await global.fetch(cancelLikeUrl, {
+    method: 'DELETE',
+    headers: { 'x-request-id': 'stack-cancel-1' }
+  });
+  assert.equal(cancelLike.status, 200);
+  assert.equal(providerCalls.at(-1).url, cancelLikeUrl, 'cancel/non-creation write must reach provider while breaker is active');
+  assert.equal(providerCalls.at(-1).method, 'DELETE');
 
   const payload = {
     trading_mode: 'LIVE',
@@ -85,5 +95,5 @@ test('safe eToro breaker coexists with GPT-5.6 Luna AI stack without blocking cl
   assert.ok(aiState.state.monthCostUsd > 0);
 
   const diagState = global.__LEO_ETORO_EXECUTION_DIAGNOSTICS_STATE__();
-  assert.equal(diagState.closeAndReduceRoutesNeverBlocked, true);
+  assert.equal(diagState.closeReduceCancelNeverBlocked, true);
 });
