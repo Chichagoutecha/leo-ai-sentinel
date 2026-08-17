@@ -7,6 +7,8 @@ on:
       - 'test-foundation-validation-cockpit.js'
       - 'foundation-calibration-bench.js'
       - 'test-foundation-calibration-bench.js'
+      - 'foundation-runtime-preflight.js'
+      - 'test-foundation-runtime-preflight.js'
       - 'etoro-execution-diagnostics-v10.22.10.js'
       - 'test-etoro-execution-diagnostics-v10.22.10.js'
       - 'ai-luna-temperature-compat.js'
@@ -66,8 +68,9 @@ jobs:
           const lunaCompat = '-r ./ai-luna-temperature-compat.js';
           const calibration = '-r ./foundation-calibration-bench.js';
           const cockpit = '-r ./foundation-validation-cockpit.js';
+          const preflight = '-r ./foundation-runtime-preflight.js';
 
-          for (const required of [safeDiag, optimizer, lunaCompat, calibration, cockpit]) {
+          for (const required of [safeDiag, optimizer, lunaCompat, calibration, cockpit, preflight]) {
             if (!start.includes(required)) throw new Error(`Required preload missing: ${required}`);
           }
           if (start.includes(legacyDiag)) {
@@ -76,16 +79,22 @@ jobs:
           if (!(start.indexOf(optimizer) < start.indexOf(lunaCompat))) {
             throw new Error('AI cost optimizer must load before the Luna compatibility shim.');
           }
-          if (!(start.indexOf(lunaCompat) < start.lastIndexOf('index.js'))) {
-            throw new Error('Luna compatibility shim must load before index.js.');
+          if (!(start.indexOf(lunaCompat) < start.indexOf(cockpit))) {
+            throw new Error('Luna compatibility must be active before foundation validation starts.');
           }
-          console.log('Safe Stage 1 + AI compatibility + Calibration + Cockpit preload order confirmed.');
+          if (!(start.indexOf(cockpit) < start.indexOf(preflight))) {
+            throw new Error('Runtime preflight must run after the validation cockpit is loaded.');
+          }
+          if (!(start.indexOf(preflight) < start.lastIndexOf('index.js'))) {
+            throw new Error('Runtime preflight must complete before index.js starts.');
+          }
+          console.log('Safe Stage 1 + AI compatibility + Calibration + Cockpit + Preflight order confirmed.');
           NODE
 
       - name: Prove no direct LIVE promotion surface was added
         shell: bash
         run: |
-          if grep -Eqi 'LIVE_EXECUTION_ARMED\s*=|automaticLivePromotion\s*:\s*true|livePromotionAllowed\s*:\s*true' foundation-validation-cockpit.js foundation-calibration-bench.js ai-luna-temperature-compat.js; then
+          if grep -Eqi 'LIVE_EXECUTION_ARMED\s*=|automaticLivePromotion\s*:\s*true|livePromotionAllowed\s*:\s*true|readyForLivePromotion\s*:\s*true' foundation-validation-cockpit.js foundation-calibration-bench.js foundation-runtime-preflight.js ai-luna-temperature-compat.js; then
             echo 'Unexpected LIVE promotion surface found in rehearsal-only modules.'
             exit 1
           fi
