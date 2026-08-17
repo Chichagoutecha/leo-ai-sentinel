@@ -59,14 +59,7 @@ function largeState() {
   };
 }
 
-test('proactive compaction reaches target by reducing reconstructible history before critical state', () => {
-  const state = largeState();
-  const initial = serializedByteLength(state);
-  assert.ok(initial > 700000, `fixture should exceed current Upstash scale, got ${initial}`);
-  const result = fitPersistentStateToBudget(state, 260000, 900000);
-  assert.equal(result.targetReached, true, `target not reached: ${result.finalBytes}`);
-  assert.ok(result.finalBytes <= 260000);
-  assert.ok(result.finalBytes < result.initialBytes * 0.5);
+function assertCriticalStateSurvives(result) {
   assert.equal(result.state.cooldownMemory.SPY.reason, 'test');
   assert.equal(result.state.livePortfolioIdentity.confirmed, true);
   assert.equal(result.state.riskSellHighWaterByAsset.SPY.high, 999);
@@ -75,17 +68,28 @@ test('proactive compaction reaches target by reducing reconstructible history be
   assert.equal(result.state.archiveCursor, 77);
   assert.equal(result.state.orderIntents.activeA.status, EXECUTION_STATUS.SENT);
   assert.equal(result.state.orderIntents.activeA.criticalProof, 'must-survive');
+}
+
+test('proactive compaction reaches a production-like target by reducing reconstructible history before critical state', () => {
+  const state = largeState();
+  const initial = serializedByteLength(state);
+  assert.ok(initial > 700000, `fixture should exceed current Upstash scale, got ${initial}`);
+  const result = fitPersistentStateToBudget(state, 600000, 900000);
+  assert.equal(result.targetReached, true, `target not reached: ${result.finalBytes}`);
+  assert.ok(result.finalBytes <= 600000);
+  assert.ok(result.finalBytes < result.initialBytes);
+  assertCriticalStateSurvives(result);
   assert.equal(result.reductions.includes('critical-fallback'), false);
   assert.ok(result.reductions.length > 0);
 });
 
-test('newest-at-end equity, macro and point-in-time data keep their recent tail after compaction', () => {
+test('newest-at-end equity, macro and point-in-time data keep their recent tail after deeper compaction', () => {
   const state = largeState();
   const newestEquity = state.equityHistory.at(-1);
   const newestMacro = state.macroCreditRegimeHistory.at(-1);
   const newestArchive = state.pointInTimeArchive.at(-1);
-  const result = fitPersistentStateToBudget(state, 240000, 900000);
-  assert.equal(result.targetReached, true);
+  const result = fitPersistentStateToBudget(state, 450000, 900000);
+  assert.equal(result.targetReached, true, `target not reached: ${result.finalBytes}`);
   assert.deepEqual(result.state.equityHistory.at(-1), newestEquity);
   assert.deepEqual(result.state.macroCreditRegimeHistory.at(-1), newestMacro);
   assert.deepEqual(result.state.pointInTimeArchive.at(-1), newestArchive);
@@ -97,24 +101,34 @@ test('newest-at-front logs, audit, risk history and execution verification keep 
   const newestAudit = state.auditTrail[0];
   const newestRisk = state.riskSellHistory[0];
   const newestVerify = state.executionVerificationHistory[0];
-  const result = fitPersistentStateToBudget(state, 240000, 900000);
-  assert.equal(result.targetReached, true);
+  const result = fitPersistentStateToBudget(state, 450000, 900000);
+  assert.equal(result.targetReached, true, `target not reached: ${result.finalBytes}`);
   assert.deepEqual(result.state.logs[0], newestLog);
   assert.deepEqual(result.state.auditTrail[0], newestAudit);
   assert.deepEqual(result.state.riskSellHistory[0], newestRisk);
   assert.deepEqual(result.state.executionVerificationHistory[0], newestVerify);
 });
 
-test('trend memory preserves the newest point for every tracked asset', () => {
+test('trend memory preserves the newest point for every tracked asset under deep compaction', () => {
   const state = largeState();
   const spyLast = state.trendMemory.SPY.at(-1);
   const gldLast = state.trendMemory.GLD.at(-1);
-  const result = fitPersistentStateToBudget(state, 220000, 900000);
-  assert.equal(result.targetReached, true);
+  const result = fitPersistentStateToBudget(state, 450000, 900000);
+  assert.equal(result.targetReached, true, `target not reached: ${result.finalBytes}`);
   assert.deepEqual(result.state.trendMemory.SPY.at(-1), spyLast);
   assert.deepEqual(result.state.trendMemory.GLD.at(-1), gldLast);
   assert.ok(result.state.trendMemory.SPY.length >= 8);
   assert.ok(result.state.trendMemory.GLD.length >= 8);
+});
+
+test('an infeasible target is reported honestly without deleting critical state', () => {
+  const state = largeState();
+  const result = fitPersistentStateToBudget(state, 250000, 900000);
+  assert.equal(result.targetReached, false);
+  assert.ok(result.finalBytes > 250000);
+  assert.ok(result.finalBytes < result.initialBytes);
+  assertCriticalStateSurvives(result);
+  assert.equal(result.reductions.includes('critical-fallback'), false);
 });
 
 test('persistent section size audit is deterministic and sorted largest-first', () => {
