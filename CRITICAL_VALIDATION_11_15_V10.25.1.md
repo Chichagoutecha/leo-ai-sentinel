@@ -21,38 +21,66 @@ Each scenario passes through Stage 12 Macro Intelligence → Stage 13 Event Risk
 5. Portfolio target weights must sum to 1 and obey the configured per-asset cap.
 6. An infeasible portfolio cap must fail closed as `INCONCLUSIVE`; it must never silently violate the cap.
 7. Institutional risk must reject incomplete history for any positively weighted asset.
-8. Institutional risk must reject stress scenarios that omit any positively weighted asset.
-9. Crisis risk must not be scored safer than the calm deterministic panel.
-10. Every layer remains `canTrade:false`, `canAuthorizeLive:false`; harness network/OpenAI/execution calls are exactly zero.
+8. Institutional risk must reject missing or incomplete stress scenarios.
+9. Invalid timestamps, malformed top-level payloads and invalid numeric options must never crash stages 11–15.
+10. Non-finite return values must never leak `NaN`/`Infinity` into portfolio or institutional-risk metrics.
+11. Crisis risk must not be scored safer than the calm deterministic panel.
+12. Every layer remains `canTrade:false`, `canAuthorizeLive:false`; harness network/OpenAI/execution calls are exactly zero.
 
-## Stage 14 defect found during hardening
+## Stage 14 defects found during hardening
 The first Stage 14 cap implementation could cap weights and then renormalize them. When too few eligible assets existed for the requested cap, the final normalization could raise weights back above `maxWeight` (for example two eligible assets with a 25% cap).
 
+A second runtime issue existed around malformed numerical inputs: invalid `maxWeight` / `minObservations`, non-array return payloads or non-finite observations could propagate into covariance/variance calculations or weaken validation thresholds.
+
 ### Fix
-`cappedNormalize()` now:
+Stage 14 now:
 - detects whether the cap is mathematically feasible (`ceil(1 / maxWeight)` positive-score assets required);
 - uses deterministic water-filling for feasible allocations;
 - verifies final sum and max observed weight;
-- returns `CONSTRAINT_INFEASIBLE` / `INCONCLUSIVE` instead of weakening the constraint.
+- returns `CONSTRAINT_INFEASIBLE` / `INCONCLUSIVE` instead of weakening the constraint;
+- applies safe defaults for malformed numeric options;
+- sanitizes return series and pairwise covariance inputs;
+- fails closed with `INCOMPLETE_CURRENT_PORTFOLIO_HISTORY` when a currently held asset lacks enough usable observations;
+- never emits `NaN`/`Infinity` portfolio volatility or marginal-variance metrics from malformed series.
 
-## Stage 15 completeness defects found during hardening
-The first institutional-risk foundation could understate risk in two incomplete-data cases:
+## Stage 15 completeness and runtime defects found during hardening
+The first institutional-risk foundation could understate risk in incomplete-data cases:
 
 1. A positively weighted asset with no return history could effectively contribute zero to the portfolio series because the minimum-length calculation ignored zero-length arrays.
 2. A stress scenario that omitted a positively weighted asset treated that missing shock as `0`, which could make the scenario look safer than the supplied data justified.
+3. Non-finite values inside return arrays could be converted to zero or poison covariance/risk metrics.
+4. An empty stress-scenario set could still produce a seemingly complete institutional risk status despite having no actual stress evidence.
+5. Invalid `minObservations` or timestamps could weaken gates or trigger runtime exceptions.
 
 ### Fix
-Stage 15 now fails closed before calculating VaR/CVaR or stress metrics:
-- `INCOMPLETE_WEIGHTED_HISTORY` when any positively weighted asset has fewer than the required observations;
-- `INCOMPLETE_STRESS_COVERAGE` when a supplied stress scenario omits any positively weighted asset;
+Stage 15 now fails closed before calculating VaR/CVaR or stress metrics with:
+- `INCOMPLETE_WEIGHTED_HISTORY` when any positively weighted asset has fewer than the required usable observations;
+- `NO_STRESS_SCENARIOS` when no explicit stress scenarios are supplied;
+- `INCOMPLETE_STRESS_COVERAGE` when a stress scenario omits any positively weighted asset;
+- `INSUFFICIENT_SYNCHRONIZED_HISTORY` when the cross-asset overlap after removing invalid rows is too short;
+- `NON_FINITE_RISK_METRIC` if a non-finite metric somehow survives upstream sanitization;
 - `NO_POSITIVE_WEIGHTS` when there is no valid portfolio to assess.
 
-Successful assessments explicitly report complete weighted history and stress coverage.
+Successful assessments explicitly report complete weighted history, synchronized history and stress coverage.
+
+## Runtime crash-resistance hardening across 11–15
+A dedicated adversarial test suite now exercises malformed inputs that normal scenario tests do not cover:
+
+- `null` / wrong-shape top-level inputs;
+- invalid dates that would otherwise crash `toISOString()`;
+- invalid previous-regime names and hysteresis options;
+- non-array event collections;
+- invalid optimizer thresholds;
+- `NaN`, `Infinity`, strings and missing return observations;
+- missing current-portfolio history;
+- missing and incomplete institutional stress scenarios.
+
+Stages 11–15 now normalize or fail closed on these cases rather than throwing runtime exceptions or silently weakening safety gates.
 
 These are Shadow correctness fixes only. They do not touch `index.js`, Render, eToro, LIVE sizing or execution.
 
 ## What passing means
-Passing means the technical composition of stages 11–15 is internally consistent under this deterministic stress matrix and is ready for empirical Shadow calibration.
+Passing means the technical composition of stages 11–15 is internally consistent under the deterministic stress matrix and adversarial malformed-input suite and is ready for empirical Shadow calibration.
 
 It does **not** mean:
 - predictive accuracy is proven;
