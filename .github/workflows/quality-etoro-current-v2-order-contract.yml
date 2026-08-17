@@ -1,0 +1,51 @@
+name: eToro Current v2 Order Contract Quality
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Syntax and contract tests
+        run: |
+          node --check etoro-current-order-contract.js
+          node --check test-etoro-current-order-contract.js
+          node --test test-etoro-current-order-contract.js
+      - name: Existing execution safety regressions
+        run: |
+          node --test test-etoro-execution-diagnostics-v10.22.10.js
+          node --test test-etoro-execution-evidence-observer.js
+      - name: Prove production runtime is untouched
+        shell: bash
+        run: |
+          git fetch origin v10.22.10.3-execution-evidence-observer --depth=1
+          git diff --exit-code origin/v10.22.10.3-execution-evidence-observer...HEAD -- index.js package.json ai-cost-optimizer.js ai-luna-temperature-compat.js ai-context-optimizer.js production-ai-preflight.js
+      - name: Prove no network or LIVE authority
+        shell: bash
+        run: |
+          if grep -Eqi 'global\.fetch\s*\(|fetch\s*\(|LIVE_EXECUTION_ARMED\s*=|executeBuy\s*\(|executeSell\s*\(' etoro-current-order-contract.js; then
+            echo 'Unexpected provider call or LIVE authority in v2 contract audit.'
+            exit 1
+          fi
+          grep -Fq 'canTrade:false' etoro-current-order-contract.js
+          grep -Fq 'canAuthorizeLive:false' etoro-current-order-contract.js
+          grep -Fq 'livePromotionAllowed:false' etoro-current-order-contract.js
+      - name: Prove no dual-submit fallback was introduced
+        shell: bash
+        run: |
+          git diff --exit-code origin/v10.22.10.3-execution-evidence-observer...HEAD -- index.js
