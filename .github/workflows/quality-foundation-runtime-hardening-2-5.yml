@@ -62,7 +62,11 @@ jobs:
             echo 'Unexpected LIVE authority in foundation modules.'
             exit 1
           fi
-          if grep -Eqi '/trading/execution/|require\(["'"']openai["'"']\)' shadow-foundation-runtime-guard.js; then
-            echo 'Unexpected execution/OpenAI dependency in runtime guard.'
+          if grep -Fqi '/trading/execution/' shadow-foundation-runtime-guard.js; then
+            echo 'Unexpected execution endpoint dependency in runtime guard.'
+            exit 1
+          fi
+          if grep -Fqi "require('openai')" shadow-foundation-runtime-guard.js || grep -Fqi 'require("openai")' shadow-foundation-runtime-guard.js; then
+            echo 'Unexpected OpenAI dependency in runtime guard.'
             exit 1
           fi
