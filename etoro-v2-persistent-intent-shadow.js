@@ -222,10 +222,14 @@ function classifyV2ForPersistentIntent({ httpStatus, data, portfolioEvidence } =
     confirmed = true;
   } else if (unified.classification === 'HTTP_ERROR') {
     status = EXECUTION_STATUS.REJECTED;
-  } else if (unified.businessAcknowledged || portfolio.orderVisible) {
+  } else if (portfolio.orderVisible) {
     status = EXECUTION_STATUS.ACCEPTED;
   } else if (portfolio.checked && portfolio.unchanged) {
+    // Mirrors verifyPortfolioAfterExecution: a completed fresh portfolio check
+    // without position/order evidence overrides a mere provider acknowledgement.
     status = EXECUTION_STATUS.NOT_FOUND;
+  } else if (unified.businessAcknowledged) {
+    status = EXECUTION_STATUS.ACCEPTED;
   } else {
     status = EXECUTION_STATUS.UNCERTAIN;
   }
