@@ -1,12 +1,12 @@
 {
   "name": "leo-ai-sentinel",
-  "version": "10.23.2",
-  "description": "LEO-AI SENTINEL with read-only Shadow Lab and independent Alpaca validation",
+  "version": "10.23.3",
+  "description": "LEO-AI SENTINEL with Shadow Lab, Alpaca validation and Quartr-ready fundamental intelligence",
   "main": "index.js",
   "scripts": {
-    "start": "node -r ./etoro-execution-diagnostics.js -r ./ai-cost-optimizer.js -r ./shadow-research-layer.js -r ./shadow-alpaca-validator.js -r ./shadow-intelligence-lab.js -r ./shadow-opportunity-discovery.js index.js",
-    "check": "node --check index.js && node --check etoro-execution-diagnostics.js && node --check ai-cost-optimizer.js && node --check shadow-research-layer.js && node --check shadow-alpaca-validator.js && node --check shadow-intelligence-lab.js && node --check shadow-opportunity-discovery.js && node --check test-shadow-intelligence-lab.js && node --check test-shadow-research-layer.js && node --check test-shadow-alpaca-validator.js && node --check test-shadow-opportunity-discovery.js",
-    "test": "node --test test-shadow-intelligence-lab.js test-shadow-research-layer.js test-shadow-alpaca-validator.js test-shadow-opportunity-discovery.js"
+    "start": "node -r ./etoro-execution-diagnostics.js -r ./ai-cost-optimizer.js -r ./shadow-research-layer.js -r ./shadow-alpaca-validator.js -r ./shadow-quartr-fundamental-agent.js -r ./shadow-intelligence-lab.js -r ./shadow-opportunity-discovery.js index.js",
+    "check": "node --check index.js && node --check etoro-execution-diagnostics.js && node --check ai-cost-optimizer.js && node --check shadow-research-layer.js && node --check shadow-alpaca-validator.js && node --check shadow-quartr-fundamental-agent.js && node --check shadow-intelligence-lab.js && node --check shadow-opportunity-discovery.js && node --check test-shadow-intelligence-lab.js && node --check test-shadow-research-layer.js && node --check test-shadow-alpaca-validator.js && node --check test-shadow-quartr-fundamental-agent.js && node --check test-shadow-opportunity-discovery.js",
+    "test": "node --test test-shadow-intelligence-lab.js test-shadow-research-layer.js test-shadow-alpaca-validator.js test-shadow-quartr-fundamental-agent.js test-shadow-opportunity-discovery.js"
   },
   "dependencies": {
     "express": "^4.18.2",
