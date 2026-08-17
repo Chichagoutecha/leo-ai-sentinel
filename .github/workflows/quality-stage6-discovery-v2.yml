@@ -1,0 +1,23 @@
+name: Stage 6 Opportunity Discovery 2 Quality
+on:
+  pull_request:
+    paths:
+      - 'shadow-opportunity-discovery-v2.js'
+      - 'test-shadow-opportunity-discovery-v2.js'
+      - 'OPPORTUNITY_DISCOVERY_STAGE6.md'
+      - '.github/workflows/quality-stage6-discovery-v2.yml'
+permissions: { contents: read }
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: node --check shadow-opportunity-discovery-v2.js && node --check test-shadow-opportunity-discovery-v2.js
+      - run: node --test test-shadow-opportunity-discovery-v2.js
+      - run: git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js
+      - run: |
+          if grep -Eqi 'trading/execution|LIVE_EXECUTION_ARMED\s*=|new OpenAI|chat\.completions' shadow-opportunity-discovery-v2.js; then
+            echo 'Unexpected LIVE/OpenAI/execution coupling'; exit 1; fi
