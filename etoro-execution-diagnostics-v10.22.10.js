@@ -1,12 +1,13 @@
 'use strict';
 
 /**
- * LEO-AI SENTINEL v10.22.10 — eToro execution diagnostics + safe breaker scope
+ * LEO-AI SENTINEL v10.22.10.2 — eToro execution diagnostics + exact open-order breaker scope
  *
  * Safety invariant:
  * - every eToro execution write is observed and diagnosed;
- * - an ambiguous HTTP 2xx may arm the local breaker ONLY for NEW OPEN orders;
- * - the breaker NEVER intercepts close/reduce/SELL execution routes.
+ * - an ambiguous HTTP 2xx may arm the local breaker ONLY for the two documented
+ *   POST endpoints that create a NEW market position;
+ * - cancellation, close, reduce and any other execution write are never breaker-blocked.
  *
  * This module does not alter strategy, sizing, allocation, identity validation,
  * LIVE_EXECUTION_ARMED or the existing ExecutionVerifier.
@@ -14,8 +15,11 @@
 
 const crypto = require('crypto');
 
-const DIAGNOSTIC_VERSION = 'v10.22.10-safe-open-order-breaker';
+const DIAGNOSTIC_VERSION = 'v10.22.10.2-exact-open-order-breaker';
 const ETORO_EXECUTION_PREFIX = 'https://public-api.etoro.com/api/v1/trading/execution/';
+const OPEN_BY_AMOUNT_URL = 'https://public-api.etoro.com/api/v1/trading/execution/market-open-orders/by-amount';
+const OPEN_BY_UNITS_URL = 'https://public-api.etoro.com/api/v1/trading/execution/market-open-orders/by-units';
+const BREAKER_ELIGIBLE_OPEN_URLS = new Set([OPEN_BY_AMOUNT_URL, OPEN_BY_UNITS_URL].map((url) => url.toLowerCase()));
 const DEFAULT_BREAKER_MINUTES = 720;
 const MAX_BODY_PREVIEW_CHARS = 8000;
 const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -59,8 +63,8 @@ function isEtoroExecutionRequest(url, method) {
 }
 function isEtoroNewOpenOrderRequest(url, method) {
   if (!isEtoroExecutionRequest(url, method)) return false;
-  const normalized = normalizeUrl(url).toLowerCase();
-  return normalized.includes('/trading/execution/market-open-orders/');
+  if (String(method || '').toUpperCase() !== 'POST') return false;
+  return BREAKER_ELIGIBLE_OPEN_URLS.has(normalizeUrl(url).toLowerCase());
 }
 function executionIntent(url, method) {
   if (!isEtoroExecutionRequest(url, method)) return 'NON_EXECUTION';
@@ -165,13 +169,13 @@ function publishDiagnostic(payload, level = 'log') {
 function armOpenOrderBreaker(reason, diagnostic) {
   if (breakerDurationMs <= 0) return false;
   breakerUntilMs = Date.now() + breakerDurationMs;
-  breakerCause = { scope:'NEW_OPEN_ORDERS_ONLY', reason, armedAt:nowIso(), until:new Date(breakerUntilMs).toISOString(), requestId:diagnostic.requestId || null, url:diagnostic.url || null, httpStatus:diagnostic.httpStatus || null };
+  breakerCause = { scope:'EXACT_NEW_OPEN_POST_ENDPOINTS_ONLY', reason, armedAt:nowIso(), until:new Date(breakerUntilMs).toISOString(), requestId:diagnostic.requestId || null, url:diagnostic.url || null, httpStatus:diagnostic.httpStatus || null };
   return true;
 }
 function makeBreakerResponse(url, method, requestId) {
   const remainingMs = Math.max(0, breakerUntilMs - Date.now());
   publishDiagnostic({ diagnosticVersion:DIAGNOSTIC_VERSION, event:'LOCAL_OPEN_ORDER_CIRCUIT_BREAKER_BLOCK', at:nowIso(), method, url:normalizeUrl(url), executionIntent:'OPEN_NEW_POSITION', requestId:requestId || null, remainingSeconds:Math.ceil(remainingMs / 1000), breakerCause }, 'warn');
-  return new Response(JSON.stringify({ errorCode:'LOCAL_OPEN_ORDER_CIRCUIT_BREAKER', message:'Nouvelle ouverture LIVE bloquée localement après une réponse eToro ambiguë. Les routes de fermeture/réduction restent autorisées.', retryAfterSeconds:Math.ceil(remainingMs / 1000) }), { status:409, statusText:'Local open-order circuit breaker', headers:{ 'content-type':'application/json', 'x-leo-local-open-order-breaker':'1' } });
+  return new Response(JSON.stringify({ errorCode:'LOCAL_OPEN_ORDER_CIRCUIT_BREAKER', message:'Nouvelle ouverture LIVE bloquée localement après une réponse eToro ambiguë. Les routes de fermeture/réduction/annulation restent autorisées.', retryAfterSeconds:Math.ceil(remainingMs / 1000) }), { status:409, statusText:'Local open-order circuit breaker', headers:{ 'content-type':'application/json', 'x-leo-local-open-order-breaker':'1' } });
 }
 
 global.fetch = async function leoEtoroDiagnosticFetch(input, init = {}) {
@@ -203,7 +207,7 @@ global.fetch = async function leoEtoroDiagnosticFetch(input, init = {}) {
     diagnosticVersion:DIAGNOSTIC_VERSION, event:'ETORO_EXECUTION_HTTP_RESPONSE', at:nowIso(), classification:classification.classification,
     ambiguous:classification.ambiguous, businessAcknowledged:classification.businessAcknowledged, businessRejected:classification.businessRejected,
     businessFields:classification.businessFields || null, method, url:normalizeUrl(url), responseUrl:normalizeUrl(response.url || url),
-    executionIntent:intent, breakerEligible:openOrderRequest, closeAndReduceRoutesNeverBlocked:true, redirected:Boolean(response.redirected),
+    executionIntent:intent, breakerEligible:openOrderRequest, closeReduceCancelNeverBlocked:true, redirected:Boolean(response.redirected),
     requestId:requestId || null, requestBody:safeRequestBody(init.body), durationMs:Date.now() - startedAtMs, httpStatus:response.status,
     httpStatusText:response.statusText || null, httpOk:response.ok, responseHeaders:safeResponseHeaders(response),
     responseBodyLength:rawBody == null ? null : rawBody.length, responseBodySha256:rawBody == null ? null : safeHash(rawBody),
@@ -220,8 +224,9 @@ global.fetch = async function leoEtoroDiagnosticFetch(input, init = {}) {
 
 global.__LEO_ETORO_EXECUTION_DIAGNOSTICS_STATE__ = () => ({
   diagnosticVersion:DIAGNOSTIC_VERSION,
-  breakerScope:'NEW_OPEN_ORDERS_ONLY',
-  closeAndReduceRoutesNeverBlocked:true,
+  breakerScope:'EXACT_NEW_OPEN_POST_ENDPOINTS_ONLY',
+  breakerEligibleOpenUrls:[OPEN_BY_AMOUNT_URL, OPEN_BY_UNITS_URL],
+  closeReduceCancelNeverBlocked:true,
   breakerMinutes,
   breakerActive:Date.now() < breakerUntilMs,
   breakerUntil:breakerUntilMs ? new Date(breakerUntilMs).toISOString() : null,
@@ -229,6 +234,6 @@ global.__LEO_ETORO_EXECUTION_DIAGNOSTICS_STATE__ = () => ({
   lastDiagnostic
 });
 
-console.log(JSON.stringify({ component:'LEO_ETORO_EXECUTION_DIAGNOSTICS', version:DIAGNOSTIC_VERSION, enabled:true, breakerMinutes, breakerScope:'NEW_OPEN_ORDERS_ONLY', closeAndReduceRoutesNeverBlocked:true, liveExecutionArmedModified:false, secretsLogged:false }));
+console.log(JSON.stringify({ component:'LEO_ETORO_EXECUTION_DIAGNOSTICS', version:DIAGNOSTIC_VERSION, enabled:true, breakerMinutes, breakerScope:'EXACT_NEW_OPEN_POST_ENDPOINTS_ONLY', closeReduceCancelNeverBlocked:true, liveExecutionArmedModified:false, secretsLogged:false }));
 
-module.exports = { DIAGNOSTIC_VERSION, classifyExecutionResponse, isEmptyJson, redactText, safeRequestBody, isEtoroExecutionRequest, isEtoroNewOpenOrderRequest, executionIntent };
+module.exports = { DIAGNOSTIC_VERSION, OPEN_BY_AMOUNT_URL, OPEN_BY_UNITS_URL, classifyExecutionResponse, isEmptyJson, redactText, safeRequestBody, isEtoroExecutionRequest, isEtoroNewOpenOrderRequest, executionIntent };
