@@ -20,8 +20,10 @@ Each scenario passes through Stage 12 Macro Intelligence → Stage 13 Event Risk
 4. FOMC risk may block a new BUY but must never gain SELL/trading authority.
 5. Portfolio target weights must sum to 1 and obey the configured per-asset cap.
 6. An infeasible portfolio cap must fail closed as `INCONCLUSIVE`; it must never silently violate the cap.
-7. Crisis risk must not be scored safer than the calm deterministic panel.
-8. Every layer remains `canTrade:false`, `canAuthorizeLive:false`; harness network/OpenAI/execution calls are exactly zero.
+7. Institutional risk must reject incomplete history for any positively weighted asset.
+8. Institutional risk must reject stress scenarios that omit any positively weighted asset.
+9. Crisis risk must not be scored safer than the calm deterministic panel.
+10. Every layer remains `canTrade:false`, `canAuthorizeLive:false`; harness network/OpenAI/execution calls are exactly zero.
 
 ## Stage 14 defect found during hardening
 The first Stage 14 cap implementation could cap weights and then renormalize them. When too few eligible assets existed for the requested cap, the final normalization could raise weights back above `maxWeight` (for example two eligible assets with a 25% cap).
@@ -33,7 +35,21 @@ The first Stage 14 cap implementation could cap weights and then renormalize the
 - verifies final sum and max observed weight;
 - returns `CONSTRAINT_INFEASIBLE` / `INCONCLUSIVE` instead of weakening the constraint.
 
-This is a Shadow correctness fix only. It does not touch `index.js`, Render, eToro or LIVE sizing/execution.
+## Stage 15 completeness defects found during hardening
+The first institutional-risk foundation could understate risk in two incomplete-data cases:
+
+1. A positively weighted asset with no return history could effectively contribute zero to the portfolio series because the minimum-length calculation ignored zero-length arrays.
+2. A stress scenario that omitted a positively weighted asset treated that missing shock as `0`, which could make the scenario look safer than the supplied data justified.
+
+### Fix
+Stage 15 now fails closed before calculating VaR/CVaR or stress metrics:
+- `INCOMPLETE_WEIGHTED_HISTORY` when any positively weighted asset has fewer than the required observations;
+- `INCOMPLETE_STRESS_COVERAGE` when a supplied stress scenario omits any positively weighted asset;
+- `NO_POSITIVE_WEIGHTS` when there is no valid portfolio to assess.
+
+Successful assessments explicitly report complete weighted history and stress coverage.
+
+These are Shadow correctness fixes only. They do not touch `index.js`, Render, eToro, LIVE sizing or execution.
 
 ## What passing means
 Passing means the technical composition of stages 11–15 is internally consistent under this deterministic stress matrix and is ready for empirical Shadow calibration.
