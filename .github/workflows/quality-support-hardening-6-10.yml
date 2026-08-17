@@ -9,6 +9,7 @@ on:
       - 'shadow-adaptive-ai-router.js'
       - 'shadow-ai-value-experiment.js'
       - 'test-support-runtime-hardening-6-10.js'
+      - 'test-full-shadow-functional-integration-6-15.js'
       - 'SUPPORT_HARDENING_6_10_V10.25.2.md'
       - '.github/workflows/quality-support-hardening-6-10.yml'
 
@@ -39,12 +40,16 @@ jobs:
           node --check shadow-adaptive-ai-router.js
           node --check shadow-ai-value-experiment.js
           node --check test-support-runtime-hardening-6-10.js
+          node --check test-full-shadow-functional-integration-6-15.js
 
       - name: Existing stage 6-10 tests
         run: node --test test-shadow-opportunity-discovery-v2.js test-shadow-dynamic-universe-manager.js test-shadow-profitability-cost-guard.js test-shadow-adaptive-ai-router.js test-shadow-ai-value-experiment.js
 
       - name: Adversarial runtime hardening tests
         run: node --test test-support-runtime-hardening-6-10.js
+
+      - name: Full functional Shadow integration 6-15
+        run: node --test test-full-shadow-functional-integration-6-15.js
 
       - name: Prove production strategy and start command untouched
         shell: bash
