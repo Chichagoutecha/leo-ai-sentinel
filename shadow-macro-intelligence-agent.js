@@ -6,7 +6,7 @@
  * No network client, no OpenAI, no eToro execution, no LIVE mutation.
  */
 
-const VERSION = 'v10.24.0-macro-intelligence-agent';
+const VERSION = 'v10.24.0.1-macro-intelligence-runtime-safe';
 const DEFAULT_MAX_AGE_DAYS = Object.freeze({
   policyRate: 120, inflationYoY: 45, coreInflationYoY: 45, unemployment: 45,
   payrollTrend: 45, pmi: 45, yield2y: 3, yield10y: 3, dxyTrendPct: 3,
@@ -15,21 +15,29 @@ const DEFAULT_MAX_AGE_DAYS = Object.freeze({
 
 let stats = { analyses: 0, staleInputs: 0, futureInputs: 0, inconclusive: 0, last: null };
 
-function clamp(n, min, max) { return Math.max(min, Math.min(max, Number(n))); }
+function clamp(n, min, max) { const x = Number(n); return Number.isFinite(x) ? Math.max(min, Math.min(max, x)) : min; }
 function finite(v) { const n = Number(v); return Number.isFinite(n) ? n : null; }
 function iso(v) { const t = Date.parse(v); return Number.isFinite(t) ? new Date(t).toISOString() : null; }
 function daysBetween(a, b) { return (Date.parse(a) - Date.parse(b)) / 86400000; }
 function sanitize(s, max = 160) { return String(s ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max); }
+function safeDate(value) {
+  if (value instanceof Date && Number.isFinite(value.getTime())) return new Date(value.getTime());
+  const t = value == null ? NaN : Date.parse(value);
+  return Number.isFinite(t) ? new Date(t) : new Date();
+}
+function safeObject(value) { return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
 
 function normalizeObservation(name, raw, now = new Date()) {
-  if (!raw || typeof raw !== 'object') return { name, valid: false, reason: 'MISSING' };
+  const effectiveNow = safeDate(now);
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { name, valid: false, reason: 'MISSING' };
   const value = finite(raw.value);
   const asOf = iso(raw.asOf);
   if (value == null || !asOf) return { name, valid: false, reason: 'INVALID_VALUE_OR_TIME' };
-  const nowIso = now.toISOString();
+  const nowIso = effectiveNow.toISOString();
   const ageDays = daysBetween(nowIso, asOf);
   if (ageDays < -0.01) return { name, value, asOf, valid: false, reason: 'FUTURE', ageDays };
-  const maxAgeDays = finite(raw.maxAgeDays) ?? DEFAULT_MAX_AGE_DAYS[name] ?? 7;
+  const configuredMaxAge = finite(raw.maxAgeDays);
+  const maxAgeDays = configuredMaxAge != null && configuredMaxAge >= 0 ? configuredMaxAge : (DEFAULT_MAX_AGE_DAYS[name] ?? 7);
   if (ageDays > maxAgeDays) return { name, value, asOf, valid: false, reason: 'STALE', ageDays, maxAgeDays };
   return {
     name, value, asOf, ageDays, maxAgeDays, valid: true,
@@ -39,7 +47,8 @@ function normalizeObservation(name, raw, now = new Date()) {
 }
 
 function scoreMacro(observations) {
-  const v = (k) => observations[k]?.valid ? observations[k].value : null;
+  const obs = safeObject(observations);
+  const v = (k) => obs[k]?.valid ? obs[k].value : null;
   let growth = 0, inflation = 0, conditions = 0;
   const pmi = v('pmi');
   const unemp = v('unemployment');
@@ -84,9 +93,11 @@ function scoreMacro(observations) {
 }
 
 function analyzeMacro(input = {}, options = {}) {
-  const now = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
+  const safeInput = safeObject(input);
+  const safeOptions = safeObject(options);
+  const now = safeDate(safeOptions.now);
   const normalized = {};
-  for (const name of Object.keys(DEFAULT_MAX_AGE_DAYS)) normalized[name] = normalizeObservation(name, input[name], now);
+  for (const name of Object.keys(DEFAULT_MAX_AGE_DAYS)) normalized[name] = normalizeObservation(name, safeInput[name], now);
   const valid = Object.values(normalized).filter(x => x.valid);
   const stale = Object.values(normalized).filter(x => x.reason === 'STALE').length;
   const future = Object.values(normalized).filter(x => x.reason === 'FUTURE').length;
@@ -109,4 +120,4 @@ function getState() { return { version: VERSION, stats: { ...stats }, safety: { 
 global.__LEO_MACRO_INTELLIGENCE_STATE__ = getState;
 global.__LEO_MACRO_INTELLIGENCE_ANALYZE__ = analyzeMacro;
 
-module.exports = { VERSION, DEFAULT_MAX_AGE_DAYS, normalizeObservation, scoreMacro, analyzeMacro, getState };
+module.exports = { VERSION, DEFAULT_MAX_AGE_DAYS, safeDate, normalizeObservation, scoreMacro, analyzeMacro, getState };
