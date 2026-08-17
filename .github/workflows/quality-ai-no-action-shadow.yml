@@ -1,0 +1,48 @@
+name: AI No-Action Shadow Quality
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Syntax checks
+        run: |
+          node --check ai-no-action-shadow.js
+          node --check test-ai-no-action-shadow.js
+          node --check test-ai-no-action-shadow-integration.js
+      - name: Conservative decision-gate analysis
+        run: node --test test-ai-no-action-shadow.js
+      - name: Prove shadow analyzer never skips provider or mutates response
+        run: AI_REQUEST_CACHE_MINUTES=0 node -r ./ai-no-action-shadow.js --test test-ai-no-action-shadow-integration.js
+      - name: Prove production runtime and strategy are untouched
+        shell: bash
+        run: |
+          git fetch origin v10.22.9.5-ai-context-budgeting --depth=1
+          git diff --exit-code origin/v10.22.9.5-ai-context-budgeting...HEAD -- index.js ai-cost-optimizer.js ai-luna-temperature-compat.js ai-context-optimizer.js package.json
+      - name: Prove no LIVE or eToro execution authority
+        shell: bash
+        run: |
+          if grep -Eqi 'LIVE_EXECUTION_ARMED\s*=|canTrade\s*:\s*true|canAuthorizeLive\s*:\s*true|automaticLivePromotion\s*:\s*true' ai-no-action-shadow.js; then
+            echo 'Unexpected LIVE authority in shadow analyzer.'
+            exit 1
+          fi
+          if grep -Fqi '/trading/execution/' ai-no-action-shadow.js; then
+            echo 'Unexpected eToro execution endpoint in shadow analyzer.'
+            exit 1
+          fi
+          if grep -Eqi 'requestActuallySkipped\s*:\s*true|responseModified\s*:\s*true' ai-no-action-shadow.js; then
+            echo 'Shadow analyzer must never skip requests or modify responses.'
+            exit 1
+          fi
