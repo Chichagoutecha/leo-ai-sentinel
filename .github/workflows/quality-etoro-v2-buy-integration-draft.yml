@@ -1,0 +1,55 @@
+name: eToro v2 Buy Integration Draft Quality
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Syntax and draft integration tests
+        run: |
+          node --check etoro-current-order-contract.js
+          node --check etoro-v2-buy-integration-draft.js
+          node --check test-etoro-v2-buy-integration-draft.js
+          node --test test-etoro-current-order-contract.js
+          node --test test-etoro-v2-buy-integration-draft.js
+      - name: Existing execution safety regressions
+        run: |
+          node --test test-etoro-execution-diagnostics-v10.22.10.js
+          node --test test-etoro-execution-evidence-observer.js
+      - name: Prove production runtime is untouched
+        shell: bash
+        run: |
+          git fetch origin v10.22.10.4-current-v2-order-contract --depth=1
+          git diff --exit-code origin/v10.22.10.4-current-v2-order-contract...HEAD -- index.js package.json render.yaml render.yml
+      - name: Prove no default network or dual-submit authority
+        shell: bash
+        run: |
+          if grep -Eqi 'global\.fetch\s*\(|fetch\s*\(' etoro-v2-buy-integration-draft.js; then
+            echo 'Unexpected default network transport in draft integration.'
+            exit 1
+          fi
+          grep -Fq 'defaultNetworkTransport: false' etoro-v2-buy-integration-draft.js
+          grep -Fq 'liveAuthority: false' etoro-v2-buy-integration-draft.js
+          grep -Fq 'productionRoutingChanged: false' etoro-v2-buy-integration-draft.js
+          grep -Fq 'automaticRetry: false' etoro-v2-buy-integration-draft.js
+          grep -Fq 'dualSubmitFallback: false' etoro-v2-buy-integration-draft.js
+      - name: Prove integration remains disconnected from production executeBuy
+        shell: bash
+        run: |
+          git diff --exit-code origin/v10.22.10.4-current-v2-order-contract...HEAD -- index.js
