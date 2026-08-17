@@ -1,0 +1,70 @@
+name: eToro v2 BUY Production Migration Draft Quality
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run stacked v2 contract and migration tests
+        run: |
+          node --check etoro-v2-buy-production-migration-draft.js
+          node --check test-etoro-v2-buy-production-migration-draft.js
+          node --test test-etoro-current-order-contract.js
+          node --test test-etoro-v2-buy-integration-draft.js
+          node --test test-etoro-v2-persistent-intent-shadow.js
+          node --test test-etoro-v2-buy-production-migration-draft.js
+      - name: Existing execution safety regressions
+        run: |
+          node --test test-etoro-execution-diagnostics-v10.22.10.js
+          node --test test-etoro-execution-evidence-observer.js
+      - name: Generate the exact candidate index copy
+        run: |
+          node etoro-v2-buy-production-migration-draft.js index.js /tmp/index-v2-buy-production-draft.js
+          node --check /tmp/index-v2-buy-production-draft.js
+          test -s /tmp/index-v2-buy-production-draft.js
+          ! cmp -s index.js /tmp/index-v2-buy-production-draft.js
+      - name: Prove the tracked production runtime remains untouched
+        shell: bash
+        run: |
+          git fetch origin v10.22.10.6-v2-persistent-intent-shadow --depth=1
+          git diff --exit-code origin/v10.22.10.6-v2-persistent-intent-shadow...HEAD -- index.js package.json render.yaml render.yml
+      - name: Audit candidate diff shape
+        shell: bash
+        run: |
+          diff -u index.js /tmp/index-v2-buy-production-draft.js > /tmp/etoro-v2-buy-production-draft.diff || true
+          test -s /tmp/etoro-v2-buy-production-draft.diff
+          HUNKS=$(grep -c '^@@ ' /tmp/etoro-v2-buy-production-draft.diff || true)
+          test "$HUNKS" -eq 2
+          test "$(grep -Fc 'https://public-api.etoro.com/api/v1/trading/execution/market-open-orders/by-amount' /tmp/index-v2-buy-production-draft.js || true)" -eq 0
+          test "$(grep -Fc 'https://public-api.etoro.com/api/v2/trading/execution/orders' /tmp/index-v2-buy-production-draft.js || true)" -eq 1
+          grep -Fq 'action: "open"' /tmp/index-v2-buy-production-draft.js
+          grep -Fq 'transaction: "buy"' /tmp/index-v2-buy-production-draft.js
+          grep -Fq 'orderType: "mkt"' /tmp/index-v2-buy-production-draft.js
+          grep -Fq 'orderCurrency: "usd"' /tmp/index-v2-buy-production-draft.js
+          grep -Fq 'token: first?.token' /tmp/index-v2-buy-production-draft.js
+          grep -Fq 'referenceId: first?.referenceId' /tmp/index-v2-buy-production-draft.js
+      - name: Prove one-shot execution and post-order verification survive candidate transform
+        shell: bash
+        run: |
+          grep -Fq '{ label: `eToro LIVE BUY ${asset}`, retries: 0 }' /tmp/index-v2-buy-production-draft.js
+          grep -Fq 'createOrderIntent("BUY", asset, safeAmount, {' /tmp/index-v2-buy-production-draft.js
+          grep -Fq 'updateOrderIntentStatus(intent.id, EXECUTION_STATUS.SENT, {' /tmp/index-v2-buy-production-draft.js
+          grep -Fq 'verifyRealPortfolioBeforeExecution({ asset, side: "BUY", amount: safeAmount })' /tmp/index-v2-buy-production-draft.js
+          grep -Fq 'verifyPortfolioAfterExecution({' /tmp/index-v2-buy-production-draft.js
+          grep -Fq 'if (businessAcknowledged || verification.observed) setCooldown(asset);' /tmp/index-v2-buy-production-draft.js
