@@ -53,6 +53,14 @@ test('Stage 15 fails closed when a weighted asset lacks enough history',()=>{
   assert.equal(result.safety.canTrade,false);
 });
 
+test('Stage 15 fails closed when no explicit stress scenarios are supplied',()=>{
+  const r=returnsSet(false);
+  const result=assessInstitutionalRisk({weights:{SPY:.7,QQQ:.3},returns:{SPY:r.SPY,QQQ:r.QQQ}},{minObservations:60,now:'2026-08-17T10:00:00.000Z'});
+  assert.equal(result.status,'INCONCLUSIVE');
+  assert.equal(result.reason,'NO_STRESS_SCENARIOS');
+  assert.equal(result.safety.canAuthorizeLive,false);
+});
+
 test('Stage 15 fails closed when stress coverage omits a weighted asset',()=>{
   const r=returnsSet(false);
   const result=assessInstitutionalRisk({
