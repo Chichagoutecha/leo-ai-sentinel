@@ -27,11 +27,12 @@ jobs:
           node --check test-etoro-execution-evidence-observer.js
       - name: Evidence observer regressions
         run: node --test test-etoro-execution-evidence-observer.js
-      - name: Prove parent production runtime is untouched
+      - name: Prove parent runtime changed only by exact validated v2 BUY migration
         shell: bash
         run: |
-          git fetch origin v10.22.10.1-production-safety-release-candidate --depth=1
-          git diff --exit-code origin/v10.22.10.1-production-safety-release-candidate...HEAD -- index.js package.json ai-cost-optimizer.js ai-luna-temperature-compat.js ai-context-optimizer.js production-ai-preflight.js etoro-execution-diagnostics-v10.22.10.js
+          git show a11df7f1978208715a1481f5a415e947d3404a92:index.js > /tmp/index-before-v2.js
+          node etoro-v2-buy-runtime-draft-audit.js /tmp/index-before-v2.js index.js
+          git diff --exit-code a11df7f1978208715a1481f5a415e947d3404a92...HEAD -- package.json ai-cost-optimizer.js ai-luna-temperature-compat.js ai-context-optimizer.js production-ai-preflight.js etoro-execution-diagnostics-v10.22.10.js render.yaml render.yml
       - name: Prove observer adds no provider calls or LIVE authority
         shell: bash
         run: |
