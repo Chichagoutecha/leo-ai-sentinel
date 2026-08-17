@@ -10,7 +10,7 @@ test('optimizer + Luna compat removes temperature before provider request and pr
   let providerBody = null;
   const previousFetch = global.fetch;
 
-  global.fetch = async (_url, init = {}) => {
+  const fakeProviderFetch = async (_url, init = {}) => {
     providerBody = JSON.parse(String(init.body || '{}'));
     return new Response(JSON.stringify({
       id: 'chatcmpl-leo-test',
@@ -30,9 +30,11 @@ test('optimizer + Luna compat removes temperature before provider request and pr
     });
   };
 
+  global.fetch = fakeProviderFetch;
+
   try {
     const OpenAI = require('openai');
-    const client = new OpenAI({ apiKey: 'test-key-not-a-secret' });
+    const client = new OpenAI({ apiKey: 'test-key-not-a-secret', fetch: fakeProviderFetch });
     const response = await client.chat.completions.create({
       model: 'gpt-4.1-mini',
       temperature: 0.1,
