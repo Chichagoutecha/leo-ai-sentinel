@@ -21,13 +21,24 @@ test('removes explicit temperature for Luna without mutating caller input', () =
   assert.deepEqual(output.messages, input.messages);
 });
 
-test('also removes temperature=1 so provider default is used explicitly', () => {
+test('removes temperature when optimizer force-routes another requested model to Luna', () => {
+  const output = sanitizeLunaParams(
+    { model: 'gpt-4.1-mini', temperature: 0.1 },
+    { forcePrimaryModel: true, primaryModel: 'gpt-5.6-luna' }
+  );
+  assert.equal(Object.prototype.hasOwnProperty.call(output, 'temperature'), false);
+});
+
+test('also removes temperature=1 so provider default is used', () => {
   const output = sanitizeLunaParams({ model: 'gpt-5.6-luna', temperature: 1 });
   assert.equal(Object.prototype.hasOwnProperty.call(output, 'temperature'), false);
 });
 
-test('does not alter temperature for non-Luna models', () => {
-  const output = sanitizeLunaParams({ model: 'gpt-4.1-mini', temperature: 0.1 });
+test('does not alter temperature for a non-Luna effective model', () => {
+  const output = sanitizeLunaParams(
+    { model: 'gpt-4.1-mini', temperature: 0.1 },
+    { forcePrimaryModel: false, primaryModel: 'gpt-5.6-luna' }
+  );
   assert.equal(output.temperature, 0.1);
 });
 
