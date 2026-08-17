@@ -11,6 +11,7 @@ const {assessInstitutionalRisk,covariance:riskCovariance}=require('./shadow-inst
 function returns(n=80,base=.0004,noise=.006){
   return Array.from({length:n},(_,i)=>base+Math.sin(i/5)*noise);
 }
+function seeded(seed){let x=seed>>>0;return()=>{x=(1664525*x+1013904223)>>>0;return x/4294967296;};}
 
 test('Stages 11-15 never throw on null or malformed top-level inputs',()=>{
   assert.doesNotThrow(()=>analyzeMacro(null,null));
@@ -109,4 +110,25 @@ test('institutional risk remains finite with isolated invalid rows when enough s
   assert.ok(Number.isFinite(riskCovariance(a,b)));
   assert.ok(Number.isFinite(Date.parse(result.at)));
   assert.equal(result.safety.canTrade,false);
+});
+
+test('deterministic malformed-input sweep never throws and never grants LIVE authority',()=>{
+  const rnd=seeded(20260817);
+  const junk=[null,undefined,'bad',42,[],{},NaN,Infinity,{now:'bad'}];
+  for(let i=0;i<100;i++){
+    const pick=()=>junk[Math.floor(rnd()*junk.length)];
+    const calls=[
+      ()=>analyzeMacro(pick(),pick()),
+      ()=>evaluateEventRisk(pick(),pick()),
+      ()=>evaluateRegime(pick(),pick()),
+      ()=>optimizePortfolio(pick(),pick()),
+      ()=>assessInstitutionalRisk(pick(),pick())
+    ];
+    for(const call of calls){
+      let result;
+      assert.doesNotThrow(()=>{result=call();});
+      assert.notEqual(result?.safety?.canTrade,true);
+      assert.notEqual(result?.safety?.canAuthorizeLive,true);
+    }
+  }
 });
