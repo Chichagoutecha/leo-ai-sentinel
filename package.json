@@ -1,7 +1,7 @@
 {
   "name": "leo-ai-sentinel",
   "version": "10.22.9",
-  "description": "LEO-AI SENTINEL with hardened persistent AI cost controls, GPT-5.6 Luna compatibility and production AI preload preflight",
+  "description": "LEO-AI SENTINEL with concurrency-hardened persistent AI cost controls, GPT-5.6 Luna compatibility and production AI preload preflight",
   "main": "index.js",
   "scripts": {
     "start": "node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./production-ai-preflight.js index.js",
