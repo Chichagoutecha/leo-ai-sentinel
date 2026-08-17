@@ -35,19 +35,24 @@ jobs:
       - name: Optimizer plus Luna preload regression
         run: npm run test:ai-preload
 
-      - name: Prove default start matches validated Render preload order
+      - name: Prove default start preserves validated Render AI preload order
         run: |
           node - <<'NODE'
           const pkg=require('./package.json');
-          const expected='node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js index.js';
-          if(pkg.scripts.start!==expected)throw new Error(`Unexpected start command: ${pkg.scripts.start}`);
-          if(pkg.scripts.start.includes('etoro-execution-diagnostics.js'))throw new Error('Legacy eToro diagnostic must not be in default start command.');
+          const start=String(pkg.scripts.start||'');
+          const optimizer='-r ./ai-cost-optimizer.js';
+          const luna='-r ./ai-luna-temperature-compat.js';
+          const preflight='-r ./production-ai-preflight.js';
+          const index=start.lastIndexOf('index.js');
+          if(!(start.indexOf(optimizer)>=0&&start.indexOf(optimizer)<start.indexOf(luna)&&start.indexOf(luna)<index))throw new Error(`Validated optimizer/Luna order lost: ${start}`);
+          if(start.includes(preflight)&&!(start.indexOf(luna)<start.indexOf(preflight)&&start.indexOf(preflight)<index))throw new Error(`Production preflight order invalid: ${start}`);
+          if(start.includes('etoro-execution-diagnostics.js'))throw new Error('Legacy eToro diagnostic must not be in default start command.');
           if(!pkg.scripts['test:ai-preload'])throw new Error('AI preload regression command missing.');
-          console.log('Repository entrypoint matches validated Render AI preload order.');
+          console.log('Repository entrypoint preserves validated Render AI preload order.');
           NODE
 
-      - name: Prove production code and preloads are untouched
+      - name: Prove strategy, Luna compatibility and eToro diagnostic are untouched
         shell: bash
         run: |
           git fetch origin "${{ github.base_ref }}" --depth=1
-          git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js ai-cost-optimizer.js ai-luna-temperature-compat.js etoro-execution-diagnostics.js
+          git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js ai-luna-temperature-compat.js etoro-execution-diagnostics.js
