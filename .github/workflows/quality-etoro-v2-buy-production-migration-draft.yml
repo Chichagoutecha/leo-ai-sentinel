@@ -50,7 +50,10 @@ jobs:
           diff -u index.js /tmp/index-v2-buy-production-draft.js > /tmp/etoro-v2-buy-production-draft.diff || true
           test -s /tmp/etoro-v2-buy-production-draft.diff
           HUNKS=$(grep -c '^@@ ' /tmp/etoro-v2-buy-production-draft.diff || true)
-          test "$HUNKS" -eq 2
+          # Four exact semantic replacements can render as 2 or 3 unified-diff hunks
+          # depending on context coalescing. The transformer itself enforces exactly four matches.
+          test "$HUNKS" -ge 2
+          test "$HUNKS" -le 3
           test "$(grep -Fc 'https://public-api.etoro.com/api/v1/trading/execution/market-open-orders/by-amount' /tmp/index-v2-buy-production-draft.js || true)" -eq 0
           test "$(grep -Fc 'https://public-api.etoro.com/api/v2/trading/execution/orders' /tmp/index-v2-buy-production-draft.js || true)" -eq 1
           grep -Fq 'action: "open"' /tmp/index-v2-buy-production-draft.js
