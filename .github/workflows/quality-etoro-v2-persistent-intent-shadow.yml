@@ -1,0 +1,64 @@
+name: eToro v2 Persistent Intent Shadow Quality
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Syntax and stacked v2 tests
+        run: |
+          node --check etoro-current-order-contract.js
+          node --check etoro-v2-buy-integration-draft.js
+          node --check etoro-v2-persistent-intent-shadow.js
+          node --check test-etoro-v2-persistent-intent-shadow.js
+          node --test test-etoro-current-order-contract.js
+          node --test test-etoro-v2-buy-integration-draft.js
+          node --test test-etoro-v2-persistent-intent-shadow.js
+      - name: Existing execution safety regressions
+        run: |
+          node --test test-etoro-execution-diagnostics-v10.22.10.js
+          node --test test-etoro-execution-evidence-observer.js
+      - name: Prove production runtime and Render are untouched
+        shell: bash
+        run: |
+          git fetch origin v10.22.10.5-v2-buy-integration-draft --depth=1
+          git diff --exit-code origin/v10.22.10.5-v2-buy-integration-draft...HEAD -- index.js package.json render.yaml render.yml
+      - name: Prove shadow bridge has no provider transport or LIVE authority
+        shell: bash
+        run: |
+          if grep -Eqi 'fetch[[:space:]]*\(' etoro-v2-persistent-intent-shadow.js; then
+            echo 'Unexpected provider transport in persistent-intent shadow bridge.'
+            exit 1
+          fi
+          if grep -Eqi "require\(['\"]\./index" etoro-v2-persistent-intent-shadow.js; then
+            echo 'Shadow bridge must not import the production runtime.'
+            exit 1
+          fi
+          grep -Fq 'networkTransport: false' etoro-v2-persistent-intent-shadow.js
+          grep -Fq 'liveAuthority: false' etoro-v2-persistent-intent-shadow.js
+          grep -Fq 'productionRoutingChanged: false' etoro-v2-persistent-intent-shadow.js
+          grep -Fq 'automaticRetry: false' etoro-v2-persistent-intent-shadow.js
+          grep -Fq 'dualSubmitFallback: false' etoro-v2-persistent-intent-shadow.js
+      - name: Prove no legacy v1 order route is introduced by the bridge
+        shell: bash
+        run: |
+          if grep -Fq '/api/v1/trading/execution/market-open-orders' etoro-v2-persistent-intent-shadow.js; then
+            echo 'Legacy v1 order route must not be used by the new shadow bridge.'
+            exit 1
+          fi
