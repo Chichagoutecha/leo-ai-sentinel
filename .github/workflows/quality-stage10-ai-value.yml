@@ -1,0 +1,22 @@
+name: Stage 10 AI Value Experiment Quality
+on:
+  pull_request:
+    paths:
+      - 'shadow-ai-value-experiment.js'
+      - 'test-shadow-ai-value-experiment.js'
+      - 'AI_VALUE_EXPERIMENT_STAGE10.md'
+      - '.github/workflows/quality-stage10-ai-value.yml'
+permissions: { contents: read }
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: node --check shadow-ai-value-experiment.js && node --check test-shadow-ai-value-experiment.js
+      - run: node --test test-shadow-ai-value-experiment.js
+      - run: git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js
+      - run: |
+          if grep -Eqi 'chat\.completions|responses\.create|trading/execution|LIVE_EXECUTION_ARMED\s*=|execute(Buy|Sell)\(' shadow-ai-value-experiment.js; then echo 'Experiment must remain evaluation-only'; exit 1; fi
