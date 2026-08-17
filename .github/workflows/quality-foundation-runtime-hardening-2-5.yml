@@ -1,0 +1,62 @@
+name: Foundation Stages 2-5 Runtime Hardening Quality
+
+on:
+  pull_request:
+    paths:
+      - 'shadow-intelligence-lab.js'
+      - 'shadow-research-layer.js'
+      - 'shadow-alpaca-validator.js'
+      - 'shadow-quartr-fundamental-agent.js'
+      - 'shadow-exa-news-catalyst-agent.js'
+      - 'test-foundation-runtime-hardening-2-5.js'
+      - 'FOUNDATION_RUNTIME_HARDENING_2_5_V10.25.3.md'
+      - '.github/workflows/quality-foundation-runtime-hardening-2-5.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax checks
+        run: |
+          node --check shadow-intelligence-lab.js
+          node --check shadow-research-layer.js
+          node --check shadow-alpaca-validator.js
+          node --check shadow-quartr-fundamental-agent.js
+          node --check shadow-exa-news-catalyst-agent.js
+          node --check test-foundation-runtime-hardening-2-5.js
+
+      - name: Existing foundation tests
+        run: node --test test-shadow-intelligence-lab.js test-shadow-research-layer.js test-shadow-alpaca-validator.js test-shadow-quartr-fundamental-agent.js test-shadow-exa-news-catalyst-agent.js
+
+      - name: Adversarial foundation runtime tests
+        run: node --test test-foundation-runtime-hardening-2-5.js
+
+      - name: Prove production strategy and start command untouched
+        shell: bash
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js package.json etoro-execution-diagnostics-v10.22.10.js
+
+      - name: Prove foundation hardening adds no trading authority
+        shell: bash
+        run: |
+          files='shadow-intelligence-lab.js shadow-research-layer.js shadow-alpaca-validator.js shadow-quartr-fundamental-agent.js shadow-exa-news-catalyst-agent.js'
+          if grep -Eqi 'canTrade\s*:\s*true|canAuthorizeLive\s*:\s*true|automaticLivePromotion\s*:\s*true|LIVE_EXECUTION_ARMED\s*=' $files; then
+            echo 'Unexpected LIVE authority in foundation modules.'
+            exit 1
+          fi
