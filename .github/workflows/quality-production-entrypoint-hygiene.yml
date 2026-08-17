@@ -1,0 +1,53 @@
+name: Production Entrypoint Hygiene Quality
+
+on:
+  pull_request:
+    paths:
+      - 'package.json'
+      - 'PRODUCTION_ENTRYPOINT_HYGIENE_V10.22.9.2.md'
+      - '.github/workflows/quality-production-entrypoint-hygiene.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax checks
+        run: npm run check
+
+      - name: Luna compatibility unit tests
+        run: npm test
+
+      - name: Optimizer plus Luna preload regression
+        run: npm run test:ai-preload
+
+      - name: Prove default start matches validated Render preload order
+        run: |
+          node - <<'NODE'
+          const pkg=require('./package.json');
+          const expected='node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js index.js';
+          if(pkg.scripts.start!==expected)throw new Error(`Unexpected start command: ${pkg.scripts.start}`);
+          if(pkg.scripts.start.includes('etoro-execution-diagnostics.js'))throw new Error('Legacy eToro diagnostic must not be in default start command.');
+          if(!pkg.scripts['test:ai-preload'])throw new Error('AI preload regression command missing.');
+          console.log('Repository entrypoint matches validated Render AI preload order.');
+          NODE
+
+      - name: Prove production code and preloads are untouched
+        shell: bash
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js ai-cost-optimizer.js ai-luna-temperature-compat.js etoro-execution-diagnostics.js
