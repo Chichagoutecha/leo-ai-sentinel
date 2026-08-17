@@ -1,0 +1,82 @@
+name: AI Context Budgeting Quality
+
+on:
+  pull_request:
+    paths:
+      - 'ai-context-optimizer.js'
+      - 'test-ai-context-optimizer.js'
+      - 'test-ai-context-preload-integration.js'
+      - 'package.json'
+      - 'AI_CONTEXT_BUDGETING_V10.22.9.5.md'
+      - '.github/workflows/quality-ai-context-budgeting.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax checks
+        run: npm run check
+
+      - name: Context optimizer adversarial unit tests
+        run: node --test test-ai-context-optimizer.js
+
+      - name: Full cost Luna context provider-boundary regression
+        run: npm run test:ai-context-preload
+
+      - name: Existing Luna and cost hardening regressions
+        run: |
+          npm run test:ai-preload
+          npm run test:ai-cost-concurrency
+          npm run test:ai-cost-missing-usage
+          npm run test:production-preflight
+
+      - name: Prove preload order compacts before cost accounting reaches provider
+        run: |
+          node - <<'NODE'
+          const pkg=require('./package.json');
+          const start=String(pkg.scripts.start||'');
+          const cost=start.indexOf('-r ./ai-cost-optimizer.js');
+          const luna=start.indexOf('-r ./ai-luna-temperature-compat.js');
+          const context=start.indexOf('-r ./ai-context-optimizer.js');
+          const preflight=start.indexOf('-r ./production-ai-preflight.js');
+          const index=start.lastIndexOf('index.js');
+          if(!(cost>=0&&cost<luna&&luna<context&&context<preflight&&preflight<index)) throw new Error(`Unsafe preload order: ${start}`);
+          if(start.includes('etoro-execution-diagnostics.js')) throw new Error('Legacy eToro diagnostic must not enter the default chain.');
+          NODE
+
+      - name: Prove strategy and eToro execution implementation are untouched
+        shell: bash
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js ai-luna-temperature-compat.js etoro-execution-diagnostics.js etoro-execution-diagnostics-v10.22.10.js
+
+      - name: Prove context optimizer has no trading or provider-call authority
+        shell: bash
+        run: |
+          if grep -Eqi 'LIVE_EXECUTION_ARMED\s*=|canTrade\s*:\s*true|canAuthorizeLive\s*:\s*true|automaticLivePromotion\s*:\s*true' ai-context-optimizer.js; then
+            echo 'Unexpected LIVE authority in context optimizer.'
+            exit 1
+          fi
+          if grep -Fqi '/trading/execution/' ai-context-optimizer.js; then
+            echo 'Unexpected eToro execution endpoint in context optimizer.'
+            exit 1
+          fi
+          if grep -Eqi 'global\.fetch\s*\(|https://api\.openai\.com|public-api\.etoro\.com' ai-context-optimizer.js; then
+            echo 'Unexpected independent provider/network call in context optimizer.'
+            exit 1
+          fi
