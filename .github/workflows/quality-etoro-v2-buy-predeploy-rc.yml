@@ -1,0 +1,119 @@
+name: eToro v2 BUY Predeploy RC Quality
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prove RC adds no runtime or deployment-config drift beyond PR43
+        shell: bash
+        run: |
+          git diff --exit-code 7a43d645575401ba6824f58f067a4eb340d36701...HEAD -- \
+            index.js package.json render.yaml render.yml \
+            ai-cost-optimizer.js ai-luna-temperature-compat.js ai-context-optimizer.js production-ai-preflight.js \
+            etoro-execution-diagnostics-v10.22.10.js etoro-execution-evidence-observer.js \
+            etoro-current-order-contract.js etoro-v2-buy-integration-draft.js \
+            etoro-v2-persistent-intent-shadow.js etoro-v2-buy-production-migration-draft.js \
+            etoro-v2-buy-runtime-draft-audit.js
+
+      - name: Re-prove exact validated v2 BUY runtime transform
+        shell: bash
+        run: |
+          git show a11df7f1978208715a1481f5a415e947d3404a92:index.js > /tmp/index-before-v2.js
+          node etoro-v2-buy-runtime-draft-audit.js /tmp/index-before-v2.js index.js
+
+      - name: Production syntax and preload checks
+        run: |
+          npm run check
+          node --check index.js
+          node --check production-ai-preflight.js
+
+      - name: Prove production start command uses hardened preload chain only
+        run: |
+          node - <<'NODE'
+          const pkg = require('./package.json');
+          const start = String(pkg.scripts?.start || '');
+          const required = [
+            './ai-cost-optimizer.js',
+            './ai-luna-temperature-compat.js',
+            './ai-context-optimizer.js',
+            './production-ai-preflight.js',
+            'index.js'
+          ];
+          for (const token of required) {
+            if (!start.includes(token)) throw new Error(`Missing required production start component: ${token}`);
+          }
+          const forbidden = [
+            'etoro-execution-diagnostics.js',
+            'etoro-execution-diagnostics-v10.22.10.js',
+            'etoro-execution-evidence-observer.js'
+          ];
+          for (const token of forbidden) {
+            if (start.includes(token)) throw new Error(`Forbidden execution helper in default production start: ${token}`);
+          }
+          NODE
+
+      - name: Prove separate LIVE arming and REAL preflight remain in runtime
+        shell: bash
+        run: |
+          grep -Fq 'const LIVE_TRADING_ENABLED = TRADING_MODE === "LIVE";' index.js
+          grep -Fq 'const LIVE_EXECUTION_ARMED = process.env.LIVE_EXECUTION_ARMED === "true";' index.js
+          grep -Fq 'const LIVE_PORTFOLIO_PREFLIGHT_ENABLED =' index.js
+          grep -Fq 'verifyRealPortfolioBeforeExecution({ asset, side: "BUY", amount: safeAmount })' index.js
+          grep -Fq 'createOrderIntent("BUY", asset, safeAmount, {' index.js
+          grep -Fq '{ label: `eToro LIVE BUY ${asset}`, retries: 0 }' index.js
+          grep -Fq 'verifyPortfolioAfterExecution({' index.js
+
+      - name: Prove current BUY transport is v2-only and one-shot
+        shell: bash
+        run: |
+          test "$(grep -Fc 'https://public-api.etoro.com/api/v1/trading/execution/market-open-orders/by-amount' index.js || true)" -eq 0
+          test "$(grep -Fc 'https://public-api.etoro.com/api/v2/trading/execution/orders' index.js || true)" -eq 1
+          grep -Fq 'action: "open"' index.js
+          grep -Fq 'transaction: "buy"' index.js
+          grep -Fq 'orderType: "mkt"' index.js
+          grep -Fq 'orderCurrency: "usd"' index.js
+          grep -Fq 'leverage: 1' index.js
+          grep -Fq 'token: first?.token' index.js
+          grep -Fq 'referenceId: first?.referenceId' index.js
+
+      - name: Run eToro execution and v2 regression stack
+        run: |
+          node --test test-etoro-current-order-contract.js
+          node --test test-etoro-v2-buy-integration-draft.js
+          node --test test-etoro-v2-persistent-intent-shadow.js
+          node --test test-etoro-execution-diagnostics-v10.22.10.js
+          node --test test-etoro-execution-evidence-observer.js
+          node --test test-production-safety-stack-integration.js
+
+      - name: Run production AI regressions
+        run: |
+          npm run test:ai-preload
+          npm run test:ai-context-preload
+          npm run test:ai-cost-concurrency
+          npm run test:ai-cost-missing-usage
+          npm run test:production-preflight
+
+      - name: Record repository-only Render boundary
+        shell: bash
+        run: |
+          test ! -e render.yaml
+          test ! -e render.yml
+          echo 'No Render Blueprint file is tracked; Render branch, auto-deploy and environment variables must be verified in Render separately before deployment.'
