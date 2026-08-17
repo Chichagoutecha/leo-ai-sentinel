@@ -8,6 +8,7 @@ on:
       - 'shadow-alpaca-validator.js'
       - 'shadow-quartr-fundamental-agent.js'
       - 'shadow-exa-news-catalyst-agent.js'
+      - 'shadow-foundation-runtime-guard.js'
       - 'test-foundation-runtime-hardening-2-5.js'
       - 'FOUNDATION_RUNTIME_HARDENING_2_5_V10.25.3.md'
       - '.github/workflows/quality-foundation-runtime-hardening-2-5.yml'
@@ -38,12 +39,13 @@ jobs:
           node --check shadow-alpaca-validator.js
           node --check shadow-quartr-fundamental-agent.js
           node --check shadow-exa-news-catalyst-agent.js
+          node --check shadow-foundation-runtime-guard.js
           node --check test-foundation-runtime-hardening-2-5.js
 
       - name: Existing foundation tests
         run: node --test test-shadow-intelligence-lab.js test-shadow-research-layer.js test-shadow-alpaca-validator.js test-shadow-quartr-fundamental-agent.js test-shadow-exa-news-catalyst-agent.js
 
-      - name: Adversarial foundation runtime tests
+      - name: Adversarial guarded foundation runtime tests
         run: node --test test-foundation-runtime-hardening-2-5.js
 
       - name: Prove production strategy and start command untouched
@@ -55,8 +57,12 @@ jobs:
       - name: Prove foundation hardening adds no trading authority
         shell: bash
         run: |
-          files='shadow-intelligence-lab.js shadow-research-layer.js shadow-alpaca-validator.js shadow-quartr-fundamental-agent.js shadow-exa-news-catalyst-agent.js'
+          files='shadow-intelligence-lab.js shadow-research-layer.js shadow-alpaca-validator.js shadow-quartr-fundamental-agent.js shadow-exa-news-catalyst-agent.js shadow-foundation-runtime-guard.js'
           if grep -Eqi 'canTrade\s*:\s*true|canAuthorizeLive\s*:\s*true|automaticLivePromotion\s*:\s*true|LIVE_EXECUTION_ARMED\s*=' $files; then
             echo 'Unexpected LIVE authority in foundation modules.'
+            exit 1
+          fi
+          if grep -Eqi '/trading/execution/|require\(["'"']openai["'"']\)' shadow-foundation-runtime-guard.js; then
+            echo 'Unexpected execution/OpenAI dependency in runtime guard.'
             exit 1
           fi
