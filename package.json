@@ -1,13 +1,14 @@
 {
   "name": "leo-ai-sentinel",
   "version": "10.22.9",
-  "description": "LEO-AI SENTINEL with persistent AI cost controls and GPT-5.6 Luna compatibility",
+  "description": "LEO-AI SENTINEL with persistent AI cost controls, GPT-5.6 Luna compatibility and production AI preload preflight",
   "main": "index.js",
   "scripts": {
-    "start": "node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js index.js",
-    "check": "node --check index.js && node --check ai-cost-optimizer.js && node --check ai-luna-temperature-compat.js && node --check test-ai-luna-temperature-compat.js && node --check test-ai-luna-preload-integration.js",
-    "test": "node --test test-ai-luna-temperature-compat.js",
-    "test:ai-preload": "node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js --test test-ai-luna-preload-integration.js"
+    "start": "node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./production-ai-preflight.js index.js",
+    "check": "node --check index.js && node --check ai-cost-optimizer.js && node --check ai-luna-temperature-compat.js && node --check production-ai-preflight.js && node --check test-ai-luna-temperature-compat.js && node --check test-ai-luna-preload-integration.js && node --check test-production-ai-preflight.js",
+    "test": "node --test test-ai-luna-temperature-compat.js test-production-ai-preflight.js",
+    "test:ai-preload": "node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js --test test-ai-luna-preload-integration.js",
+    "test:production-preflight": "node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./production-ai-preflight.js -e \"if (!global.__LEO_PRODUCTION_AI_PREFLIGHT__().ok) process.exit(1);\""
   },
   "dependencies": {
     "express": "^4.18.2",
