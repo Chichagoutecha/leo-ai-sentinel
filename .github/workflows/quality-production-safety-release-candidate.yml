@@ -1,0 +1,65 @@
+name: Production Safety Release Candidate Quality
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Syntax checks
+        run: |
+          node --check etoro-execution-diagnostics-v10.22.10.js
+          node --check test-etoro-execution-diagnostics-v10.22.10.js
+          node --check test-production-safety-stack-integration.js
+          npm run check
+      - name: Safe eToro breaker regression
+        run: node --test test-etoro-execution-diagnostics-v10.22.10.js
+      - name: Combined eToro + GPT-5.6 Luna stack regression
+        run: node --test test-production-safety-stack-integration.js
+      - name: Existing production AI regressions
+        run: |
+          npm run test:ai-preload
+          npm run test:ai-context-preload
+          npm run test:ai-cost-concurrency
+          npm run test:ai-cost-missing-usage
+          npm run test:production-preflight
+      - name: Prove core strategy and current default start are unchanged from AI release candidate
+        shell: bash
+        run: |
+          git fetch origin v10.22.9.8-production-ai-release-candidate --depth=1
+          git diff --exit-code origin/v10.22.9.8-production-ai-release-candidate...HEAD -- index.js package.json ai-cost-optimizer.js ai-luna-temperature-compat.js ai-context-optimizer.js production-ai-preflight.js
+      - name: Prove safe diagnostic is not silently activated in default production start
+        run: |
+          node - <<'NODE'
+          const pkg = require('./package.json');
+          const start = String(pkg.scripts?.start || '');
+          if (start.includes('etoro-execution-diagnostics-v10.22.10.js')) throw new Error('Safe diagnostic must remain non-activated until separate LIVE validation.');
+          if (start.includes('etoro-execution-diagnostics.js')) throw new Error('Legacy unsafe diagnostic must never enter the production chain.');
+          NODE
+      - name: Prove exact creation-only breaker scope and no LIVE authority mutation
+        shell: bash
+        run: |
+          grep -Fq "breakerScope:'EXACT_NEW_OPEN_POST_ENDPOINTS_ONLY'" etoro-execution-diagnostics-v10.22.10.js
+          grep -Fq "closeReduceCancelNeverBlocked:true" etoro-execution-diagnostics-v10.22.10.js
+          grep -Fq "market-open-orders/by-amount" etoro-execution-diagnostics-v10.22.10.js
+          grep -Fq "market-open-orders/by-units" etoro-execution-diagnostics-v10.22.10.js
+          grep -Fq "toUpperCase() !== 'POST'" etoro-execution-diagnostics-v10.22.10.js
+          if grep -Eqi 'LIVE_EXECUTION_ARMED\s*=|strategyModified\s*:\s*true|sizingModified\s*:\s*true' etoro-execution-diagnostics-v10.22.10.js; then
+            echo 'Unexpected strategy/LIVE mutation authority in eToro diagnostic.'
+            exit 1
+          fi
