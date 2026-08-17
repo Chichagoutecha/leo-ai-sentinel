@@ -1,0 +1,47 @@
+name: Luna Temperature Compatibility Quality
+
+on:
+  pull_request:
+    paths:
+      - 'ai-luna-temperature-compat.js'
+      - 'test-ai-luna-temperature-compat.js'
+      - '.github/workflows/quality-luna-temperature-compat.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax check
+        run: node --check ai-luna-temperature-compat.js && node --check test-ai-luna-temperature-compat.js
+
+      - name: Compatibility unit tests
+        run: node --test test-ai-luna-temperature-compat.js
+
+      - name: Prove production strategy file is untouched
+        shell: bash
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js
+
+      - name: Prove shim contains no eToro execution surface
+        shell: bash
+        run: |
+          if grep -Eqi 'trading/execution|ETORO_API_KEY|ETORO_USER_KEY|LIVE_EXECUTION_ARMED' ai-luna-temperature-compat.js; then
+            echo 'Unexpected trading/execution coupling in Luna compatibility shim.'
+            exit 1
+          fi
