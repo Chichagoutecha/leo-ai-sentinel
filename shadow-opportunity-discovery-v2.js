@@ -2,7 +2,7 @@
 
 /** LEO-AI SENTINEL — Stage 6 Opportunity Discovery Agent 2.1 (Shadow only). */
 const VERSION='v10.24.5.1-opportunity-discovery-runtime-safe';
-let stats={runs:0,assetsSeen:0,shortlisted:0,finalists:0,duplicatesRemoved:0,last:null};
+let stats={runs:0,assetsSeen:0,shortlisted:0,finalists:0,duplicatesRemoved:0,duplicateConflicts:0,last:null};
 function num(v,f=0){const n=Number(v);return Number.isFinite(n)?n:f;}
 function clamp(n,min,max){const x=Number(n);return Number.isFinite(x)?Math.max(min,Math.min(max,x)):min;}
 function safeObject(v){return v&&typeof v==='object'&&!Array.isArray(v)?v:{};}
@@ -17,11 +17,13 @@ function scoreAsset(asset){
 function discoverOpportunities(universe=[],options={}){
   const source=Array.isArray(universe)?universe:[];const opts=safeObject(options);
   const shortlistSize=Math.max(5,Math.min(50,Math.floor(num(opts.shortlistSize,25))));const finalistSize=Math.max(1,Math.min(15,Math.floor(num(opts.finalistSize,8))));const minimumFinalistScore=clamp(num(opts.minimumFinalistScore,65),0,100);
-  const bySymbol=new Map();let duplicatesRemoved=0;
-  for(const raw of source){const a=safeObject(raw);const symbol=String(a.symbol||'').trim().toUpperCase();if(!symbol)continue;const s=scoreAsset(a);const row={symbol,...s,liquidityScore:num(a.liquidityScore),spreadBps:num(a.spreadBps),momentumScore:num(a.momentumScore),trendScore:num(a.trendScore),dataQuality:num(a.dataQuality)};const prior=bySymbol.get(symbol);if(!prior||row.score>prior.score||(row.score===prior.score&&row.eligible&&!prior.eligible))bySymbol.set(symbol,row);if(prior)duplicatesRemoved++;}
-  const ranked=[...bySymbol.values()].sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol));const eligible=ranked.filter(x=>x.eligible);const shortlist=eligible.slice(0,shortlistSize);const finalists=shortlist.filter(x=>x.score>=minimumFinalistScore).slice(0,finalistSize);
-  stats.runs++;stats.assetsSeen+=ranked.length;stats.shortlisted+=shortlist.length;stats.finalists+=finalists.length;stats.duplicatesRemoved+=duplicatesRemoved;
-  const result={version:VERSION,at:safeDate(opts.now).toISOString(),universeSize:ranked.length,rawUniverseSize:source.length,duplicatesRemoved,eligibleCount:eligible.length,shortlist,finalists,rejectedCount:ranked.length-eligible.length,policy:{shortlistSize,finalistSize,minimumFinalistScore,fullUniverseAiCalls:0,finalistAiCalls:0},safety:{shadowOnly:true,canTrade:false,canAuthorizeLive:false,openAiCallsOnUniverse:0,networkClientPresent:false,executionCalls:0}};stats.last=result;return result;
+  const grouped=new Map();let duplicatesRemoved=0,duplicateConflicts=0;
+  for(const raw of source){const a=safeObject(raw);const symbol=String(a.symbol||'').trim().toUpperCase();if(!symbol)continue;if(!grouped.has(symbol))grouped.set(symbol,[]);else duplicatesRemoved++;grouped.get(symbol).push(a);}
+  const ranked=[];
+  for(const [symbol,rows] of grouped){const scored=rows.map(a=>({a,s:scoreAsset(a)}));const eligibleStates=new Set(scored.map(x=>x.s.eligible));if(eligibleStates.size>1){duplicateConflicts++;ranked.push({symbol,eligible:false,score:0,reason:'DUPLICATE_CONFLICT',liquidityScore:0,spreadBps:999,momentumScore:0,trendScore:0,dataQuality:0});continue;}const chosen=[...scored].sort((x,y)=>y.s.score-x.s.score)[0];const a=chosen.a,s=chosen.s;ranked.push({symbol,...s,liquidityScore:num(a.liquidityScore),spreadBps:num(a.spreadBps),momentumScore:num(a.momentumScore),trendScore:num(a.trendScore),dataQuality:num(a.dataQuality)});}
+  ranked.sort((a,b)=>b.score-a.score||a.symbol.localeCompare(b.symbol));const eligible=ranked.filter(x=>x.eligible);const shortlist=eligible.slice(0,shortlistSize);const finalists=shortlist.filter(x=>x.score>=minimumFinalistScore).slice(0,finalistSize);
+  stats.runs++;stats.assetsSeen+=ranked.length;stats.shortlisted+=shortlist.length;stats.finalists+=finalists.length;stats.duplicatesRemoved+=duplicatesRemoved;stats.duplicateConflicts+=duplicateConflicts;
+  const result={version:VERSION,at:safeDate(opts.now).toISOString(),universeSize:ranked.length,rawUniverseSize:source.length,duplicatesRemoved,duplicateConflicts,eligibleCount:eligible.length,shortlist,finalists,rejectedCount:ranked.length-eligible.length,policy:{shortlistSize,finalistSize,minimumFinalistScore,fullUniverseAiCalls:0,finalistAiCalls:0},safety:{shadowOnly:true,canTrade:false,canAuthorizeLive:false,openAiCallsOnUniverse:0,networkClientPresent:false,executionCalls:0}};stats.last=result;return result;
 }
 function getState(){return{version:VERSION,stats:{...stats},safety:{shadowOnly:true,canTrade:false,canAuthorizeLive:false,openAiCallsOnUniverse:0}};}
 global.__LEO_OPPORTUNITY_DISCOVERY_V2_STATE__=getState;global.__LEO_OPPORTUNITY_DISCOVERY_V2_RUN__=discoverOpportunities;
