@@ -1,0 +1,66 @@
+name: AI Cost Hardening Quality
+
+on:
+  pull_request:
+    paths:
+      - 'ai-cost-optimizer.js'
+      - 'package.json'
+      - 'test-ai-cost-concurrency-reservation.js'
+      - 'test-ai-cost-missing-usage.js'
+      - 'test-ai-cost-secret-redaction.js'
+      - 'AI_COST_HARDENING_V10.22.9.4.md'
+      - '.github/workflows/quality-ai-cost-hardening.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax and baseline tests
+        run: |
+          npm run check
+          npm test
+
+      - name: Existing optimizer plus Luna regression
+        run: npm run test:ai-preload
+
+      - name: Production preflight regression
+        run: npm run test:production-preflight
+
+      - name: Concurrent budget reservation regression
+        run: npm run test:ai-cost-concurrency
+
+      - name: Missing provider usage conservative accounting regression
+        run: npm run test:ai-cost-missing-usage
+
+      - name: Prove strategy, eToro and Luna compatibility are untouched
+        shell: bash
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js ai-luna-temperature-compat.js etoro-execution-diagnostics.js
+
+      - name: Prove optimizer still has no eToro execution authority
+        shell: bash
+        run: |
+          if grep -Fqi '/trading/execution/' ai-cost-optimizer.js; then
+            echo 'Unexpected eToro execution endpoint in AI cost optimizer.'
+            exit 1
+          fi
+          if grep -Eqi 'LIVE_EXECUTION_ARMED\s*=|canTrade\s*:\s*true|canAuthorizeLive\s*:\s*true' ai-cost-optimizer.js; then
+            echo 'Unexpected LIVE authority in AI cost optimizer.'
+            exit 1
+          fi
