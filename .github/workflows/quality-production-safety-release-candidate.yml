@@ -23,6 +23,8 @@ jobs:
         run: npm ci
       - name: Syntax checks
         run: |
+          node --check index.js
+          node --check etoro-v2-buy-runtime-draft-audit.js
           node --check etoro-execution-diagnostics-v10.22.10.js
           node --check test-etoro-execution-diagnostics-v10.22.10.js
           node --check test-production-safety-stack-integration.js
@@ -38,11 +40,12 @@ jobs:
           npm run test:ai-cost-concurrency
           npm run test:ai-cost-missing-usage
           npm run test:production-preflight
-      - name: Prove core strategy and current default start are unchanged from AI release candidate
+      - name: Prove core strategy changed only by exact validated v2 BUY migration
         shell: bash
         run: |
-          git fetch origin v10.22.9.8-production-ai-release-candidate --depth=1
-          git diff --exit-code origin/v10.22.9.8-production-ai-release-candidate...HEAD -- index.js package.json ai-cost-optimizer.js ai-luna-temperature-compat.js ai-context-optimizer.js production-ai-preflight.js
+          git show a11df7f1978208715a1481f5a415e947d3404a92:index.js > /tmp/index-before-v2.js
+          node etoro-v2-buy-runtime-draft-audit.js /tmp/index-before-v2.js index.js
+          git diff --exit-code a11df7f1978208715a1481f5a415e947d3404a92...HEAD -- package.json ai-cost-optimizer.js ai-luna-temperature-compat.js ai-context-optimizer.js production-ai-preflight.js render.yaml render.yml
       - name: Prove safe diagnostic is not silently activated in default production start
         run: |
           node - <<'NODE'
@@ -63,3 +66,9 @@ jobs:
             echo 'Unexpected strategy/LIVE mutation authority in eToro diagnostic.'
             exit 1
           fi
+      - name: Prove LIVE arm remains separately required and BUY stays one-shot
+        shell: bash
+        run: |
+          grep -Fq 'const LIVE_EXECUTION_ARMED = process.env.LIVE_EXECUTION_ARMED === "true";' index.js
+          grep -Fq '{ label: `eToro LIVE BUY ${asset}`, retries: 0 }' index.js
+          grep -Fq 'verifyPortfolioAfterExecution({' index.js

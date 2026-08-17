@@ -34,11 +34,12 @@ jobs:
         run: |
           node --test test-etoro-execution-diagnostics-v10.22.10.js
           node --test test-etoro-execution-evidence-observer.js
-      - name: Prove production runtime and Render are untouched
+      - name: Prove exact runtime migration and Render/config remain untouched
         shell: bash
         run: |
-          git fetch origin v10.22.10.5-v2-buy-integration-draft --depth=1
-          git diff --exit-code origin/v10.22.10.5-v2-buy-integration-draft...HEAD -- index.js package.json render.yaml render.yml
+          git show a11df7f1978208715a1481f5a415e947d3404a92:index.js > /tmp/index-before-v2.js
+          node etoro-v2-buy-runtime-draft-audit.js /tmp/index-before-v2.js index.js
+          git diff --exit-code a11df7f1978208715a1481f5a415e947d3404a92...HEAD -- package.json render.yaml render.yml
       - name: Prove shadow bridge has no provider transport or LIVE authority
         shell: bash
         run: |
@@ -55,10 +56,9 @@ jobs:
           grep -Fq 'productionRoutingChanged: false' etoro-v2-persistent-intent-shadow.js
           grep -Fq 'automaticRetry: false' etoro-v2-persistent-intent-shadow.js
           grep -Fq 'dualSubmitFallback: false' etoro-v2-persistent-intent-shadow.js
-      - name: Prove no legacy v1 order route is introduced by the bridge
+      - name: Prove runtime uses v2 only for BUY and never adds fallback
         shell: bash
         run: |
-          if grep -Fq '/api/v1/trading/execution/market-open-orders' etoro-v2-persistent-intent-shadow.js; then
-            echo 'Legacy v1 order route must not be used by the new shadow bridge.'
-            exit 1
-          fi
+          test "$(grep -Fc 'https://public-api.etoro.com/api/v1/trading/execution/market-open-orders/by-amount' index.js || true)" -eq 0
+          test "$(grep -Fc 'https://public-api.etoro.com/api/v2/trading/execution/orders' index.js || true)" -eq 1
+          grep -Fq '{ label: `eToro LIVE BUY ${asset}`, retries: 0 }' index.js

@@ -6245,6 +6245,8 @@ function compactEtoroExecutionResponse(data) {
   return {
     orderId: first?.orderID ?? first?.orderId ?? first?.OrderID ?? first?.OrderId ?? null,
     positionId: first?.positionID ?? first?.positionId ?? first?.PositionID ?? first?.PositionId ?? null,
+    token: first?.token ?? first?.Token ?? data?.token ?? data?.Token ?? null,
+    referenceId: first?.referenceId ?? first?.referenceID ?? first?.ReferenceId ?? first?.ReferenceID ?? data?.referenceId ?? data?.referenceID ?? data?.ReferenceId ?? data?.ReferenceID ?? null,
     statusId: first?.statusID ?? first?.statusId ?? first?.StatusID ?? first?.StatusId ?? null,
     message: first?.message ?? first?.Message ?? data?.message ?? data?.Message ?? null,
     errorCode: first?.errorCode ?? first?.ErrorCode ?? data?.errorCode ?? data?.ErrorCode ?? null,
@@ -6256,6 +6258,8 @@ function hasExecutionBusinessAcknowledgement(response = null) {
   if (!response || typeof response !== "object") return false;
   if (response.orderId !== null && response.orderId !== undefined) return true;
   if (response.positionId !== null && response.positionId !== undefined) return true;
+  if (response.token !== null && response.token !== undefined) return true;
+  if (response.referenceId !== null && response.referenceId !== undefined) return true;
   if (response.statusId !== null && response.statusId !== undefined) return true;
   if (response.success === true) return true;
   if (response.errorCode !== null && response.errorCode !== undefined) return true;
@@ -12917,11 +12921,19 @@ async function executeBuy(asset, amount, marketData = null) {
 
   try {
     const { response, data } = await fetchJsonWithRetry(
-      "https://public-api.etoro.com/api/v1/trading/execution/market-open-orders/by-amount",
+      "https://public-api.etoro.com/api/v2/trading/execution/orders",
       {
         method: "POST",
         headers,
-        body: JSON.stringify({ InstrumentId: instrumentId, IsBuy: true, Leverage: 1, Amount: safeAmount })
+        body: JSON.stringify({
+          action: "open",
+          transaction: "buy",
+          instrumentId,
+          orderType: "mkt",
+          amount: safeAmount,
+          orderCurrency: "usd",
+          leverage: 1
+        })
       },
       { label: `eToro LIVE BUY ${asset}`, retries: 0 }
     );

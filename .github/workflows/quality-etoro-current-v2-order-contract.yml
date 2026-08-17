@@ -30,12 +30,13 @@ jobs:
         run: |
           node --test test-etoro-execution-diagnostics-v10.22.10.js
           node --test test-etoro-execution-evidence-observer.js
-      - name: Prove production runtime is untouched
+      - name: Prove runtime is the exact validated v2 BUY migration
         shell: bash
         run: |
-          git fetch origin v10.22.10.3-execution-evidence-observer --depth=1
-          git diff --exit-code origin/v10.22.10.3-execution-evidence-observer...HEAD -- index.js package.json ai-cost-optimizer.js ai-luna-temperature-compat.js ai-context-optimizer.js production-ai-preflight.js
-      - name: Prove no network or LIVE authority
+          git show a11df7f1978208715a1481f5a415e947d3404a92:index.js > /tmp/index-before-v2.js
+          node etoro-v2-buy-runtime-draft-audit.js /tmp/index-before-v2.js index.js
+          git diff --exit-code a11df7f1978208715a1481f5a415e947d3404a92...HEAD -- package.json ai-cost-optimizer.js ai-luna-temperature-compat.js ai-context-optimizer.js production-ai-preflight.js render.yaml render.yml
+      - name: Prove contract helper itself has no network or LIVE authority
         shell: bash
         run: |
           if grep -Eqi 'global\.fetch\s*\(|fetch\s*\(|LIVE_EXECUTION_ARMED\s*=|executeBuy\s*\(|executeSell\s*\(' etoro-current-order-contract.js; then
@@ -45,7 +46,9 @@ jobs:
           grep -Fq 'canTrade:false' etoro-current-order-contract.js
           grep -Fq 'canAuthorizeLive:false' etoro-current-order-contract.js
           grep -Fq 'livePromotionAllowed:false' etoro-current-order-contract.js
-      - name: Prove no dual-submit fallback was introduced
+      - name: Prove one-shot runtime without dual-submit fallback
         shell: bash
         run: |
-          git diff --exit-code origin/v10.22.10.3-execution-evidence-observer...HEAD -- index.js
+          grep -Fq '{ label: `eToro LIVE BUY ${asset}`, retries: 0 }' index.js
+          test "$(grep -Fc 'https://public-api.etoro.com/api/v2/trading/execution/orders' index.js || true)" -eq 1
+          test "$(grep -Fc 'https://public-api.etoro.com/api/v1/trading/execution/market-open-orders/by-amount' index.js || true)" -eq 0
