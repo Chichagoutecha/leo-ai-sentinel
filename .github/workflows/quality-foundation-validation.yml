@@ -5,6 +5,8 @@ on:
     paths:
       - 'foundation-validation-cockpit.js'
       - 'test-foundation-validation-cockpit.js'
+      - 'foundation-calibration-bench.js'
+      - 'test-foundation-calibration-bench.js'
       - 'etoro-execution-diagnostics-v10.22.10.js'
       - 'test-etoro-execution-diagnostics-v10.22.10.js'
       - 'shadow-*.js'
@@ -45,7 +47,7 @@ jobs:
           git fetch origin "${{ github.base_ref }}" --depth=1
           git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js
 
-      - name: Prove rehearsal start uses safe Stage 1 diagnostic
+      - name: Prove rehearsal preload safety
         shell: bash
         run: |
           node - <<'NODE'
@@ -57,8 +59,11 @@ jobs:
           if (start.includes('-r ./etoro-execution-diagnostics.js')) {
             throw new Error('Legacy v10.22.8 execution diagnostics must not be preloaded in the rehearsal stack.');
           }
+          if (!start.includes('-r ./foundation-calibration-bench.js')) {
+            throw new Error('Foundation Calibration Bench is not preloaded.');
+          }
           if (!start.includes('-r ./foundation-validation-cockpit.js')) {
             throw new Error('Foundation Validation Cockpit is not preloaded.');
           }
-          console.log('Safe Stage 1 + Cockpit rehearsal preload confirmed.');
+          console.log('Safe Stage 1 + Calibration + Cockpit rehearsal preload confirmed.');
           NODE
