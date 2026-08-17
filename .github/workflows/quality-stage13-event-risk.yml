@@ -1,0 +1,23 @@
+name: Stage 13 Event Risk Quality
+on:
+  pull_request:
+    paths:
+      - 'shadow-event-risk-calendar.js'
+      - 'test-shadow-event-risk-calendar.js'
+      - 'EVENT_RISK_CALENDAR_STAGE13.md'
+      - '.github/workflows/quality-stage13-event-risk.yml'
+permissions: { contents: read }
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - run: node --check shadow-event-risk-calendar.js && node --check test-shadow-event-risk-calendar.js
+      - run: node --test test-shadow-event-risk-calendar.js
+      - run: git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js
+      - run: |
+          if grep -Eqi 'trading/execution|LIVE_EXECUTION_ARMED\s*=|new OpenAI|executeSell\(' shadow-event-risk-calendar.js; then
+            echo 'Unexpected LIVE/OpenAI/execution coupling'; exit 1; fi
