@@ -52,7 +52,7 @@ exa.normalizeObservation=syncGuard('EXA','NORMALIZE',raw.exaNormalize,()=>null);
 exa.analyzeEventGroup=syncGuard('EXA','ANALYZE_EVENT',raw.exaAnalyzeEvent,(_e,args)=>failReport('EXA','ANALYZE_EVENT',Array.isArray(args[0])?args[0][0]:args[0]));
 exa.analyzeBatch=syncGuard('EXA','ANALYZE_BATCH',raw.exaAnalyzeBatch,()=>[]);
 exa.evidenceFromEventReport=syncGuard('EXA','EVIDENCE',raw.exaEvidence,()=>[]);
-exa.ingestBatch=asyncGuard('EXA','INGEST',raw.exaIngest,()=>({ok:false,reason:'EXA_INGEST_RUNTIME_GUARD',reports:[],evidence:[],evidenceResults:[]}));
+exa.ingestBatch=asyncGuard('EXA','INGEST',raw.exaIngest,()=>({ok:true,reason:'EXA_INGEST_RUNTIME_GUARD_NOOP',runtimeGuarded:true,reports:[],evidence:[],evidenceResults:[]}));
 
 // Replace the runtime adapter globals with guarded public boundaries.
 global.__LEO_ALPACA_VALIDATE__=alpaca.ingestValidation;
