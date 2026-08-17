@@ -72,11 +72,13 @@ This does **not** complete predictive calibration. News value still has to be me
 
 This permits **Shadow development only**. It never authorizes LIVE promotion. LIVE promotion remains hard-coded false in the cockpit and requires a separate validation decision.
 
-## Current integration rehearsal expectation
+## Current integration rehearsal
 
-The v10.23.4 research stack still preloads the legacy `etoro-execution-diagnostics.js`. Therefore the first cockpit snapshot is expected to mark Stage 1 as `INTEGRATION_BLOCKED` until the v10.22.10 safe diagnostic is integrated into the stacked rehearsal branch.
+The rehearsal branch now copies the exact v10.22.10 safe diagnostic and its dedicated tests from Stage 1, then changes the rehearsal `start` command to preload `etoro-execution-diagnostics-v10.22.10.js` instead of the legacy v10.22.8 diagnostic.
 
-That failure is intentional and useful: the cockpit must expose unsafe composition rather than hide it.
+This is deliberately **not** a production merge. The purpose is to prove that the Stage 1 safety invariant and the Stage 2–5 Shadow stack can coexist before any separate LIVE validation decision.
+
+The cockpit must report Stage 1 technical readiness only when the loaded diagnostic exposes `NEW_OPEN_ORDERS_ONLY` and confirms close/reduce routes can never be breaker-blocked. True eToro portfolio proof remains pending until a real accepted order is followed by a portfolio re-read.
 
 ## Cost and safety
 
