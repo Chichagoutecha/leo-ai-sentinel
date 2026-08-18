@@ -1,0 +1,105 @@
+name: Clean eToro v2 Production RC Quality
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'index.js'
+      - 'package.json'
+      - 'ai-cost-optimizer.js'
+      - 'ai-context-optimizer.js'
+      - 'production-ai-preflight.js'
+      - 'test-ai-context-optimizer.js'
+      - 'test-ai-context-preload-integration.js'
+      - 'test-ai-cost-concurrency-reservation.js'
+      - 'test-ai-cost-missing-usage.js'
+      - 'test-ai-cost-secret-redaction.js'
+      - 'test-production-ai-preflight.js'
+      - '.github/workflows/quality-clean-etoro-v2-production-rc.yml'
+      - 'CLEAN_ETORO_V2_PRODUCTION_RC_V10.22.11.0.md'
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Fetch validated predeploy source
+        run: git fetch origin v10.22.10.9-v2-buy-predeploy-rc --depth=1
+
+      - name: Prove production runtime files are byte-identical to validated RC
+        shell: bash
+        run: |
+          for f in index.js package.json ai-cost-optimizer.js ai-context-optimizer.js production-ai-preflight.js test-ai-context-optimizer.js test-ai-context-preload-integration.js test-ai-cost-concurrency-reservation.js test-ai-cost-missing-usage.js test-ai-cost-secret-redaction.js test-production-ai-preflight.js; do
+            git diff --exit-code origin/v10.22.10.9-v2-buy-predeploy-rc -- "$f"
+          done
+
+      - name: Syntax checks
+        run: |
+          node --check index.js
+          node --check ai-cost-optimizer.js
+          node --check ai-luna-temperature-compat.js
+          node --check ai-context-optimizer.js
+          node --check production-ai-preflight.js
+
+      - name: Production AI tests
+        run: |
+          node --test test-ai-luna-temperature-compat.js test-production-ai-preflight.js test-ai-cost-secret-redaction.js test-ai-context-optimizer.js
+          node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js --test test-ai-luna-preload-integration.js
+          AI_REQUEST_CACHE_MINUTES=0 node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js --test test-ai-context-preload-integration.js
+          AI_MONTHLY_BUDGET_USD=0.1 AI_OUTPUT_PRICE_PER_MTOK_USD=40 AI_REQUEST_CACHE_MINUTES=0 node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js --test test-ai-cost-concurrency-reservation.js
+          AI_MONTHLY_BUDGET_USD=1 AI_REQUEST_CACHE_MINUTES=0 node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js --test test-ai-cost-missing-usage.js
+
+      - name: Production preload composition must pass
+        run: node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js -r ./production-ai-preflight.js -e "if (!global.__LEO_PRODUCTION_AI_PREFLIGHT__().ok) process.exit(1);"
+
+      - name: Prove exact eToro v2 BUY runtime shape
+        shell: bash
+        run: |
+          test "$(grep -Fc 'https://public-api.etoro.com/api/v2/trading/execution/orders' index.js)" -eq 1
+          test "$(grep -Fc 'https://public-api.etoro.com/api/v1/trading/execution/market-open-orders/by-amount' index.js)" -eq 0
+          grep -Fq 'action: "open"' index.js
+          grep -Fq 'transaction: "buy"' index.js
+          grep -Fq 'orderType: "mkt"' index.js
+          grep -Fq 'orderCurrency: "usd"' index.js
+          grep -Fq 'retries: 0' index.js
+          grep -Fq 'createOrderIntent("BUY", asset, safeAmount, {' index.js
+          grep -Fq 'verifyRealPortfolioBeforeExecution({ asset, side: "BUY", amount: safeAmount })' index.js
+          grep -Fq 'verifyPortfolioAfterExecution({' index.js
+          grep -Fq 'const LIVE_EXECUTION_ARMED = process.env.LIVE_EXECUTION_ARMED === "true";' index.js
+          grep -Fq 'token:' index.js
+          grep -Fq 'referenceId:' index.js
+
+      - name: Prove index migration remains tiny
+        shell: bash
+        run: |
+          git fetch origin main --depth=1
+          test "$(git diff --numstat origin/main...HEAD -- index.js)" = $'14\t2\tindex.js'
+
+      - name: Prove canonical production start command
+        shell: bash
+        run: |
+          node -e "const p=require('./package.json'); const expected='node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js -r ./production-ai-preflight.js index.js'; if(p.scripts.start!==expected){console.error(p.scripts.start);process.exit(1)}"
+
+      - name: Prove no draft or shadow runtime scaffolding is promoted by this PR
+        shell: bash
+        run: |
+          git fetch origin main --depth=1
+          if git diff --name-only origin/main...HEAD | grep -E '(^|/)(etoro-.*(draft|shadow|observer)|test-etoro-.*(draft|shadow|observer))'; then
+            echo 'Draft/shadow eToro scaffolding must not be promoted to main by this RC.'
+            exit 1
+          fi
