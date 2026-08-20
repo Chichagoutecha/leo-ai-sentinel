@@ -1,4 +1,4 @@
-name: Clean eToro v2 Production RC Quality
+name: LEO Production Quality
 
 on:
   pull_request:
@@ -8,16 +8,17 @@ on:
       - 'index.js'
       - 'package.json'
       - 'ai-cost-optimizer.js'
+      - 'ai-luna-temperature-compat.js'
       - 'ai-context-optimizer.js'
       - 'production-ai-preflight.js'
       - 'test-ai-context-optimizer.js'
+      - 'test-ai-context-adaptive.js'
       - 'test-ai-context-preload-integration.js'
       - 'test-ai-cost-concurrency-reservation.js'
       - 'test-ai-cost-missing-usage.js'
       - 'test-ai-cost-secret-redaction.js'
       - 'test-production-ai-preflight.js'
       - '.github/workflows/quality-clean-etoro-v2-production-rc.yml'
-      - 'CLEAN_ETORO_V2_PRODUCTION_RC_V10.22.11.0.md'
 
 permissions:
   contents: read
@@ -38,36 +39,47 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Fetch validated predeploy source
-        run: git fetch origin v10.22.10.9-v2-buy-predeploy-rc --depth=1
-
-      - name: Prove production runtime files are byte-identical to validated RC
+      - name: Prove change surface is intentionally narrow
         shell: bash
         run: |
-          for f in index.js package.json ai-cost-optimizer.js ai-context-optimizer.js production-ai-preflight.js test-ai-context-optimizer.js test-ai-context-preload-integration.js test-ai-cost-concurrency-reservation.js test-ai-cost-missing-usage.js test-ai-cost-secret-redaction.js test-production-ai-preflight.js; do
-            git diff --exit-code origin/v10.22.10.9-v2-buy-predeploy-rc -- "$f"
-          done
+          git fetch origin main --depth=1
+          git diff --exit-code origin/main...HEAD -- index.js ai-cost-optimizer.js ai-luna-temperature-compat.js production-ai-preflight.js
+          allowed='^(ai-context-optimizer\.js|package\.json|test-ai-context-adaptive\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
+          unexpected="$(git diff --name-only origin/main...HEAD | grep -Ev "$allowed" || true)"
+          if [ -n "$unexpected" ]; then
+            echo "Unexpected changed files:"
+            echo "$unexpected"
+            exit 1
+          fi
+          test ! -e .github/workflows/apply-v10.22.11.1-stale-intent-patch.yml
 
       - name: Syntax checks
-        run: |
-          node --check index.js
-          node --check ai-cost-optimizer.js
-          node --check ai-luna-temperature-compat.js
-          node --check ai-context-optimizer.js
-          node --check production-ai-preflight.js
+        run: npm run check
 
       - name: Production AI tests
+        run: npm test
+
+      - name: Production preload integration tests
         run: |
-          node --test test-ai-luna-temperature-compat.js test-production-ai-preflight.js test-ai-cost-secret-redaction.js test-ai-context-optimizer.js
-          node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js --test test-ai-luna-preload-integration.js
-          AI_REQUEST_CACHE_MINUTES=0 node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js --test test-ai-context-preload-integration.js
-          AI_MONTHLY_BUDGET_USD=0.1 AI_OUTPUT_PRICE_PER_MTOK_USD=40 AI_REQUEST_CACHE_MINUTES=0 node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js --test test-ai-cost-concurrency-reservation.js
-          AI_MONTHLY_BUDGET_USD=1 AI_REQUEST_CACHE_MINUTES=0 node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js --test test-ai-cost-missing-usage.js
+          npm run test:ai-preload
+          npm run test:ai-context-preload
+          npm run test:production-preflight
+          npm run test:ai-cost-concurrency
+          npm run test:ai-cost-missing-usage
 
-      - name: Production preload composition must pass
-        run: node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js -r ./production-ai-preflight.js -e "if (!global.__LEO_PRODUCTION_AI_PREFLIGHT__().ok) process.exit(1);"
+      - name: Prove adaptive context safety contract
+        shell: bash
+        run: |
+          grep -Fq "v10.22.11.1-ai-context-adaptive" ai-context-optimizer.js
+          grep -Fq "sameSafetyFacts(original, candidate)" ai-context-optimizer.js
+          grep -Fq "SAFE_COMPACTION_ABOVE_LIMIT" ai-context-optimizer.js
+          grep -Fq "strategyModified: false" ai-context-optimizer.js
+          grep -Fq "sizingModified: false" ai-context-optimizer.js
+          grep -Fq "etoroModified: false" ai-context-optimizer.js
+          grep -Fq "liveExecutionArmedModified: false" ai-context-optimizer.js
+          node --test test-ai-context-adaptive.js
 
-      - name: Prove exact eToro v2 BUY runtime shape
+      - name: Prove exact eToro v2 BUY runtime remains unchanged
         shell: bash
         run: |
           test "$(grep -Fc 'https://public-api.etoro.com/api/v2/trading/execution/orders' index.js)" -eq 1
@@ -84,22 +96,7 @@ jobs:
           grep -Fq 'token:' index.js
           grep -Fq 'referenceId:' index.js
 
-      - name: Prove index migration remains tiny
-        shell: bash
-        run: |
-          git fetch origin main --depth=1
-          test "$(git diff --numstat origin/main...HEAD -- index.js)" = $'14\t2\tindex.js'
-
       - name: Prove canonical production start command
         shell: bash
         run: |
           node -e "const p=require('./package.json'); const expected='node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js -r ./production-ai-preflight.js index.js'; if(p.scripts.start!==expected){console.error(p.scripts.start);process.exit(1)}"
-
-      - name: Prove no draft or shadow runtime scaffolding is promoted by this PR
-        shell: bash
-        run: |
-          git fetch origin main --depth=1
-          if git diff --name-only origin/main...HEAD | grep -E '(^|/)(etoro-.*(draft|shadow|observer)|test-etoro-.*(draft|shadow|observer))'; then
-            echo 'Draft/shadow eToro scaffolding must not be promoted to main by this RC.'
-            exit 1
-          fi
