@@ -11,6 +11,10 @@ on:
       - 'ai-luna-temperature-compat.js'
       - 'ai-context-optimizer.js'
       - 'production-ai-preflight.js'
+      - 'etoro-execution-diagnostics.js'
+      - 'etoro-agent-scope-compat.js'
+      - 'test-etoro-execution-diagnostics.js'
+      - 'test-etoro-agent-scope-compat.js'
       - 'test-ai-context-optimizer.js'
       - 'test-ai-context-adaptive.js'
       - 'test-ai-context-preload-integration.js'
@@ -44,7 +48,7 @@ jobs:
         run: |
           git fetch origin main --depth=1
           git diff --exit-code origin/main...HEAD -- index.js ai-cost-optimizer.js ai-luna-temperature-compat.js production-ai-preflight.js
-          allowed='^(ai-context-optimizer\.js|package\.json|test-ai-context-adaptive\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
+          allowed='^(ai-context-optimizer\.js|package\.json|etoro-execution-diagnostics\.js|etoro-agent-scope-compat\.js|test-etoro-execution-diagnostics\.js|test-etoro-agent-scope-compat\.js|test-ai-context-adaptive\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
           unexpected="$(git diff --name-only origin/main...HEAD | grep -Ev "$allowed" || true)"
           if [ -n "$unexpected" ]; then
             echo "Unexpected changed files:"
@@ -96,7 +100,16 @@ jobs:
           grep -Fq 'token:' index.js
           grep -Fq 'referenceId:' index.js
 
+      - name: Prove eToro scope guard is fail-closed in armed LIVE
+        shell: bash
+        run: |
+          grep -Fq "MODERN_REAL_READ_ID = 211" etoro-agent-scope-compat.js
+          grep -Fq "MODERN_REAL_WRITE_ID = 212" etoro-agent-scope-compat.js
+          grep -Fq "ETORO_EXPECTED_USER_TOKEN_ID" etoro-agent-scope-compat.js
+          grep -Fq "EXPECTED_TOKEN_ID_REQUIRED" etoro-agent-scope-compat.js
+          npm run test:etoro-scopes
+
       - name: Prove canonical production start command
         shell: bash
         run: |
-          node -e "const p=require('./package.json'); const expected='node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js -r ./production-ai-preflight.js index.js'; if(p.scripts.start!==expected){console.error(p.scripts.start);process.exit(1)}"
+          node -e "const p=require('./package.json'); const expected='node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js -r ./production-ai-preflight.js -r ./etoro-execution-diagnostics.js -r ./etoro-agent-scope-compat.js index.js'; if(p.scripts.start!==expected){console.error(p.scripts.start);process.exit(1)}"
