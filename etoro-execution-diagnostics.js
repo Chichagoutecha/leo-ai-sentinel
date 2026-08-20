@@ -1,19 +1,22 @@
 'use strict';
 
 /**
- * LEO-AI SENTINEL v10.22.8 — eToro execution diagnostics preload
+ * LEO-AI SENTINEL v10.22.11.1 hotfix — eToro execution diagnostics preload
  *
  * Loaded before index.js with Node's -r flag. It does not change strategy,
  * allocation, sizing, LIVE_EXECUTION_ARMED, identity checks or the existing
- * ExecutionVerifier. It only observes eToro execution HTTP responses and adds
- * a local circuit breaker after an ambiguous HTTP 2xx response.
+ * ExecutionVerifier. It observes eToro execution HTTP responses for both
+ * /api/v1/trading/execution/* and /api/v2/trading/execution/* and adds a local
+ * circuit breaker after an ambiguous HTTP 2xx response.
  */
 
 const crypto = require('crypto');
 
-const DIAGNOSTIC_VERSION = 'v10.22.8-etoro-execution-diagnostics';
+const DIAGNOSTIC_VERSION = 'v10.22.11.1-etoro-execution-diagnostics-v1-v2-hotfix';
 const DEFAULT_BREAKER_MINUTES = 720;
 const MAX_BODY_PREVIEW_CHARS = 8000;
+const ETORO_API_ORIGIN = 'https://public-api.etoro.com';
+const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 const originalFetch = global.fetch;
 if (typeof originalFetch !== 'function') {
@@ -74,10 +77,33 @@ function getHeader(headersLike, name) {
   return null;
 }
 
+function executionRequestMetadata(url, method) {
+  const verb = String(method || 'GET').toUpperCase();
+  if (!WRITE_METHODS.has(verb)) return { match: false, version: null, environment: null };
+
+  try {
+    const parsed = new URL(String(url));
+    if (parsed.origin !== ETORO_API_ORIGIN) {
+      return { match: false, version: null, environment: null };
+    }
+
+    const match = parsed.pathname.match(/^\/api\/(v1|v2)\/trading\/execution(?:\/|$)/i);
+    if (!match) return { match: false, version: null, environment: null };
+
+    const environment = /\/demo(?:\/|$)/i.test(parsed.pathname) ? 'DEMO' : 'REAL_OR_UNSPECIFIED';
+    return {
+      match: true,
+      version: match[1].toLowerCase(),
+      environment,
+      path: parsed.pathname
+    };
+  } catch {
+    return { match: false, version: null, environment: null };
+  }
+}
+
 function isEtoroExecutionRequest(url, method) {
-  const normalized = String(url || '');
-  return normalized.startsWith('https://public-api.etoro.com/api/v1/trading/execution/') &&
-    ['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(method || 'GET').toUpperCase());
+  return executionRequestMetadata(url, method).match;
 }
 
 function safeRequestBody(body) {
@@ -88,7 +114,9 @@ function safeRequestBody(body) {
     const parsed = JSON.parse(body);
     const allowed = [
       'InstrumentId', 'Amount', 'Leverage', 'IsBuy', 'UnitsToDeduct',
-      'StopLossRate', 'TakeProfitRate', 'TrailingStopLoss'
+      'StopLossRate', 'TakeProfitRate', 'TrailingStopLoss',
+      'action', 'transaction', 'instrumentId', 'orderType', 'amount',
+      'orderCurrency', 'leverage', 'units', 'positionId'
     ];
     const output = {};
     for (const key of allowed) {
@@ -114,7 +142,6 @@ function redactText(value) {
   ].filter(Boolean);
 
   for (const secret of explicitSecrets) {
-    if (!secret) continue;
     text = text.split(String(secret)).join('[REDACTED_SECRET]');
   }
 
@@ -209,10 +236,10 @@ function classifyExecutionResponse(response, rawText) {
 
   if (parsed.parsed && parsed.value && typeof parsed.value === 'object') {
     const value = parsed.value;
-    const orderId = firstDefined(value, ['orderId', 'OrderId', 'orderID', 'OrderID']);
+    const orderId = firstDefined(value, ['orderId', 'OrderId', 'orderID', 'OrderID', 'id', 'Id']);
     const positionId = firstDefined(value, ['positionId', 'PositionId', 'positionID', 'PositionID']);
-    const statusId = firstDefined(value, ['statusId', 'StatusId', 'statusID', 'StatusID']);
-    const success = firstDefined(value, ['success', 'Success', 'isSuccess', 'IsSuccess']);
+    const statusId = firstDefined(value, ['statusId', 'StatusId', 'statusID', 'StatusID', 'status', 'Status']);
+    const success = firstDefined(value, ['success', 'Success', 'isSuccess', 'IsSuccess', 'isSucceeded', 'IsSucceeded']);
     const errorCode = firstDefined(value, ['errorCode', 'ErrorCode', 'code', 'Code']);
     const message = firstDefined(value, ['message', 'Message', 'errorMessage', 'ErrorMessage']);
 
@@ -270,11 +297,13 @@ function armBreaker(reason, diagnostic) {
     until: new Date(breakerUntilMs).toISOString(),
     requestId: diagnostic.requestId || null,
     url: diagnostic.url || null,
-    httpStatus: diagnostic.httpStatus || null
+    httpStatus: diagnostic.httpStatus || null,
+    apiVersion: diagnostic.apiVersion || null,
+    environment: diagnostic.environment || null
   };
 }
 
-function makeBreakerResponse(url, method, requestId) {
+function makeBreakerResponse(url, method, requestId, metadata) {
   const remainingMs = Math.max(0, breakerUntilMs - Date.now());
   const payload = {
     diagnosticVersion: DIAGNOSTIC_VERSION,
@@ -283,6 +312,8 @@ function makeBreakerResponse(url, method, requestId) {
     method,
     url: normalizeUrl(url),
     requestId: requestId || null,
+    apiVersion: metadata?.version || null,
+    environment: metadata?.environment || null,
     remainingSeconds: Math.ceil(remainingMs / 1000),
     breakerCause
   };
@@ -290,7 +321,7 @@ function makeBreakerResponse(url, method, requestId) {
 
   return new Response(JSON.stringify({
     errorCode: 'LOCAL_EXECUTION_CIRCUIT_BREAKER',
-    message: 'Nouvel ordre LIVE bloqué localement après une réponse eToro ambiguë. Consulte les logs LEO_ETORO_EXECUTION_DIAGNOSTIC.',
+    message: 'Nouvel ordre eToro bloqué localement après une réponse d’exécution ambiguë. Consulte les logs LEO_ETORO_EXECUTION_DIAGNOSTIC.',
     retryAfterSeconds: Math.ceil(remainingMs / 1000)
   }), {
     status: 409,
@@ -309,10 +340,11 @@ global.fetch = async function leoEtoroDiagnosticFetch(input, init = {}) {
   const method = String(init.method || (input && input.method) || 'GET').toUpperCase();
   const requestHeaders = init.headers || (input && input.headers) || null;
   const requestId = getHeader(requestHeaders, 'x-request-id');
-  const executionRequest = isEtoroExecutionRequest(url, method);
+  const executionMetadata = executionRequestMetadata(url, method);
+  const executionRequest = executionMetadata.match;
 
   if (executionRequest && breakerDurationMs > 0 && Date.now() < breakerUntilMs) {
-    return makeBreakerResponse(url, method, requestId);
+    return makeBreakerResponse(url, method, requestId, executionMetadata);
   }
 
   const startedAtMs = Date.now();
@@ -330,6 +362,8 @@ global.fetch = async function leoEtoroDiagnosticFetch(input, init = {}) {
         method,
         url: normalizeUrl(url),
         requestId: requestId || null,
+        apiVersion: executionMetadata.version,
+        environment: executionMetadata.environment,
         requestBody: safeRequestBody(init.body),
         durationMs: Date.now() - startedAtMs,
         errorName: error && error.name ? error.name : null,
@@ -364,6 +398,8 @@ global.fetch = async function leoEtoroDiagnosticFetch(input, init = {}) {
     responseUrl: normalizeUrl(response.url || url),
     redirected: Boolean(response.redirected),
     requestId: requestId || null,
+    apiVersion: executionMetadata.version,
+    environment: executionMetadata.environment,
     requestBody: safeRequestBody(init.body),
     durationMs: Date.now() - startedAtMs,
     httpStatus: response.status,
@@ -398,13 +434,20 @@ global.__LEO_ETORO_EXECUTION_DIAGNOSTICS_STATE__ = () => ({
   breakerActive: Date.now() < breakerUntilMs,
   breakerUntil: breakerUntilMs ? new Date(breakerUntilMs).toISOString() : null,
   breakerCause,
-  lastDiagnostic
+  lastDiagnostic,
+  captures: {
+    v1: true,
+    v2: true,
+    methods: [...WRITE_METHODS]
+  }
 });
 
 console.log(JSON.stringify({
   component: 'LEO_ETORO_EXECUTION_DIAGNOSTICS',
   version: DIAGNOSTIC_VERSION,
   enabled: true,
+  capturesV1: true,
+  capturesV2: true,
   breakerMinutes,
   liveExecutionArmedModified: false,
   secretsLogged: false
@@ -413,6 +456,8 @@ console.log(JSON.stringify({
 module.exports = {
   DIAGNOSTIC_VERSION,
   classifyExecutionResponse,
+  executionRequestMetadata,
+  isEtoroExecutionRequest,
   isEmptyJson,
   redactText,
   safeRequestBody
