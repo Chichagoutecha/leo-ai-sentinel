@@ -14,9 +14,11 @@ on:
       - 'etoro-execution-diagnostics.js'
       - 'etoro-agent-scope-compat.js'
       - 'etoro-acknowledged-no-effect-hotfix.js'
+      - 'etoro-ucits-execution-bridge.js'
       - 'test-etoro-execution-diagnostics.js'
       - 'test-etoro-agent-scope-compat.js'
       - 'test-etoro-acknowledged-no-effect-hotfix.js'
+      - 'test-etoro-ucits-execution-bridge.js'
       - 'test-ai-context-optimizer.js'
       - 'test-ai-context-adaptive.js'
       - 'test-ai-context-preload-integration.js'
@@ -50,7 +52,7 @@ jobs:
         run: |
           git fetch origin main --depth=1
           git diff --exit-code origin/main...HEAD -- index.js ai-cost-optimizer.js ai-luna-temperature-compat.js production-ai-preflight.js
-          allowed='^(ai-context-optimizer\.js|package\.json|etoro-execution-diagnostics\.js|etoro-agent-scope-compat\.js|etoro-acknowledged-no-effect-hotfix\.js|test-etoro-execution-diagnostics\.js|test-etoro-agent-scope-compat\.js|test-etoro-acknowledged-no-effect-hotfix\.js|test-ai-context-adaptive\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
+          allowed='^(ai-context-optimizer\.js|package\.json|etoro-execution-diagnostics\.js|etoro-agent-scope-compat\.js|etoro-acknowledged-no-effect-hotfix\.js|etoro-ucits-execution-bridge\.js|test-etoro-execution-diagnostics\.js|test-etoro-agent-scope-compat\.js|test-etoro-acknowledged-no-effect-hotfix\.js|test-etoro-ucits-execution-bridge\.js|test-ai-context-adaptive\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
           unexpected="$(git diff --name-only origin/main...HEAD | grep -Ev "$allowed" || true)"
           if [ -n "$unexpected" ]; then
             echo "Unexpected changed files:"
@@ -123,7 +125,22 @@ jobs:
           grep -Fq "liveExecutionArmedModified: false" etoro-acknowledged-no-effect-hotfix.js
           npm run test:etoro-no-effect
 
+      - name: Prove UCITS execution bridge is fail-closed and analysis-preserving
+        shell: bash
+        run: |
+          grep -Fq "const mode = String(value || 'guard')" etoro-ucits-execution-bridge.js
+          grep -Fq "UCITS_EXECUTION_GUARD_ACTIVE" etoro-ucits-execution-bridge.js
+          grep -Fq "UCITS_SYMBOL_NOT_APPROVED" etoro-ucits-execution-bridge.js
+          grep -Fq "UCITS_SYMBOL_EXACT_MATCH_REQUIRED" etoro-ucits-execution-bridge.js
+          grep -Fq "UCITS_EXECUTION_VENUE_CLOSED" etoro-ucits-execution-bridge.js
+          grep -Fq "UCITS_QUOTE_STALE" etoro-ucits-execution-bridge.js
+          grep -Fq "originatesOrders: false" etoro-ucits-execution-bridge.js
+          grep -Fq "SPY: Object.freeze({ analysisInstrumentId: 3417, executionSymbol: 'CSPX.L'" etoro-ucits-execution-bridge.js
+          grep -Fq "QQQ: Object.freeze({ analysisInstrumentId: 3418, executionSymbol: 'CNDX.L'" etoro-ucits-execution-bridge.js
+          grep -Fq "GLD: Object.freeze({ analysisInstrumentId: 15634, executionSymbol: 'IGLN.L'" etoro-ucits-execution-bridge.js
+          npm run test:etoro-ucits
+
       - name: Prove canonical production start command
         shell: bash
         run: |
-          node -e "const p=require('./package.json'); const expected='node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js -r ./production-ai-preflight.js -r ./etoro-execution-diagnostics.js -r ./etoro-agent-scope-compat.js -r ./etoro-acknowledged-no-effect-hotfix.js index.js'; if(p.scripts.start!==expected){console.error(p.scripts.start);process.exit(1)}"
+          node -e "const p=require('./package.json'); const expected='node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js -r ./production-ai-preflight.js -r ./etoro-execution-diagnostics.js -r ./etoro-agent-scope-compat.js -r ./etoro-acknowledged-no-effect-hotfix.js -r ./etoro-ucits-execution-bridge.js index.js'; if(p.scripts.start!==expected){console.error(p.scripts.start);process.exit(1)}"
