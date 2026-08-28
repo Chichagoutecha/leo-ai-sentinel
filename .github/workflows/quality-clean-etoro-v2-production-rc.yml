@@ -115,11 +115,15 @@ jobs:
           grep -Fq "EXPECTED_TOKEN_ID_REQUIRED" etoro-agent-scope-compat.js
           npm run test:etoro-scopes
 
-      - name: Prove acknowledged eToro no-effect guard is conservative
+      - name: Prove acknowledged and UCITS pre-send no-effect guards are conservative
         shell: bash
         run: |
+          grep -Fq "v10.22.14.0-etoro-no-effect-hotfix" etoro-acknowledged-no-effect-hotfix.js
           grep -Fq "DEFAULT_ACK_TIMEOUT_MINUTES = 180" etoro-acknowledged-no-effect-hotfix.js
           grep -Fq "DEFAULT_ACK_MIN_RECONCILIATIONS = 12" etoro-acknowledged-no-effect-hotfix.js
+          grep -Fq "UCITS_PRE_SEND_REJECTION_NO_BROKER_ORDER" etoro-acknowledged-no-effect-hotfix.js
+          grep -Fq "PRE_SEND_REJECTED_NOT_SENT_TO_ETORO" etoro-acknowledged-no-effect-hotfix.js
+          grep -Fq "sentToEtoro: false" etoro-acknowledged-no-effect-hotfix.js
           grep -Fq "requiresNoPositionId: true" etoro-acknowledged-no-effect-hotfix.js
           grep -Fq "requiresStateUnchanged: true" etoro-acknowledged-no-effect-hotfix.js
           grep -Fq "requiresCashUnchanged: true" etoro-acknowledged-no-effect-hotfix.js
@@ -162,4 +166,4 @@ jobs:
       - name: Prove canonical production start command
         shell: bash
         run: |
-          node -e "const p=require('./package.json'); const expected='node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js -r ./production-ai-preflight.js -r ./etoro-execution-diagnostics.js -r ./etoro-agent-scope-compat.js -r ./etoro-acknowledged-no-effect-hotfix.js -r ./etoro-ucits-execution-bridge.js -r ./all-in-cost-shadow-agent.js index.js'; if(p.scripts.start!==expected){console.error(p.scripts.start);process.exit(1)}"
+          node -e "const p=require('./package.json'); const expected='node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js -r ./production-ai-preflight.js -r ./etoro-execution-diagnostics.js -r ./etoro-agent-scope-compat.js -r ./etoro-ucits-execution-bridge.js -r ./etoro-acknowledged-no-effect-hotfix.js -r ./all-in-cost-shadow-agent.js index.js'; if(p.scripts.start!==expected){console.error(p.scripts.start);process.exit(1)}"
