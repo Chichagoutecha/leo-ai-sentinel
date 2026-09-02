@@ -10,6 +10,8 @@ on:
       - 'ai-cost-optimizer.js'
       - 'ai-luna-temperature-compat.js'
       - 'ai-context-optimizer.js'
+      - 'ai-decision-context-v2.js'
+      - 'decision-observability.js'
       - 'production-ai-preflight.js'
       - 'etoro-execution-diagnostics.js'
       - 'etoro-agent-scope-compat.js'
@@ -21,6 +23,8 @@ on:
       - 'test-etoro-acknowledged-no-effect-hotfix.js'
       - 'test-etoro-ucits-execution-bridge.js'
       - 'test-all-in-cost-shadow-agent.js'
+      - 'test-ai-decision-context-v2.js'
+      - 'test-decision-observability.js'
       - 'test-ai-context-optimizer.js'
       - 'test-ai-context-adaptive.js'
       - 'test-ai-context-preload-integration.js'
@@ -54,7 +58,7 @@ jobs:
         run: |
           git fetch origin main --depth=1
           git diff --exit-code origin/main...HEAD -- index.js ai-cost-optimizer.js ai-luna-temperature-compat.js production-ai-preflight.js
-          allowed='^(ai-context-optimizer\.js|package\.json|etoro-execution-diagnostics\.js|etoro-agent-scope-compat\.js|etoro-acknowledged-no-effect-hotfix\.js|etoro-ucits-execution-bridge\.js|all-in-cost-shadow-agent\.js|test-etoro-execution-diagnostics\.js|test-etoro-agent-scope-compat\.js|test-etoro-acknowledged-no-effect-hotfix\.js|test-etoro-ucits-execution-bridge\.js|test-all-in-cost-shadow-agent\.js|test-ai-context-adaptive\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
+          allowed='^(ai-context-optimizer\.js|ai-decision-context-v2\.js|decision-observability\.js|package\.json|etoro-execution-diagnostics\.js|etoro-agent-scope-compat\.js|etoro-acknowledged-no-effect-hotfix\.js|etoro-ucits-execution-bridge\.js|all-in-cost-shadow-agent\.js|test-etoro-execution-diagnostics\.js|test-etoro-agent-scope-compat\.js|test-etoro-acknowledged-no-effect-hotfix\.js|test-etoro-ucits-execution-bridge\.js|test-all-in-cost-shadow-agent\.js|test-ai-decision-context-v2\.js|test-decision-observability\.js|test-ai-context-adaptive\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
           unexpected="$(git diff --name-only origin/main...HEAD | grep -Ev "$allowed" || true)"
           if [ -n "$unexpected" ]; then
             echo "Unexpected changed files:"
@@ -88,6 +92,34 @@ jobs:
           grep -Fq "etoroModified: false" ai-context-optimizer.js
           grep -Fq "liveExecutionArmedModified: false" ai-context-optimizer.js
           node --test test-ai-context-adaptive.js
+
+      - name: Prove execution-aware Decision Context v2 is bounded and fail-closed
+        shell: bash
+        run: |
+          grep -Fq "v10.22.15.0-decision-context-v2" ai-decision-context-v2.js
+          grep -Fq "TARGET_CHARS" ai-decision-context-v2.js
+          grep -Fq "UCITS_EXECUTION_VENUE_CLOSED" ai-decision-context-v2.js
+          grep -Fq "never choose BUY" ai-decision-context-v2.js
+          grep -Fq "If no council-approved BUY is executable now, choose HOLD" ai-decision-context-v2.js
+          grep -Fq "providerCallsAdded: 0" ai-decision-context-v2.js
+          grep -Fq "riskThresholdsModified: false" ai-decision-context-v2.js
+          grep -Fq "sizingModified: false" ai-decision-context-v2.js
+          grep -Fq "etoroOrderRuntimeModified: false" ai-decision-context-v2.js
+          grep -Fq "liveExecutionArmedModified: false" ai-decision-context-v2.js
+          npm run test:decision-context-v2
+
+      - name: Prove decision observability is log-only
+        shell: bash
+        run: |
+          grep -Fq "v10.22.15.0-decision-observability" decision-observability.js
+          grep -Fq "SCAN AUTO RESULT:" decision-observability.js
+          grep -Fq "logOnly: true" decision-observability.js
+          grep -Fq "decisionModified: false" decision-observability.js
+          grep -Fq "riskModified: false" decision-observability.js
+          grep -Fq "sizingModified: false" decision-observability.js
+          grep -Fq "orderModified: false" decision-observability.js
+          grep -Fq "schedulerModified: false" decision-observability.js
+          npm run test:decision-observability
 
       - name: Prove exact eToro v2 BUY runtime remains unchanged
         shell: bash
@@ -166,4 +198,4 @@ jobs:
       - name: Prove canonical production start command
         shell: bash
         run: |
-          node -e "const p=require('./package.json'); const expected='node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js -r ./production-ai-preflight.js -r ./etoro-execution-diagnostics.js -r ./etoro-agent-scope-compat.js -r ./etoro-ucits-execution-bridge.js -r ./etoro-acknowledged-no-effect-hotfix.js -r ./all-in-cost-shadow-agent.js index.js'; if(p.scripts.start!==expected){console.error(p.scripts.start);process.exit(1)}"
+          node -e "const p=require('./package.json'); const expected='node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js -r ./production-ai-preflight.js -r ./etoro-execution-diagnostics.js -r ./etoro-agent-scope-compat.js -r ./etoro-ucits-execution-bridge.js -r ./etoro-acknowledged-no-effect-hotfix.js -r ./all-in-cost-shadow-agent.js -r ./ai-decision-context-v2.js -r ./decision-observability.js index.js'; if(p.scripts.start!==expected){console.error(p.scripts.start);process.exit(1)}"
