@@ -10,6 +10,8 @@ on:
       - 'ai-cost-optimizer.js'
       - 'ai-luna-temperature-compat.js'
       - 'ai-context-optimizer.js'
+      - 'ai-context-optimizer-v2.js'
+      - 'execution-aware-decision-runtime.js'
       - 'production-ai-preflight.js'
       - 'etoro-execution-diagnostics.js'
       - 'etoro-agent-scope-compat.js'
@@ -23,6 +25,8 @@ on:
       - 'test-all-in-cost-shadow-agent.js'
       - 'test-ai-context-optimizer.js'
       - 'test-ai-context-adaptive.js'
+      - 'test-ai-context-v2.js'
+      - 'test-execution-aware-decision-runtime.js'
       - 'test-ai-context-preload-integration.js'
       - 'test-ai-cost-concurrency-reservation.js'
       - 'test-ai-cost-missing-usage.js'
@@ -54,7 +58,7 @@ jobs:
         run: |
           git fetch origin main --depth=1
           git diff --exit-code origin/main...HEAD -- index.js ai-cost-optimizer.js ai-luna-temperature-compat.js production-ai-preflight.js
-          allowed='^(ai-context-optimizer\.js|package\.json|etoro-execution-diagnostics\.js|etoro-agent-scope-compat\.js|etoro-acknowledged-no-effect-hotfix\.js|etoro-ucits-execution-bridge\.js|all-in-cost-shadow-agent\.js|test-etoro-execution-diagnostics\.js|test-etoro-agent-scope-compat\.js|test-etoro-acknowledged-no-effect-hotfix\.js|test-etoro-ucits-execution-bridge\.js|test-all-in-cost-shadow-agent\.js|test-ai-context-adaptive\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
+          allowed='^(ai-context-optimizer\.js|ai-context-optimizer-v2\.js|execution-aware-decision-runtime\.js|package\.json|etoro-execution-diagnostics\.js|etoro-agent-scope-compat\.js|etoro-acknowledged-no-effect-hotfix\.js|etoro-ucits-execution-bridge\.js|all-in-cost-shadow-agent\.js|test-etoro-execution-diagnostics\.js|test-etoro-agent-scope-compat\.js|test-etoro-acknowledged-no-effect-hotfix\.js|test-etoro-ucits-execution-bridge\.js|test-all-in-cost-shadow-agent\.js|test-ai-context-adaptive\.js|test-ai-context-v2\.js|test-execution-aware-decision-runtime\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
           unexpected="$(git diff --name-only origin/main...HEAD | grep -Ev "$allowed" || true)"
           if [ -n "$unexpected" ]; then
             echo "Unexpected changed files:"
@@ -88,6 +92,22 @@ jobs:
           grep -Fq "etoroModified: false" ai-context-optimizer.js
           grep -Fq "liveExecutionArmedModified: false" ai-context-optimizer.js
           node --test test-ai-context-adaptive.js
+
+      - name: Prove context v2 and execution-aware governance
+        shell: bash
+        run: |
+          grep -Fq "v10.22.15.0-ai-context-v2" ai-context-optimizer-v2.js
+          grep -Fq "v1.sameSafetyFacts(payload, candidate)" ai-context-optimizer-v2.js
+          grep -Fq "strategyModified: false" ai-context-optimizer-v2.js
+          grep -Fq "sizingModified: false" ai-context-optimizer-v2.js
+          grep -Fq "etoroModified: false" ai-context-optimizer-v2.js
+          grep -Fq "v10.22.15.0-execution-aware-decision" execution-aware-decision-runtime.js
+          grep -Fq "canPlaceOrder: false" execution-aware-decision-runtime.js
+          grep -Fq "canModifyOrder: false" execution-aware-decision-runtime.js
+          grep -Fq "canOverrideHardVeto: false" execution-aware-decision-runtime.js
+          grep -Fq "providerCallsAdded: 0" execution-aware-decision-runtime.js
+          grep -Fq "10 */2 * * *" execution-aware-decision-runtime.js
+          node --test test-ai-context-v2.js test-execution-aware-decision-runtime.js
 
       - name: Prove exact eToro v2 BUY runtime remains unchanged
         shell: bash
@@ -166,4 +186,4 @@ jobs:
       - name: Prove canonical production start command
         shell: bash
         run: |
-          node -e "const p=require('./package.json'); const expected='node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js -r ./production-ai-preflight.js -r ./etoro-execution-diagnostics.js -r ./etoro-agent-scope-compat.js -r ./etoro-ucits-execution-bridge.js -r ./etoro-acknowledged-no-effect-hotfix.js -r ./all-in-cost-shadow-agent.js index.js'; if(p.scripts.start!==expected){console.error(p.scripts.start);process.exit(1)}"
+          node -e "const p=require('./package.json'); const expected='node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js -r ./ai-context-optimizer-v2.js -r ./execution-aware-decision-runtime.js -r ./production-ai-preflight.js -r ./etoro-execution-diagnostics.js -r ./etoro-agent-scope-compat.js -r ./etoro-ucits-execution-bridge.js -r ./etoro-acknowledged-no-effect-hotfix.js -r ./all-in-cost-shadow-agent.js index.js'; if(p.scripts.start!==expected){console.error(p.scripts.start);process.exit(1)}"
