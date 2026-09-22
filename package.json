@@ -1,7 +1,7 @@
 {
   "name": "leo-ai-sentinel",
-  "version": "10.22.16.0",
-  "description": "LEO-AI SENTINEL with HOLD opportunity shadow calibration, execution-aware decision timing, context optimizer v2, UCITS lifecycle hardening and conservative REAL execution verification",
+  "version": "10.22.17.0",
+  "description": "LEO-AI SENTINEL with schema-aligned HOLD diagnostics, safe US/UCITS overlap scanning, HOLD opportunity calibration, context optimizer v2 and conservative REAL execution verification",
   "main": "index.js",
   "scripts": {
     "start": "node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js -r ./ai-context-optimizer-v2.js -r ./execution-aware-decision-runtime.js -r ./production-ai-preflight.js -r ./etoro-execution-diagnostics.js -r ./etoro-agent-scope-compat.js -r ./etoro-ucits-execution-bridge.js -r ./etoro-acknowledged-no-effect-hotfix.js -r ./all-in-cost-shadow-agent.js -r ./hold-opportunity-shadow-agent.js index.js",

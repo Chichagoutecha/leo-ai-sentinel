@@ -59,8 +59,8 @@ jobs:
         shell: bash
         run: |
           git fetch origin main --depth=1
-          git diff --exit-code origin/main...HEAD -- index.js ai-cost-optimizer.js ai-luna-temperature-compat.js production-ai-preflight.js
-          allowed='^(ai-context-optimizer\.js|ai-context-optimizer-v2\.js|execution-aware-decision-runtime\.js|package\.json|etoro-execution-diagnostics\.js|etoro-agent-scope-compat\.js|etoro-acknowledged-no-effect-hotfix\.js|etoro-ucits-execution-bridge\.js|all-in-cost-shadow-agent\.js|hold-opportunity-shadow-agent\.js|test-etoro-execution-diagnostics\.js|test-etoro-agent-scope-compat\.js|test-etoro-acknowledged-no-effect-hotfix\.js|test-etoro-ucits-execution-bridge\.js|test-all-in-cost-shadow-agent\.js|test-hold-opportunity-shadow-agent\.js|test-ai-context-adaptive\.js|test-ai-context-v2\.js|test-execution-aware-decision-runtime\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
+          git diff --exit-code origin/main...HEAD -- ai-cost-optimizer.js ai-luna-temperature-compat.js production-ai-preflight.js
+          allowed='^(index\.js|ai-context-optimizer\.js|ai-context-optimizer-v2\.js|execution-aware-decision-runtime\.js|package\.json|etoro-execution-diagnostics\.js|etoro-agent-scope-compat\.js|etoro-acknowledged-no-effect-hotfix\.js|etoro-ucits-execution-bridge\.js|all-in-cost-shadow-agent\.js|hold-opportunity-shadow-agent\.js|test-etoro-execution-diagnostics\.js|test-etoro-agent-scope-compat\.js|test-etoro-acknowledged-no-effect-hotfix\.js|test-etoro-ucits-execution-bridge\.js|test-all-in-cost-shadow-agent\.js|test-hold-opportunity-shadow-agent\.js|test-ai-context-adaptive\.js|test-ai-context-v2\.js|test-execution-aware-decision-runtime\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
           unexpected="$(git diff --name-only origin/main...HEAD | grep -Ev "$allowed" || true)"
           if [ -n "$unexpected" ]; then
             echo "Unexpected changed files:"
@@ -68,6 +68,22 @@ jobs:
             exit 1
           fi
           test ! -e .github/workflows/apply-v10.22.11.1-stale-intent-patch.yml
+
+      - name: Prove index change is scheduler-only and execution-safe
+        shell: bash
+        run: |
+          git fetch origin main --depth=1
+          grep -Fq 'const VERSION = "v10.22.17-execution-alignment";' index.js
+          grep -Fq 'const UCITS_OVERLAP_SCAN_SCHEDULE =' index.js
+          grep -Fq 'process.env.UCITS_OVERLAP_SCAN_SCHEDULE || "45 14 * * 1-5"' index.js
+          grep -Fq 'SCAN UCITS OVERLAP START:' index.js
+          grep -Fq 'scanMarket("auto-trade-ucits-overlap")' index.js
+          test "$(grep -Fc 'https://public-api.etoro.com/api/v2/trading/execution/orders' index.js)" -eq 1
+          test "$(grep -Fc 'const MAX_EXECUTED_ORDERS_24H = 4;' index.js)" -eq 1
+          test "$(grep -Fc 'const MAX_BUYS_24H = 3;' index.js)" -eq 1
+          test "$(grep -Fc 'const MAX_SELLS_24H = 2;' index.js)" -eq 1
+          test "$(grep -Fc 'const MIN_HOURS_BETWEEN_EXECUTIONS = 2;' index.js)" -eq 1
+          test "$(grep -Fc 'const COUNCIL_REQUIRE_NO_HARD_VETO =' index.js)" -eq 1
 
       - name: Syntax checks
         run: npm run check
@@ -103,12 +119,14 @@ jobs:
           grep -Fq "strategyModified: false" ai-context-optimizer-v2.js
           grep -Fq "sizingModified: false" ai-context-optimizer-v2.js
           grep -Fq "etoroModified: false" ai-context-optimizer-v2.js
-          grep -Fq "v10.22.15.0-execution-aware-decision" execution-aware-decision-runtime.js
+          grep -Fq "v10.22.17.0-execution-aware-decision" execution-aware-decision-runtime.js
           grep -Fq "canPlaceOrder: false" execution-aware-decision-runtime.js
           grep -Fq "canModifyOrder: false" execution-aware-decision-runtime.js
           grep -Fq "canOverrideHardVeto: false" execution-aware-decision-runtime.js
           grep -Fq "providerCallsAdded: 0" execution-aware-decision-runtime.js
           grep -Fq "10 */2 * * *" execution-aware-decision-runtime.js
+          grep -Fq "45 14 * * 1-5" execution-aware-decision-runtime.js
+          grep -Fq "decision?.action || decision?.decision || 'UNKNOWN'" execution-aware-decision-runtime.js
           node --test test-ai-context-v2.js test-execution-aware-decision-runtime.js
 
       - name: Prove exact eToro v2 BUY runtime remains unchanged
@@ -188,7 +206,7 @@ jobs:
       - name: Prove HOLD Opportunity agent is shadow-only and non-interfering
         shell: bash
         run: |
-          grep -Fq "v10.22.16.0-hold-opportunity-shadow" hold-opportunity-shadow-agent.js
+          grep -Fq "v10.22.17.0-hold-opportunity-shadow" hold-opportunity-shadow-agent.js
           grep -Fq "shadowOnly: true" hold-opportunity-shadow-agent.js
           grep -Fq "canPlaceOrder: false" hold-opportunity-shadow-agent.js
           grep -Fq "canBlockOrder: false" hold-opportunity-shadow-agent.js
@@ -200,6 +218,7 @@ jobs:
           grep -Fq "canChangeSchedule: false" hold-opportunity-shadow-agent.js
           grep -Fq "providerCallsAdded: 0" hold-opportunity-shadow-agent.js
           grep -Fq "originatesOrders: false" hold-opportunity-shadow-agent.js
+          grep -Fq "decision?.action || decision?.decision || 'UNKNOWN'" hold-opportunity-shadow-agent.js
           grep -Fq "/hold-shadow-status" hold-opportunity-shadow-agent.js
           grep -Fq "/hold-shadow-history" hold-opportunity-shadow-agent.js
           grep -Fq "/hold-shadow-calibration" hold-opportunity-shadow-agent.js
