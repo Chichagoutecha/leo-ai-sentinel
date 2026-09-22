@@ -31,12 +31,22 @@ test('augmentation adds execution policy without changing council state', () => 
   assert.equal(augmented.execution_awareness.mappedAssets.SPY.executableNow, false);
 });
 
-test('diagnostics identify HOLD despite an executable approved BUY', () => {
+test('diagnostics identify HOLD despite an executable approved BUY using schema-native decision field', () => {
   const payload = { agent_council: { status: 'MIXED', approvedBuyAssets: ['BTC'] } };
   const awareness = mod.buildExecutionAwareness(payload, new Date('2026-09-02T20:00:00Z'));
-  const diag = mod.buildDiagnostics(payload, { action: 'HOLD', asset: 'NONE', confidence: 58, reason: 'No trade' }, awareness);
+  const diag = mod.buildDiagnostics(payload, { decision: 'HOLD', asset: 'NONE', confidence: 58, reason: 'No trade' }, awareness);
+  assert.equal(diag.action, 'HOLD');
   assert.equal(diag.holdDespiteExecutableApprovedBuy, true);
   assert.deepEqual(diag.approvedBuyExecutableNow, ['BTC']);
+});
+
+test('legacy action field remains accepted for compatibility', () => {
+  assert.equal(mod.decisionAction({ action: 'BUY' }), 'BUY');
+  assert.equal(mod.decisionAction({ decision: 'SELL' }), 'SELL');
+});
+
+test('default overlap scan is inside the year-round US/Europe overlap window', () => {
+  assert.equal(mod.DEFAULT_UCITS_OVERLAP_SCHEDULE, '45 14 * * 1-5');
 });
 
 test('runtime governance cannot place or rewrite orders', () => {
