@@ -69,7 +69,7 @@ test('buildOpportunity records final HOLD without changing it and uses decision 
   mod._test.resetState();
   const payload = basePayload();
   const awareness = { approvedBuyAssets: ['SPY'], executableNow: ['SPY'], unavailableNow: [], mappedAssets: {} };
-  const decision = { action: 'HOLD', asset: 'NONE', confidence: 61, reason: 'Final coordinator prefers HOLD' };
+  const decision = { decision: 'HOLD', asset: 'NONE', confidence: 61, reason: 'Final coordinator prefers HOLD' };
   const o = mod.buildOpportunity(payload, decision, 'SPY', awareness, new Date('2026-09-17T10:00:05Z'));
   assert.equal(o.asset, 'SPY');
   assert.equal(o.analysisInstrumentId, 3417);
@@ -83,7 +83,7 @@ test('buildOpportunity records final HOLD without changing it and uses decision 
 test('venue unavailable candidate is separated from executable HOLD calibration', () => {
   const payload = basePayload();
   const awareness = { approvedBuyAssets: ['SPY'], executableNow: [], unavailableNow: ['SPY'], mappedAssets: {} };
-  const decision = { action: 'HOLD', confidence: 58, reason: 'Venue closed' };
+  const decision = { decision: 'HOLD', confidence: 58, reason: 'Venue closed' };
   const o = mod.buildOpportunity(payload, decision, 'SPY', awareness, new Date('2026-09-17T10:00:05Z'));
   assert.equal(o.cohort, 'VENUE_UNAVAILABLE_APPROVED_BUY_HELD');
   assert.equal(o.executableAtDecision, false);
@@ -142,7 +142,7 @@ test('calibration interprets executable HOLDs only after minimum sample evidence
 test('BUY decisions are never turned into HOLD observations by the pure recorder', async () => {
   mod._test.resetState();
   const before = mod._test.getState().opportunities.length;
-  const added = await mod.recordHoldOpportunities(basePayload(), { action: 'BUY', asset: 'SPY', confidence: 80 }, async () => null);
+  const added = await mod.recordHoldOpportunities(basePayload(), { decision: 'BUY', asset: 'SPY', confidence: 80 }, async () => null);
   assert.deepEqual(added, []);
   assert.equal(mod._test.getState().opportunities.length, before);
 });
@@ -164,4 +164,19 @@ test('fetch observer forwards request unchanged and adds no provider call', asyn
   assert.equal(seen.length, 1);
   assert.equal(seen[0].input, 'https://public-api.etoro.com/api/v1/market-data/instruments/rates?instrumentIds=3417');
   assert.equal(seen[0].init, init);
+});
+
+
+test('schema-native decision field is recognized by HOLD shadow', async () => {
+  mod._test.resetState();
+  const payload = basePayload();
+  const added = await mod.recordHoldOpportunities(
+    payload,
+    { decision: 'HOLD', asset: 'NONE', confidence: 77, reason: 'schema-native HOLD' },
+    async () => null,
+    new Date('2026-09-17T10:00:05Z')
+  );
+  assert.equal(mod.decisionAction({ decision: 'HOLD' }), 'HOLD');
+  assert.equal(added.length, 1);
+  assert.equal(added[0].finalDecision.action, 'HOLD');
 });
