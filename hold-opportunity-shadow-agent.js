@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * LEO-AI SENTINEL v10.22.16.0 — HOLD Opportunity Shadow Agent.
+ * LEO-AI SENTINEL v10.22.17.0 — HOLD Opportunity Shadow Agent.
  *
  * Purpose:
  * - Observe final HOLD decisions when the MultiAgentCouncil had one or more
@@ -23,7 +23,7 @@ const crypto = require('crypto');
 const CurrentOpenAI = require('openai');
 const openAIPath = require.resolve('openai');
 
-const VERSION = 'v10.22.16.0-hold-opportunity-shadow';
+const VERSION = 'v10.22.17.0-hold-opportunity-shadow';
 const COMPONENT = 'LEO_HOLD_OPPORTUNITY_SHADOW';
 const MODE = 'shadow';
 const ENABLED = process.env.HOLD_SHADOW_ENABLED !== 'false';
@@ -266,8 +266,11 @@ function decisionTimestamp(payload) {
   const d = new Date(payload?.time || payload?.generatedAt || Date.now());
   return Number.isFinite(d.getTime()) ? d : new Date();
 }
+function decisionAction(decision) {
+  return String(decision?.action || decision?.decision || 'UNKNOWN').toUpperCase();
+}
 function opportunityId(payload, decision, asset) {
-  const seed = `${payload?.source || 'unknown'}|${payload?.time || ''}|${decision?.action || ''}|${asset}`;
+  const seed = `${payload?.source || 'unknown'}|${payload?.time || ''}|${decisionAction(decision)}|${asset}`;
   return crypto.createHash('sha256').update(seed).digest('hex').slice(0, 32);
 }
 function buildOpportunity(payload, decision, asset, awareness, now = new Date()) {
@@ -358,7 +361,7 @@ function trackTask(promise) {
 }
 async function drainPendingTasks() { await Promise.allSettled([...pendingTasks]); }
 async function recordHoldOpportunities(payload, decision, baseFetch, now = new Date()) {
-  if (!ENABLED || String(decision?.action || '').toUpperCase() !== 'HOLD') return [];
+  if (!ENABLED || decisionAction(decision) !== 'HOLD') return [];
   const awareness = awarenessForDecision(payload);
   if (!awareness.approvedBuyAssets.length) return [];
   await loadState(baseFetch);
@@ -574,7 +577,7 @@ class HoldShadowOpenAI extends CurrentOpenAI {
       const response = await create(params, requestOptions);
       if (payload) {
         const decision = extractDecision(response);
-        if (decision && String(decision.action || '').toUpperCase() === 'HOLD') {
+        if (decision && decisionAction(decision) === 'HOLD') {
           // Never delay the production decision path for shadow persistence/calibration.
           trackTask(recordHoldOpportunities(payload, decision, installedAgent?.baseFetch || global.fetch, new Date()).catch((error) => {
             log('HOLD_SHADOW_OBSERVATION_FAILED_OPEN', { error: String(error?.message || error).slice(0, 160) }, 'warn');
@@ -608,6 +611,7 @@ log('STARTED', {
 });
 
 module.exports = {
+  decisionAction,
   VERSION, GOVERNANCE, MARKOUT_HOURS, NEAR_HORIZON_TOLERANCE_HOURS,
   parseDecisionPayload, extractDecision, approvedBuyAssetsFromCouncil,
   buildOpportunity, recordHoldOpportunities, ingestLatestRates, updateMarkoutsFromRates,
