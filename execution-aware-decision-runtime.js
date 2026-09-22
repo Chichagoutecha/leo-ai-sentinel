@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * LEO-AI SENTINEL v10.22.15.0 — execution-aware decision runtime.
+ * LEO-AI SENTINEL v10.22.17.0 — execution-aware decision runtime.
  *
  * Adds current execution-venue availability to the existing decision payload and
  * emits explicit diagnostics explaining HOLD/BUY selection. It never places an
@@ -13,9 +13,10 @@
 const CurrentOpenAI = require('openai');
 const openAIPath = require.resolve('openai');
 
-const VERSION = 'v10.22.15.0-execution-aware-decision';
+const VERSION = 'v10.22.17.0-execution-aware-decision';
 const ENABLED = process.env.EXECUTION_AWARE_DECISION_ENABLED !== 'false';
 const DEFAULT_SCHEDULE = '10 */2 * * *';
+const DEFAULT_UCITS_OVERLAP_SCHEDULE = '45 14 * * 1-5';
 const CRYPTO = new Set(['BTC','ETH','SOL']);
 const EXECUTION_MAP = Object.freeze({
   SPY: Object.freeze({ executionSymbol: 'CSPX.L', venue: 'LSE' }),
@@ -29,6 +30,7 @@ const EXECUTION_MAP = Object.freeze({
 });
 
 if (ENABLED && !process.env.TRADE_CRON_SCHEDULE) process.env.TRADE_CRON_SCHEDULE = DEFAULT_SCHEDULE;
+if (ENABLED && !process.env.UCITS_OVERLAP_SCAN_SCHEDULE) process.env.UCITS_OVERLAP_SCAN_SCHEDULE = DEFAULT_UCITS_OVERLAP_SCHEDULE;
 
 let lastEvent = null;
 let lastDiagnostics = null;
@@ -121,8 +123,11 @@ function extractDecision(response) {
   if (isObject(response?.choices?.[0]?.message?.parsed)) return response.choices[0].message.parsed;
   return null;
 }
+function decisionAction(decision) {
+  return String(decision?.action || decision?.decision || 'UNKNOWN').toUpperCase();
+}
 function buildDiagnostics(payload, decision, awareness) {
-  const action = String(decision?.action || 'UNKNOWN').toUpperCase();
+  const action = decisionAction(decision);
   const asset = String(decision?.asset || 'NONE').toUpperCase();
   const executableApproved = awareness?.approvedBuyExecutableNow || [];
   const closedApproved = awareness?.approvedBuyUnavailableNow || [];
@@ -202,6 +207,7 @@ global.__LEO_EXECUTION_AWARE_DECISION_STATE__ = () => ({
   enabled: ENABLED,
   defaultTradeSchedule: DEFAULT_SCHEDULE,
   effectiveTradeSchedule: process.env.TRADE_CRON_SCHEDULE || DEFAULT_SCHEDULE,
+  ucitsOverlapScanSchedule: process.env.UCITS_OVERLAP_SCAN_SCHEDULE || DEFAULT_UCITS_OVERLAP_SCHEDULE,
   stats: { ...stats },
   lastDiagnostics,
   lastEvent,
@@ -215,6 +221,7 @@ log('STARTED', {
   enabled: ENABLED,
   defaultTradeSchedule: DEFAULT_SCHEDULE,
   effectiveTradeSchedule: process.env.TRADE_CRON_SCHEDULE || DEFAULT_SCHEDULE,
+  ucitsOverlapScanSchedule: process.env.UCITS_OVERLAP_SCAN_SCHEDULE || DEFAULT_UCITS_OVERLAP_SCHEDULE,
   explicitSchedulePreserved: Boolean(process.env.TRADE_CRON_SCHEDULE && process.env.TRADE_CRON_SCHEDULE !== DEFAULT_SCHEDULE),
   canPlaceOrder: false,
   canOverrideHardVeto: false,
@@ -222,7 +229,7 @@ log('STARTED', {
 });
 
 module.exports = {
-  VERSION, EXECUTION_MAP, DEFAULT_SCHEDULE, isVenueOpen, approvedBuyAssets,
+  VERSION, EXECUTION_MAP, DEFAULT_SCHEDULE, DEFAULT_UCITS_OVERLAP_SCHEDULE, isVenueOpen, approvedBuyAssets, decisionAction,
   buildExecutionAwareness, parseDecisionPayload, augmentDecisionPayload,
   extractDecision, buildDiagnostics
 };
