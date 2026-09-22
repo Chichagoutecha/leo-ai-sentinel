@@ -1,5 +1,5 @@
 /**
- * LEO-AI SENTINEL v10.22.7 — Real Copy Minimum & Progressive Starter
+ * LEO-AI SENTINEL v10.22.17 — Execution Alignment & HOLD Calibration
  * - Prix explicitement issus de l'API publique eToro
  * - Gestion week-end / horaires réguliers du marché US
  * - Cryptomonnaies analysables 24/7
@@ -163,7 +163,7 @@ function getOpenAIClient() {
   return openAIClient;
 }
 
-const VERSION = "v10.22.7-real-copy-minimum-sizing";
+const VERSION = "v10.22.17-execution-alignment";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
@@ -1341,7 +1341,11 @@ const ENABLE_INTERNAL_TRADE_CRON =
 const WATCH_CRON_SCHEDULE =
   process.env.WATCH_CRON_SCHEDULE || "5,20,35,50 * * * *";
 const TRADE_CRON_SCHEDULE =
-  process.env.TRADE_CRON_SCHEDULE || "0 */2 * * *";
+  process.env.TRADE_CRON_SCHEDULE || "10 */2 * * *";
+const ENABLE_UCITS_OVERLAP_SCAN =
+  process.env.ENABLE_UCITS_OVERLAP_SCAN !== "false";
+const UCITS_OVERLAP_SCAN_SCHEDULE =
+  process.env.UCITS_OVERLAP_SCAN_SCHEDULE || "45 14 * * 1-5";
 const AUTOMATION_LOG_DETAIL = ["compact", "full"].includes(
   String(process.env.AUTOMATION_LOG_DETAIL || "compact").toLowerCase()
 )
@@ -3068,6 +3072,10 @@ function schedulerStatus() {
     internalTradeEnabled: ENABLE_INTERNAL_TRADE_CRON,
     watchSchedule: ENABLE_INTERNAL_WATCH_CRON ? WATCH_CRON_SCHEDULE : null,
     tradeSchedule: ENABLE_INTERNAL_TRADE_CRON ? TRADE_CRON_SCHEDULE : null,
+    ucitsOverlapScanEnabled: Boolean(ENABLE_INTERNAL_TRADE_CRON && ENABLE_UCITS_OVERLAP_SCAN),
+    ucitsOverlapScanSchedule: ENABLE_INTERNAL_TRADE_CRON && ENABLE_UCITS_OVERLAP_SCAN
+      ? UCITS_OVERLAP_SCAN_SCHEDULE
+      : null,
     archiveScheduleEnabled: Boolean(
       POINT_IN_TIME_ARCHIVE_ENABLED && POINT_IN_TIME_ARCHIVE_SCHEDULE_ENABLED
     ),
@@ -18731,6 +18739,48 @@ function startSchedulers() {
         }));
       }
     });
+
+    if (ENABLE_UCITS_OVERLAP_SCAN) {
+      validateCronSchedule("UCITS overlap trade", UCITS_OVERLAP_SCAN_SCHEDULE);
+      cron.schedule(UCITS_OVERLAP_SCAN_SCHEDULE, async () => {
+        const runId = automationRunId("scan-ucits");
+        const startedAt = Date.now();
+        console.log("SCAN UCITS OVERLAP START:", JSON.stringify({
+          version: VERSION,
+          event: "SCAN_STARTED",
+          run_id: runId,
+          time: nowIso(),
+          schedule: UCITS_OVERLAP_SCAN_SCHEDULE,
+          trading_mode: TRADING_MODE,
+          purpose: "US_AND_EU_EXECUTION_OVERLAP"
+        }));
+
+        try {
+          const result = await scanMarket("auto-trade-ucits-overlap");
+          const saved = await flushPersistentState();
+          const summary = summarizeScanResult(
+            result,
+            runId,
+            Date.now() - startedAt,
+            saved
+          );
+          console.log(
+            "SCAN UCITS OVERLAP RESULT:",
+            JSON.stringify(AUTOMATION_LOG_DETAIL === "full" ? { ...summary, result } : summary)
+          );
+          emitMemoryPressureWarning("auto-trade-ucits-overlap", runId);
+        } catch (error) {
+          console.error("SCAN UCITS OVERLAP ERROR:", JSON.stringify({
+            version: VERSION,
+            event: "SCAN_FAILED",
+            run_id: runId,
+            duration_ms: Date.now() - startedAt,
+            error: error.message,
+            memory: compactMemoryStatus()
+          }));
+        }
+      });
+    }
   } else {
     console.log("TRADE CRON DISABLED: ENABLE_INTERNAL_TRADE_CRON=false");
   }
