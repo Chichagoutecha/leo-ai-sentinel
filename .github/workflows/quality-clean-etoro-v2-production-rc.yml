@@ -114,8 +114,11 @@ jobs:
       - name: Prove context v2 and execution-aware governance
         shell: bash
         run: |
-          grep -Fq "v10.22.15.0-ai-context-v2" ai-context-optimizer-v2.js
-          grep -Fq "v1.sameSafetyFacts(payload, candidate)" ai-context-optimizer-v2.js
+          grep -Fq "v10.22.18.0-ai-context-v2" ai-context-optimizer-v2.js
+          grep -Fq "attachMissingSafetyManifest" ai-context-optimizer-v2.js
+          grep -Fq "manifestSafetyCheck(payload, candidate)" ai-context-optimizer-v2.js
+          grep -Fq "__leo_safety_manifest" ai-context-optimizer-v2.js
+          grep -Fq "failClosedAboveCeiling: true" ai-context-optimizer-v2.js
           grep -Fq "strategyModified: false" ai-context-optimizer-v2.js
           grep -Fq "sizingModified: false" ai-context-optimizer-v2.js
           grep -Fq "etoroModified: false" ai-context-optimizer-v2.js
