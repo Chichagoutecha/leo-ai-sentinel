@@ -163,7 +163,7 @@ function getOpenAIClient() {
   return openAIClient;
 }
 
-const VERSION = "v10.22.17-execution-alignment";
+const VERSION = "v10.22.19-lot-aware-risk-sizing";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
@@ -1205,6 +1205,17 @@ const MIN_ORDER_FLOOR_MIN_CONFIDENCE = Math.max(
 const MIN_ORDER_FLOOR_MIN_COMBINED_MULTIPLIER = Math.max(
   0.05,
   Math.min(1, Number(process.env.MIN_ORDER_FLOOR_MIN_COMBINED_MULTIPLIER || 0.35))
+);
+
+// v10.22.19 — Lot-Aware Risk & Execution Sizing.
+// Le moteur peut dépasser légèrement une cible d'allocation uniquement pour
+// atteindre UN lot minimum réellement exécutable. Il ne peut jamais dépasser
+// les plafonds durs de cash, actif, poche, catégorie, crypto ou spéculatif.
+const LOT_AWARE_RISK_SIZING_ENABLED =
+  process.env.LOT_AWARE_RISK_SIZING_ENABLED !== "false";
+const LOT_AWARE_MAX_TARGET_OVERSHOOT_PCT = Math.max(
+  0,
+  Math.min(5, Number(process.env.LOT_AWARE_MAX_TARGET_OVERSHOOT_PCT || 3))
 );
 const MAX_CONSECUTIVE_FAILURES = Number(
   process.env.MAX_CONSECUTIVE_FAILURES || 3
@@ -5229,56 +5240,281 @@ function getPortfolioAllocationPlan(portfolioSummary) {
   return buildPortfolioAllocationPlan(portfolioSummary || {});
 }
 
-function allocationCheckForBuy(asset, portfolioSummary, wantedUsd = null) {
+function buildLotAwareBuyCapacity(asset, portfolioSummary, wantedUsd = null) {
   const safeAsset = String(asset || "").toUpperCase();
   const progressiveOrderPolicy = getProgressiveOrderPolicy(portfolioSummary);
+  const minimumExecutableVirtualOrderUsd = Number(
+    progressiveOrderPolicy.minimumExecutableVirtualOrderUsd || MIN_ORDER_USD
+  );
   const requested = wantedUsd === null || wantedUsd === undefined
     ? progressiveOrderPolicy.maximumOrderUsd
     : Number(wantedUsd || 0);
-  const wanted = Math.max(0, Math.min(requested, progressiveOrderPolicy.maximumOrderUsd));
+  const wanted = Math.max(
+    0,
+    Math.min(Number.isFinite(requested) ? requested : 0, progressiveOrderPolicy.maximumOrderUsd)
+  );
   const plan = getPortfolioAllocationPlan(portfolioSummary);
   const row = plan.assetsByAsset?.[safeAsset] || null;
-  if (!PORTFOLIO_ALLOCATION_ENGINE_ENABLED) {
-    return { ok: true, enforced: false, reason: "PortfolioAllocationEngine désactivé", roomUsd: wanted, plan, assetPlan: row };
-  }
+
   if (!row) {
-    return { ok: PORTFOLIO_ALLOCATION_MODE !== "enforced", enforced: PORTFOLIO_ALLOCATION_MODE === "enforced", reason: `Aucune cible d'allocation pour ${safeAsset}`, roomUsd: PORTFOLIO_ALLOCATION_MODE === "enforced" ? 0 : wanted, plan, assetPlan: null };
+    return {
+      asset: safeAsset,
+      enabled: LOT_AWARE_RISK_SIZING_ENABLED,
+      status: "NO_ALLOCATION_TARGET",
+      executable: false,
+      minimumLotAllowed: false,
+      allowedAmountUsd: 0,
+      minimumExecutableVirtualOrderUsd,
+      wantedUsd: roundNumber(wanted, 2),
+      hardRoomUsd: 0,
+      targetRoomUsd: 0,
+      targetOvershootPct: null,
+      hardBlockers: ["aucune cible d'allocation"],
+      softBlockers: [],
+      plan,
+      assetPlan: null,
+      canExceedHardCaps: false
+    };
   }
 
   const total = Math.max(0, Number(portfolioSummary?.totalTrackedValue || 0));
   const cash = Math.max(0, Number(portfolioSummary?.availableCash || 0));
   const hardCashReserveUsd = total * MIN_CASH_RESERVE_PCT / 100;
   const cashRoomUsd = Math.max(0, cash - hardCashReserveUsd);
-  const hardRoomUsd = Math.max(0, Math.min(Number(row.hardRoomUsd || 0), Number(row.bucketHardRoomUsd || 0)));
-  const targetRoomUsd = Math.max(0, Number(row.targetGapUsd || 0));
-  let roomUsd = Math.min(wanted, cashRoomUsd, hardRoomUsd);
-  if (ALLOCATION_REQUIRE_UNDER_TARGET_FOR_NEW_BUY) {
-    roomUsd = Math.min(roomUsd, targetRoomUsd);
+  const assetHardRoomUsd = Math.max(0, Number(row.hardRoomUsd || 0));
+  const bucketHardRoomUsd = Math.max(0, Number(row.bucketHardRoomUsd || 0));
+  const category = ASSET_RULES[safeAsset]?.category || "UNKNOWN";
+  const categoryValue = Math.max(0, Number(portfolioSummary?.categoryValues?.[category] || 0));
+  const categoryHardRoomUsd = total > 0
+    ? Math.max(0, total * MAX_CATEGORY_WEIGHT_PCT / 100 - categoryValue)
+    : 0;
+  const progressiveRiskCaps = getProgressiveRiskCaps(portfolioSummary);
+  const cryptoHardRoomUsd = CRYPTO_CATEGORIES.has(category) && total > 0
+    ? Math.max(0, total * progressiveRiskCaps.maxCryptoWeightPct / 100 - Number(portfolioSummary?.cryptoValue || 0))
+    : Infinity;
+  const speculativeHardRoomUsd = SPECULATIVE_CATEGORIES.has(category) && total > 0
+    ? Math.max(0, total * progressiveRiskCaps.maxSpeculativeWeightPct / 100 - Number(portfolioSummary?.speculativeValue || 0))
+    : Infinity;
+  const singleSpeculativeHardRoomUsd = SPECULATIVE_CATEGORIES.has(category) && total > 0
+    ? Math.max(
+        0,
+        total * progressiveRiskCaps.maxSingleSpeculativePct / 100 -
+          Number(portfolioSummary?.assetValues?.[safeAsset] || 0)
+      )
+    : Infinity;
+
+  const hardRooms = [
+    cashRoomUsd,
+    assetHardRoomUsd,
+    bucketHardRoomUsd,
+    categoryHardRoomUsd,
+    cryptoHardRoomUsd,
+    speculativeHardRoomUsd,
+    singleSpeculativeHardRoomUsd,
+    progressiveOrderPolicy.maximumOrderUsd
+  ].filter(Number.isFinite);
+  const hardRoomUsd = hardRooms.length ? Math.max(0, Math.min(...hardRooms)) : 0;
+  const requestedHardRoomUsd = Math.max(0, Math.min(wanted, hardRoomUsd));
+  const targetGapUsd = Math.max(0, Number(row.targetGapUsd || 0));
+  const targetRoomUsd = ALLOCATION_REQUIRE_UNDER_TARGET_FOR_NEW_BUY
+    ? Math.max(0, Math.min(requestedHardRoomUsd, targetGapUsd))
+    : requestedHardRoomUsd;
+
+  const lotWeightPct = total > 0
+    ? minimumExecutableVirtualOrderUsd / total * 100
+    : Infinity;
+  const afterLotAssetPct = total > 0
+    ? Number(row.currentPct || 0) + lotWeightPct
+    : Infinity;
+  const targetOvershootPct = Number.isFinite(afterLotAssetPct)
+    ? Math.max(0, afterLotAssetPct - Number(row.targetPct || 0))
+    : Infinity;
+
+  const bucket = plan.buckets?.[row.bucket] || null;
+  const hardBlockers = [];
+  if (plan.hardCashMinimumBreached || cashRoomUsd + 0.0001 < minimumExecutableVirtualOrderUsd) {
+    hardBlockers.push("réserve de cash minimale");
   }
-  roomUsd = roundNumber(Math.max(0, roomUsd), 2);
+  if (assetHardRoomUsd + 0.0001 < minimumExecutableVirtualOrderUsd) {
+    hardBlockers.push("plafond actif " + row.maxPct + "%");
+  }
+  if (bucketHardRoomUsd + 0.0001 < minimumExecutableVirtualOrderUsd) {
+    hardBlockers.push("plafond poche " + row.bucket + " " + (bucket?.maxPct ?? "?") + "%");
+  }
+  if (categoryHardRoomUsd + 0.0001 < minimumExecutableVirtualOrderUsd) {
+    hardBlockers.push("plafond catégorie " + category + " " + MAX_CATEGORY_WEIGHT_PCT + "%");
+  }
+  if (Number.isFinite(cryptoHardRoomUsd) && cryptoHardRoomUsd + 0.0001 < minimumExecutableVirtualOrderUsd) {
+    hardBlockers.push("plafond crypto " + progressiveRiskCaps.maxCryptoWeightPct + "%");
+  }
+  if (Number.isFinite(speculativeHardRoomUsd) && speculativeHardRoomUsd + 0.0001 < minimumExecutableVirtualOrderUsd) {
+    hardBlockers.push("plafond spéculatif " + progressiveRiskCaps.maxSpeculativeWeightPct + "%");
+  }
+  if (Number.isFinite(singleSpeculativeHardRoomUsd) && singleSpeculativeHardRoomUsd + 0.0001 < minimumExecutableVirtualOrderUsd) {
+    hardBlockers.push("plafond spéculatif individuel " + progressiveRiskCaps.maxSingleSpeculativePct + "%");
+  }
+  if (progressiveOrderPolicy.maximumOrderUsd + 0.0001 < minimumExecutableVirtualOrderUsd) {
+    hardBlockers.push("plafond progressif inférieur au lot minimum");
+  }
 
-  const blockers = [];
-  const minimumExecutableVirtualOrderUsd = Number(progressiveOrderPolicy.minimumExecutableVirtualOrderUsd || MIN_ORDER_USD);
-  if (plan.hardCashMinimumBreached || cashRoomUsd < minimumExecutableVirtualOrderUsd) blockers.push("réserve de cash minimale");
-  if (Number(row.currentPct) >= Number(row.maxPct) - 0.0001) blockers.push(`plafond actif ${row.maxPct}%`);
-  const bucket = plan.buckets?.[row.bucket];
-  if (bucket && Number(bucket.currentPct) >= Number(bucket.maxPct) - 0.0001) blockers.push(`plafond poche ${row.bucket} ${bucket.maxPct}%`);
-  if (ALLOCATION_REQUIRE_UNDER_TARGET_FOR_NEW_BUY && Number(row.gapPct) <= ALLOCATION_MIN_GAP_PCT) blockers.push(`actif non sous-pondéré (écart ${row.gapPct}%)`);
-  if (roomUsd < minimumExecutableVirtualOrderUsd) blockers.push(`marge allouable ${roomUsd} USD < minimum virtuel ${minimumExecutableVirtualOrderUsd} USD pour viser ${MIN_REAL_COPIED_POSITION_USD} USD réels`);
+  const allocationEligible = Boolean(
+    row.buyEligibleByAllocation &&
+    (!ALLOCATION_REQUIRE_UNDER_TARGET_FOR_NEW_BUY || Number(row.gapPct || 0) > ALLOCATION_MIN_GAP_PCT)
+  );
 
+  let status = "RISK_LIMITED";
+  let executable = false;
+  let minimumLotAllowed = false;
+  let allowedAmountUsd = 0;
+  const softBlockers = [];
+
+  if (hardBlockers.length > 0 || hardRoomUsd + 0.0001 < minimumExecutableVirtualOrderUsd) {
+    status = "RISK_LIMITED";
+  } else if (!allocationEligible) {
+    status = "NOT_ALLOCATION_ELIGIBLE";
+    softBlockers.push("actif non sous-pondéré (écart " + row.gapPct + "%)");
+  } else if (targetRoomUsd + 0.0001 >= minimumExecutableVirtualOrderUsd) {
+    status = "EXECUTABLE_WITHIN_TARGET";
+    executable = true;
+    allowedAmountUsd = Math.min(requestedHardRoomUsd, targetRoomUsd);
+  } else if (!LOT_AWARE_RISK_SIZING_ENABLED) {
+    status = "BELOW_MINIMUM_LOT";
+    softBlockers.push("lot-aware sizing désactivé");
+  } else if (targetGapUsd <= 0) {
+    status = "NOT_ALLOCATION_ELIGIBLE";
+    softBlockers.push("aucune marge sous la cible");
+  } else if (targetOvershootPct > LOT_AWARE_MAX_TARGET_OVERSHOOT_PCT + 0.0001) {
+    status = "TARGET_OVERSHOOT_TOO_LARGE";
+    softBlockers.push(
+      "dépassement cible " + roundNumber(targetOvershootPct, 4) +
+      " points > " + LOT_AWARE_MAX_TARGET_OVERSHOOT_PCT
+    );
+  } else {
+    status = "MINIMUM_LOT_ALLOWED";
+    executable = true;
+    minimumLotAllowed = true;
+    allowedAmountUsd = minimumExecutableVirtualOrderUsd;
+  }
+
+  return {
+    asset: safeAsset,
+    enabled: LOT_AWARE_RISK_SIZING_ENABLED,
+    status,
+    executable,
+    minimumLotAllowed,
+    allowedAmountUsd: roundNumber(Math.max(0, allowedAmountUsd), 2),
+    wantedUsd: roundNumber(wanted, 2),
+    minimumExecutableVirtualOrderUsd: roundNumber(minimumExecutableVirtualOrderUsd, 2),
+    targetRoomUsd: roundNumber(targetRoomUsd, 2),
+    targetGapUsd: roundNumber(targetGapUsd, 2),
+    hardRoomUsd: roundNumber(hardRoomUsd, 2),
+    requestedHardRoomUsd: roundNumber(requestedHardRoomUsd, 2),
+    cashRoomUsd: roundNumber(cashRoomUsd, 2),
+    assetHardRoomUsd: roundNumber(assetHardRoomUsd, 2),
+    bucketHardRoomUsd: roundNumber(bucketHardRoomUsd, 2),
+    categoryHardRoomUsd: roundNumber(categoryHardRoomUsd, 2),
+    cryptoHardRoomUsd: Number.isFinite(cryptoHardRoomUsd) ? roundNumber(cryptoHardRoomUsd, 2) : null,
+    speculativeHardRoomUsd: Number.isFinite(speculativeHardRoomUsd) ? roundNumber(speculativeHardRoomUsd, 2) : null,
+    singleSpeculativeHardRoomUsd: Number.isFinite(singleSpeculativeHardRoomUsd)
+      ? roundNumber(singleSpeculativeHardRoomUsd, 2)
+      : null,
+    targetOvershootPct: Number.isFinite(targetOvershootPct) ? roundNumber(targetOvershootPct, 4) : null,
+    maxTargetOvershootPct: LOT_AWARE_MAX_TARGET_OVERSHOOT_PCT,
+    afterLotAssetPct: Number.isFinite(afterLotAssetPct) ? roundNumber(afterLotAssetPct, 4) : null,
+    assetMaxPct: Number(row.maxPct),
+    bucketMaxPct: bucket ? Number(bucket.maxPct) : null,
+    hardBlockers,
+    softBlockers,
+    plan,
+    assetPlan: row,
+    bucketPlan: bucket,
+    canExceedAllocationTarget: minimumLotAllowed,
+    canExceedHardCaps: false,
+    oneMinimumLotOnly: true
+  };
+}
+
+function allocationCheckForBuy(asset, portfolioSummary, wantedUsd = null) {
+  const safeAsset = String(asset || "").toUpperCase();
+  const progressiveOrderPolicy = getProgressiveOrderPolicy(portfolioSummary);
+  const requested = wantedUsd === null || wantedUsd === undefined
+    ? progressiveOrderPolicy.maximumOrderUsd
+    : Number(wantedUsd || 0);
+  const wanted = Math.max(
+    0,
+    Math.min(Number.isFinite(requested) ? requested : 0, progressiveOrderPolicy.maximumOrderUsd)
+  );
+  const plan = getPortfolioAllocationPlan(portfolioSummary);
+  const row = plan.assetsByAsset?.[safeAsset] || null;
+
+  if (!PORTFOLIO_ALLOCATION_ENGINE_ENABLED) {
+    return {
+      ok: true,
+      enforced: false,
+      status: "ALLOCATION_ENGINE_DISABLED",
+      reason: "PortfolioAllocationEngine désactivé",
+      roomUsd: wanted,
+      requestedUsd: wanted,
+      plan,
+      assetPlan: row,
+      lotAware: null
+    };
+  }
+
+  if (!row) {
+    const enforced = PORTFOLIO_ALLOCATION_MODE === "enforced";
+    return {
+      ok: !enforced,
+      enforced,
+      status: "NO_ALLOCATION_TARGET",
+      reason: "Aucune cible d'allocation pour " + safeAsset,
+      roomUsd: enforced ? 0 : wanted,
+      requestedUsd: wanted,
+      plan,
+      assetPlan: null,
+      lotAware: null
+    };
+  }
+
+  const capacity = buildLotAwareBuyCapacity(safeAsset, portfolioSummary, wanted);
   const enforced = PORTFOLIO_ALLOCATION_MODE === "enforced";
-  const ok = !enforced || blockers.length === 0;
+  const ok = !enforced || capacity.executable;
+  const roomUsd = enforced
+    ? Number(capacity.allowedAmountUsd || 0)
+    : Math.min(wanted, Number(capacity.requestedHardRoomUsd || wanted));
+
+  let reason;
+  if (capacity.status === "MINIMUM_LOT_ALLOWED") {
+    reason =
+      "PortfolioAllocationEngine lot-aware: un lot minimum de " + capacity.allowedAmountUsd +
+      " USD est autorisé pour " + safeAsset +
+      "; marge jusqu'à la cible " + capacity.targetGapUsd +
+      " USD, dépassement cible " + capacity.targetOvershootPct +
+      " point(s), toujours sous les plafonds durs actif/poche/catégorie et réserve de cash";
+  } else if (capacity.status === "EXECUTABLE_WITHIN_TARGET") {
+    reason =
+      "PortfolioAllocationEngine: " + safeAsset +
+      " sous cible de " + row.gapPct + "% dans " + row.bucket +
+      "; marge cible " + capacity.targetRoomUsd +
+      " USD, marge dure " + capacity.hardRoomUsd + " USD";
+  } else {
+    const blockers = [...capacity.hardBlockers, ...capacity.softBlockers];
+    reason =
+      "PortfolioAllocationEngine lot-aware: " + capacity.status + "; " +
+      (blockers.length ? blockers.join(", ") : "aucune capacité exécutable");
+  }
+
   return {
     ok,
     enforced,
-    reason: blockers.length
-      ? `PortfolioAllocationEngine: ${blockers.join(", ")}`
-      : `PortfolioAllocationEngine: ${safeAsset} sous cible de ${row.gapPct}% dans ${row.bucket}; marge ${roomUsd} USD`,
-    roomUsd: enforced ? roomUsd : Math.min(wanted, cashRoomUsd, hardRoomUsd),
-    requestedUsd: wanted,
+    status: capacity.status,
+    reason,
+    roomUsd: roundNumber(Math.max(0, roomUsd), 2),
+    requestedUsd: roundNumber(wanted, 2),
     assetPlan: row,
-    bucketPlan: bucket || null,
-    plan
+    bucketPlan: capacity.bucketPlan || null,
+    plan,
+    lotAware: capacity
   };
 }
 
@@ -6734,6 +6970,7 @@ function buildRiskBudgetState(portfolioSummary) {
   const spendableCash = Number.isFinite(availableCash)
     ? Math.max(0, availableCash - reserveRequired)
     : null;
+  const progressiveOrderPolicy = getProgressiveOrderPolicy(portfolioSummary);
   return {
     name: "RiskBudgetAgent",
     currentEquity: Number.isFinite(current) ? roundNumber(current, 4) : null,
@@ -6745,6 +6982,16 @@ function buildRiskBudgetState(portfolioSummary) {
     drawdownPct,
     newBuyBlocked: blocks.length > 0,
     blocks,
+    lotAwareExecutionSizing: {
+      enabled: LOT_AWARE_RISK_SIZING_ENABLED,
+      minimumExecutableVirtualOrderUsd: progressiveOrderPolicy.minimumExecutableVirtualOrderUsd,
+      maximumOrderUsd: progressiveOrderPolicy.maximumOrderUsd,
+      maxTargetOvershootPct: LOT_AWARE_MAX_TARGET_OVERSHOOT_PCT,
+      oneMinimumLotOnly: true,
+      canExceedAllocationTarget: true,
+      canExceedHardCaps: false,
+      canOverrideHardVeto: false
+    },
     limits: {
       minCashReservePct: MIN_CASH_RESERVE_PCT,
       maxAssetWeightPct: MAX_ASSET_WEIGHT_PCT,
@@ -11196,22 +11443,71 @@ function buildVotesForAsset({
     }
   }
 
-  // RiskBudgetAgent
+  // RiskBudgetAgent — v10.22.19 lot-aware.
+  // Une cible trop petite n'est plus confondue avec un dépassement de risque:
+  // un seul lot minimum peut passer si et seulement si tous les plafonds durs
+  // restent respectés. Un vrai manque de marge reste un hard veto.
   if (!held && riskBudgetAgent?.newBuyBlocked) {
-    votes.push(createCouncilVote({ agent: "RiskBudgetAgent", asset, action: "VETO", confidence: 100, hardVeto: true, rationale: `Budget de risque bloqué: ${(riskBudgetAgent.blocks || []).join(", ")}` }));
-  } else if (!held) {
-    const room = dynamicBuyAmount({ asset, amount_usd: getProgressiveOrderPolicy(portfolioSummary).maximumOrderUsd }, portfolioSummary);
     votes.push(createCouncilVote({
-      agent: "RiskBudgetAgent", asset, action: room >= getProgressiveOrderPolicy(portfolioSummary).minimumExecutableVirtualOrderUsd ? "PASS" : "VETO",
-      confidence: room >= getProgressiveOrderPolicy(portfolioSummary).minimumExecutableVirtualOrderUsd ? 84 : 96,
-      hardVeto: room < getProgressiveOrderPolicy(portfolioSummary).minimumExecutableVirtualOrderUsd,
-      rationale: room >= getProgressiveOrderPolicy(portfolioSummary).minimumExecutableVirtualOrderUsd
-        ? `Budget disponible jusqu'à ${room} USD; minimum virtuel réel-copie ${getProgressiveOrderPolicy(portfolioSummary).minimumExecutableVirtualOrderUsd} USD`
-        : `Budget insuffisant: ${room} USD < minimum virtuel ${getProgressiveOrderPolicy(portfolioSummary).minimumExecutableVirtualOrderUsd} USD`,
-      metadata: { dynamicRoomUsd: room, availableCash: portfolioSummary?.availableCash }
+      agent: "RiskBudgetAgent",
+      asset,
+      action: "VETO",
+      confidence: 100,
+      hardVeto: true,
+      rationale: "Budget de risque bloqué: " + (riskBudgetAgent.blocks || []).join(", ")
+    }));
+  } else if (!held) {
+    const orderPolicy = getProgressiveOrderPolicy(portfolioSummary);
+    const capacity = buildLotAwareBuyCapacity(
+      asset,
+      portfolioSummary,
+      orderPolicy.maximumOrderUsd
+    );
+    const room = dynamicBuyAmount(
+      { asset, amount_usd: orderPolicy.maximumOrderUsd },
+      portfolioSummary
+    );
+    const executable = Boolean(
+      capacity.executable &&
+      room + 0.0001 >= orderPolicy.minimumExecutableVirtualOrderUsd
+    );
+    votes.push(createCouncilVote({
+      agent: "RiskBudgetAgent",
+      asset,
+      action: executable ? "PASS" : "VETO",
+      confidence: executable ? 84 : 96,
+      hardVeto: !executable,
+      rationale: executable
+        ? (capacity.minimumLotAllowed
+          ? "Lot-aware: lot minimum " + capacity.minimumExecutableVirtualOrderUsd +
+            " USD autorisé; cible " + capacity.targetGapUsd +
+            " USD, marge dure " + capacity.hardRoomUsd +
+            " USD, dépassement cible " + capacity.targetOvershootPct + " point(s)"
+          : "Budget exécutable jusqu'à " + room +
+            " USD; minimum virtuel réel-copie " + orderPolicy.minimumExecutableVirtualOrderUsd + " USD")
+        : "Budget non exécutable: " + capacity.status +
+          "; marge dynamique " + room +
+          " USD, marge dure " + capacity.hardRoomUsd +
+          " USD, minimum virtuel " + orderPolicy.minimumExecutableVirtualOrderUsd + " USD",
+      metadata: {
+        dynamicRoomUsd: room,
+        availableCash: portfolioSummary?.availableCash,
+        lotAwareStatus: capacity.status,
+        minimumLotAllowed: capacity.minimumLotAllowed,
+        hardRoomUsd: capacity.hardRoomUsd,
+        targetRoomUsd: capacity.targetRoomUsd,
+        targetOvershootPct: capacity.targetOvershootPct,
+        canExceedHardCaps: false
+      }
     }));
   } else {
-    votes.push(createCouncilVote({ agent: "RiskBudgetAgent", asset, action: "PASS", confidence: 78, rationale: "Position existante; aucune nouvelle exposition demandée" }));
+    votes.push(createCouncilVote({
+      agent: "RiskBudgetAgent",
+      asset,
+      action: "PASS",
+      confidence: 78,
+      rationale: "Position existante; aucune nouvelle exposition demandée"
+    }));
   }
 
   // BacktestValidationAgent
@@ -19117,6 +19413,7 @@ module.exports = {
   getPortfolioAllocationPlan,
   getRealCopySizingPolicy,
   getProgressiveOrderPolicy,
+  buildLotAwareBuyCapacity,
   allocationCheckForBuy,
   allocationBucketForAsset,
   PORTFOLIO_ALLOCATION_POLICY,

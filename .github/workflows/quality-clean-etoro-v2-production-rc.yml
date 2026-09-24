@@ -29,6 +29,7 @@ on:
       - 'test-ai-context-adaptive.js'
       - 'test-ai-context-v2.js'
       - 'test-execution-aware-decision-runtime.js'
+      - 'test-lot-aware-risk-sizing.js'
       - 'test-ai-context-preload-integration.js'
       - 'test-ai-cost-concurrency-reservation.js'
       - 'test-ai-cost-missing-usage.js'
@@ -60,7 +61,7 @@ jobs:
         run: |
           git fetch origin main --depth=1
           git diff --exit-code origin/main...HEAD -- ai-cost-optimizer.js ai-luna-temperature-compat.js production-ai-preflight.js
-          allowed='^(index\.js|ai-context-optimizer\.js|ai-context-optimizer-v2\.js|execution-aware-decision-runtime\.js|package\.json|etoro-execution-diagnostics\.js|etoro-agent-scope-compat\.js|etoro-acknowledged-no-effect-hotfix\.js|etoro-ucits-execution-bridge\.js|all-in-cost-shadow-agent\.js|hold-opportunity-shadow-agent\.js|test-etoro-execution-diagnostics\.js|test-etoro-agent-scope-compat\.js|test-etoro-acknowledged-no-effect-hotfix\.js|test-etoro-ucits-execution-bridge\.js|test-all-in-cost-shadow-agent\.js|test-hold-opportunity-shadow-agent\.js|test-ai-context-adaptive\.js|test-ai-context-v2\.js|test-execution-aware-decision-runtime\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
+          allowed='^(index\.js|ai-context-optimizer\.js|ai-context-optimizer-v2\.js|execution-aware-decision-runtime\.js|package\.json|etoro-execution-diagnostics\.js|etoro-agent-scope-compat\.js|etoro-acknowledged-no-effect-hotfix\.js|etoro-ucits-execution-bridge\.js|all-in-cost-shadow-agent\.js|hold-opportunity-shadow-agent\.js|test-etoro-execution-diagnostics\.js|test-etoro-agent-scope-compat\.js|test-etoro-acknowledged-no-effect-hotfix\.js|test-etoro-ucits-execution-bridge\.js|test-all-in-cost-shadow-agent\.js|test-hold-opportunity-shadow-agent\.js|test-ai-context-adaptive\.js|test-ai-context-v2\.js|test-execution-aware-decision-runtime\.js|test-lot-aware-risk-sizing\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
           unexpected="$(git diff --name-only origin/main...HEAD | grep -Ev "$allowed" || true)"
           if [ -n "$unexpected" ]; then
             echo "Unexpected changed files:"
@@ -69,11 +70,11 @@ jobs:
           fi
           test ! -e .github/workflows/apply-v10.22.11.1-stale-intent-patch.yml
 
-      - name: Prove index change is scheduler-only and execution-safe
+      - name: Prove index execution and risk invariants
         shell: bash
         run: |
           git fetch origin main --depth=1
-          grep -Fq 'const VERSION = "v10.22.17-execution-alignment";' index.js
+          grep -Fq 'const VERSION = "v10.22.19-lot-aware-risk-sizing";' index.js
           grep -Fq 'const UCITS_OVERLAP_SCAN_SCHEDULE =' index.js
           grep -Fq 'process.env.UCITS_OVERLAP_SCAN_SCHEDULE || "45 14 * * 1-5"' index.js
           grep -Fq 'SCAN UCITS OVERLAP START:' index.js
@@ -84,6 +85,14 @@ jobs:
           test "$(grep -Fc 'const MAX_SELLS_24H = 2;' index.js)" -eq 1
           test "$(grep -Fc 'const MIN_HOURS_BETWEEN_EXECUTIONS = 2;' index.js)" -eq 1
           test "$(grep -Fc 'const COUNCIL_REQUIRE_NO_HARD_VETO =' index.js)" -eq 1
+          grep -Fq 'const LOT_AWARE_RISK_SIZING_ENABLED =' index.js
+          grep -Fq 'const LOT_AWARE_MAX_TARGET_OVERSHOOT_PCT =' index.js
+          grep -Fq 'function buildLotAwareBuyCapacity' index.js
+          grep -Fq 'status = "MINIMUM_LOT_ALLOWED"' index.js
+          grep -Fq 'canExceedHardCaps: false' index.js
+          grep -Fq 'canOverrideHardVeto: false' index.js
+          test "$(grep -Fc 'https://public-api.etoro.com/api/v2/trading/execution/orders' index.js)" -eq 1
+          npm run test:lot-aware
 
       - name: Syntax checks
         run: npm run check
