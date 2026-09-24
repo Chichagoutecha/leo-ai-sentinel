@@ -1,0 +1,49 @@
+name: Memory Governance Validation Quality
+
+on:
+  pull_request:
+    paths:
+      - 'test-memory-governance-regression.js'
+      - 'MEMORY_GOVERNANCE_VALIDATION_V10.22.9.6.md'
+      - '.github/workflows/quality-memory-governance-validation.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax checks
+        run: |
+          node --check index.js
+          node --check test-memory-governance-regression.js
+
+      - name: Memory compaction regression suite
+        run: node --test test-memory-governance-regression.js
+
+      - name: Prove validation branch changes no production runtime code
+        shell: bash
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          git diff --exit-code "origin/${{ github.base_ref }}...HEAD" -- index.js package.json ai-cost-optimizer.js ai-luna-temperature-compat.js etoro-execution-diagnostics.js
+
+      - name: Prove test cannot call eToro or OpenAI providers
+        shell: bash
+        run: |
+          if grep -Eqi '/trading/execution/|chat\.completions\.create|global\.fetch\s*\(|https://api\.openai\.com|public-api\.etoro\.com' test-memory-governance-regression.js; then
+            echo 'Unexpected network/provider execution surface in memory regression.'
+            exit 1
+          fi
