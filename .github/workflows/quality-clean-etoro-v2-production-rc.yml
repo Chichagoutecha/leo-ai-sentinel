@@ -30,6 +30,7 @@ on:
       - 'test-ai-context-v2.js'
       - 'test-execution-aware-decision-runtime.js'
       - 'test-lot-aware-risk-sizing.js'
+      - 'test-real-sell-proof.js'
       - 'test-ai-context-preload-integration.js'
       - 'test-ai-cost-concurrency-reservation.js'
       - 'test-ai-cost-missing-usage.js'
@@ -61,7 +62,7 @@ jobs:
         run: |
           git fetch origin main --depth=1
           git diff --exit-code origin/main...HEAD -- ai-cost-optimizer.js ai-luna-temperature-compat.js production-ai-preflight.js
-          allowed='^(index\.js|ai-context-optimizer\.js|ai-context-optimizer-v2\.js|execution-aware-decision-runtime\.js|package\.json|etoro-execution-diagnostics\.js|etoro-agent-scope-compat\.js|etoro-acknowledged-no-effect-hotfix\.js|etoro-ucits-execution-bridge\.js|all-in-cost-shadow-agent\.js|hold-opportunity-shadow-agent\.js|test-etoro-execution-diagnostics\.js|test-etoro-agent-scope-compat\.js|test-etoro-acknowledged-no-effect-hotfix\.js|test-etoro-ucits-execution-bridge\.js|test-all-in-cost-shadow-agent\.js|test-hold-opportunity-shadow-agent\.js|test-ai-context-adaptive\.js|test-ai-context-v2\.js|test-execution-aware-decision-runtime\.js|test-lot-aware-risk-sizing\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
+          allowed='^(index\.js|ai-context-optimizer\.js|ai-context-optimizer-v2\.js|execution-aware-decision-runtime\.js|package\.json|etoro-execution-diagnostics\.js|etoro-agent-scope-compat\.js|etoro-acknowledged-no-effect-hotfix\.js|etoro-ucits-execution-bridge\.js|all-in-cost-shadow-agent\.js|hold-opportunity-shadow-agent\.js|test-etoro-execution-diagnostics\.js|test-etoro-agent-scope-compat\.js|test-etoro-acknowledged-no-effect-hotfix\.js|test-etoro-ucits-execution-bridge\.js|test-all-in-cost-shadow-agent\.js|test-hold-opportunity-shadow-agent\.js|test-ai-context-adaptive\.js|test-ai-context-v2\.js|test-execution-aware-decision-runtime\.js|test-lot-aware-risk-sizing\.js|test-real-sell-proof\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
           unexpected="$(git diff --name-only origin/main...HEAD | grep -Ev "$allowed" || true)"
           if [ -n "$unexpected" ]; then
             echo "Unexpected changed files:"
@@ -70,11 +71,11 @@ jobs:
           fi
           test ! -e .github/workflows/apply-v10.22.11.1-stale-intent-patch.yml
 
-      - name: Prove index execution and risk invariants
+      - name: Prove index execution, risk and SELL-proof invariants
         shell: bash
         run: |
           git fetch origin main --depth=1
-          grep -Fq 'const VERSION = "v10.22.19-lot-aware-risk-sizing";' index.js
+          grep -Fq 'const VERSION = "v10.22.20-real-sell-proof";' index.js
           grep -Fq 'const UCITS_OVERLAP_SCAN_SCHEDULE =' index.js
           grep -Fq 'process.env.UCITS_OVERLAP_SCAN_SCHEDULE || "45 14 * * 1-5"' index.js
           grep -Fq 'SCAN UCITS OVERLAP START:' index.js
@@ -157,6 +158,28 @@ jobs:
           grep -Fq 'const LIVE_EXECUTION_ARMED = process.env.LIVE_EXECUTION_ARMED === "true";' index.js
           grep -Fq 'token:' index.js
           grep -Fq 'referenceId:' index.js
+
+      - name: Prove exact REAL SELL close-position contract
+        shell: bash
+        run: |
+          test "$(grep -Fc 'https://public-api.etoro.com/api/v1/trading/execution/market-close-orders/positions/' index.js)" -eq 1
+          grep -Fq 'body: JSON.stringify({ UnitsToDeduct: null })' index.js
+          grep -Fq 'createOrderIntent("SELL", asset, 0, {' index.js
+          grep -Fq 'const SELL_CLOSE_PROOF_VERSION = "v10.22.20.0-real-sell-proof";' index.js
+          grep -Fq 'const SELL_CLOSE_PROOF_REQUIRE_TARGET_POSITION_ID = true;' index.js
+          grep -Fq 'function buildSellCloseProof' index.js
+          grep -Fq '"TARGET_POSITION_REMOVED"' index.js
+          grep -Fq '"EXACT_POSITION_ID_CLOSE_PROOF"' index.js
+          grep -Fq 'closeDescriptorIsProof: false' index.js
+          grep -Fq 'cashDeltaIsProof: false' index.js
+          grep -Fq 'expectedPositionId: positionId' index.js
+          grep -Fq 'confirmationRequiresExactTargetPositionRemoval: true' index.js
+          grep -Fq 'app.get("/sell-proof-status"' index.js
+          if grep -Fq '"CLOSE_ORDER_VISIBLE"' index.js; then
+            echo "ordersForClose descriptor must not be treated as SELL execution proof"
+            exit 1
+          fi
+          npm run test:real-sell-proof
 
       - name: Prove eToro scope guard is fail-closed in armed LIVE
         shell: bash

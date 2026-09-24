@@ -163,7 +163,7 @@ function getOpenAIClient() {
   return openAIClient;
 }
 
-const VERSION = "v10.22.19-lot-aware-risk-sizing";
+const VERSION = "v10.22.20-real-sell-proof";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
@@ -280,6 +280,14 @@ const EXECUTION_NO_EFFECT_CASH_TOLERANCE_USD = Math.max(
   0.001,
   Math.min(5, Number(process.env.EXECUTION_NO_EFFECT_CASH_TOLERANCE_USD || 0.05))
 );
+
+// v10.22.20 — REAL SELL Validation & Close-Position Proof.
+// Une vente LIVE n'est CONFIRMED que si le positionId exact observé avant
+// l'envoi disparaît ensuite du portefeuille REAL. Les descriptors
+// ordersForClose et une variation de cash ne constituent jamais, seuls, une preuve.
+const SELL_CLOSE_PROOF_VERSION = "v10.22.20.0-real-sell-proof";
+const SELL_CLOSE_PROOF_REQUIRE_TARGET_POSITION_ID = true;
+const SELL_CLOSE_PROOF_CASH_SUPPORT_TOLERANCE_USD = 0.01;
 
 const EXECUTION_STATUS = Object.freeze({
   INTENT_CREATED: "ORDER_INTENT_CREATED",
@@ -5637,7 +5645,25 @@ function buildAssetExecutionSnapshot(portfolioResponse, asset) {
     const values = items.map((item) => getFirstNumber(item, fields)).filter(Number.isFinite);
     return values.length ? roundNumber(values.reduce((sum, value) => sum + value, 0), 6) : null;
   };
-  const positionIds = positions.map(getPositionId).filter((value) => value !== null).sort((a, b) => a - b);
+  const positionDetails = positions.map((position) => {
+    const positionId = getPositionId(position);
+    const amount = getFirstNumber(position, ["amount", "Amount", "invested", "Invested"]);
+    const units = getFirstNumber(position, ["units", "Units", "amountInUnits", "AmountInUnits"]);
+    const profit = getFirstNumber(position, ["profit", "Profit", "netProfit", "NetProfit"]);
+    const estimatedValue = Number.isFinite(amount)
+      ? amount + (Number.isFinite(profit) ? profit : 0)
+      : null;
+    return {
+      positionId,
+      amount: Number.isFinite(amount) ? roundNumber(amount, 6) : null,
+      units: Number.isFinite(units) ? roundNumber(units, 10) : null,
+      profit: Number.isFinite(profit) ? roundNumber(profit, 6) : null,
+      estimatedValue: Number.isFinite(estimatedValue) ? roundNumber(estimatedValue, 6) : null
+    };
+  }).sort((a, b) => String(a.positionId ?? "").localeCompare(String(b.positionId ?? "")));
+  const positionIds = positionDetails
+    .map((position) => position.positionId)
+    .filter((value) => value !== null && value !== undefined);
   const openOrderIds = openOrders
     .map((order) => order.orderID ?? order.orderId ?? null)
     .filter((value) => value !== null)
@@ -5656,6 +5682,7 @@ function buildAssetExecutionSnapshot(portfolioResponse, asset) {
     accountEnvironment: portfolioResponse?.accountEnvironment || null,
     positionLineCount: positions.length,
     positionIds,
+    positionDetails,
     investedAmount: sumField(positions, ["amount", "Amount", "invested", "Invested"]),
     positionUnits: sumField(positions, ["units", "Units", "amountInUnits", "AmountInUnits"]),
     positionProfit: sumField(positions, ["profit", "Profit", "netProfit", "NetProfit"]),
@@ -5674,10 +5701,117 @@ function setDifference(after = [], before = []) {
   return (after || []).filter((value) => !oldValues.has(String(value)));
 }
 
-function evaluateExecutionEvidence({ side, beforeSnapshot = null, afterSnapshot }) {
+function snapshotPositionById(snapshot, positionId) {
+  if (!snapshot || positionId === null || positionId === undefined) return null;
+  const wanted = String(positionId);
+  return (Array.isArray(snapshot.positionDetails) ? snapshot.positionDetails : [])
+    .find((position) => String(position?.positionId) === wanted) || null;
+}
+
+function buildSellCloseProof({
+  beforeSnapshot = null,
+  afterSnapshot = null,
+  expectedPositionId = null
+} = {}) {
+  const expected = expectedPositionId === null || expectedPositionId === undefined
+    ? ""
+    : String(expectedPositionId).trim();
+  const beforeIds = (beforeSnapshot?.positionIds || []).map(String);
+  const afterIds = (afterSnapshot?.positionIds || []).map(String);
+  const targetWasPresent = Boolean(expected && beforeIds.includes(expected));
+  const targetStillPresent = Boolean(expected && afterIds.includes(expected));
+  const targetRemoved = Boolean(expected && targetWasPresent && !targetStillPresent);
+  const beforeTarget = expected ? snapshotPositionById(beforeSnapshot, expected) : null;
+  const afterTarget = expected ? snapshotPositionById(afterSnapshot, expected) : null;
+
+  const beforeCount = Number(beforeSnapshot?.positionLineCount);
+  const afterCount = Number(afterSnapshot?.positionLineCount);
+  const lineCountReduced = Number.isFinite(beforeCount) && Number.isFinite(afterCount) && afterCount < beforeCount;
+
+  const beforeUnits = Number(beforeSnapshot?.positionUnits);
+  const afterUnits = Number(afterSnapshot?.positionUnits);
+  const totalUnitsReduced = Number.isFinite(beforeUnits) && Number.isFinite(afterUnits) &&
+    afterUnits < beforeUnits - 0.00000001;
+
+  const beforeInvested = Number(beforeSnapshot?.investedAmount);
+  const afterInvested = Number(afterSnapshot?.investedAmount);
+  const totalInvestedReduced = Number.isFinite(beforeInvested) && Number.isFinite(afterInvested) &&
+    afterInvested < beforeInvested - 0.000001;
+
+  const cashDelta = executionCashDelta(beforeSnapshot, afterSnapshot);
+  const cashIncreaseSupports = Number.isFinite(cashDelta) &&
+    cashDelta > SELL_CLOSE_PROOF_CASH_SUPPORT_TOLERANCE_USD;
+
+  const newCloseOrderIds = setDifference(
+    afterSnapshot?.closeOrderIds || [],
+    beforeSnapshot?.closeOrderIds || []
+  );
+  const closeDescriptorChanged = newCloseOrderIds.length > 0 ||
+    Number(afterSnapshot?.closeOrderCount || 0) > Number(beforeSnapshot?.closeOrderCount || 0);
+
+  const evidence = [];
+  if (!expected) evidence.push("TARGET_POSITION_ID_REQUIRED");
+  if (expected && !targetWasPresent) evidence.push("TARGET_POSITION_NOT_PRESENT_BEFORE");
+  if (targetWasPresent && targetStillPresent) evidence.push("TARGET_POSITION_STILL_PRESENT");
+  if (targetRemoved) evidence.push("TARGET_POSITION_REMOVED", "EXACT_POSITION_ID_CLOSE_PROOF");
+  if (lineCountReduced) evidence.push("ASSET_POSITION_LINE_COUNT_REDUCED");
+  if (totalUnitsReduced) evidence.push("ASSET_UNITS_REDUCED");
+  if (totalInvestedReduced) evidence.push("ASSET_INVESTED_AMOUNT_REDUCED");
+  if (cashIncreaseSupports) evidence.push("CASH_INCREASE_SUPPORTS_CLOSE");
+  if (closeDescriptorChanged) {
+    evidence.push("CLOSE_DESCRIPTOR_CHANGED_NOT_EXECUTION_PROOF");
+    evidence.push(...newCloseOrderIds.map((id) => "CLOSE_DESCRIPTOR_ID_" + id));
+  }
+
+  const fullCloseProven = Boolean(
+    afterSnapshot &&
+    (!SELL_CLOSE_PROOF_REQUIRE_TARGET_POSITION_ID || expected) &&
+    targetRemoved
+  );
+  if (!fullCloseProven) evidence.push("EXACT_CLOSE_NOT_PROVEN");
+
+  return {
+    version: SELL_CLOSE_PROOF_VERSION,
+    proofType: "EXACT_TARGET_POSITION_REMOVAL",
+    fullCloseRequested: true,
+    fullCloseProven,
+    confirmed: fullCloseProven,
+    expectedPositionId: expected || null,
+    targetWasPresent,
+    targetStillPresent,
+    targetRemoved,
+    beforeTarget,
+    afterTarget,
+    lineCountReduced,
+    totalUnitsReduced,
+    totalInvestedReduced,
+    cashDelta,
+    cashIncreaseSupports,
+    closeDescriptorChanged,
+    closeDescriptorIsProof: false,
+    cashDeltaIsProof: false,
+    requiresExactTargetPositionId: SELL_CLOSE_PROOF_REQUIRE_TARGET_POSITION_ID,
+    evidence,
+    confidence: fullCloseProven ? "STRONG_EXACT_POSITION_ID" : "NONE"
+  };
+}
+
+function evaluateExecutionEvidence({
+  side,
+  beforeSnapshot = null,
+  afterSnapshot,
+  expectedPositionId = null
+}) {
   const normalizedSide = String(side || "BUY").toUpperCase();
   if (!afterSnapshot) {
-    return { status: EXECUTION_STATUS.UNCERTAIN, confirmed: false, evidence: ["AFTER_SNAPSHOT_MISSING"] };
+    return {
+      status: EXECUTION_STATUS.UNCERTAIN,
+      confirmed: false,
+      evidence: ["AFTER_SNAPSHOT_MISSING"],
+      closeProof: normalizedSide === "SELL"
+        ? buildSellCloseProof({ beforeSnapshot, afterSnapshot, expectedPositionId })
+        : null
+    };
   }
 
   const before = beforeSnapshot || {
@@ -5690,7 +5824,6 @@ function evaluateExecutionEvidence({ side, beforeSnapshot = null, afterSnapshot 
   };
   const newPositionIds = setDifference(afterSnapshot.positionIds, before.positionIds);
   const newOpenOrderIds = setDifference(afterSnapshot.openOrderIds, before.openOrderIds);
-  const newCloseOrderIds = setDifference(afterSnapshot.closeOrderIds, before.closeOrderIds);
   const evidence = [];
 
   if (normalizedSide === "BUY") {
@@ -5698,41 +5831,64 @@ function evaluateExecutionEvidence({ side, beforeSnapshot = null, afterSnapshot 
       newPositionIds.length > 0 ||
       (!beforeSnapshot && afterSnapshot.positionLineCount > 0);
     if (positionAppeared) {
-      evidence.push("NEW_POSITION_VISIBLE", ...newPositionIds.map((id) => `POSITION_ID_${id}`));
-      return { status: EXECUTION_STATUS.CONFIRMED, confirmed: true, evidence, confidence: "STRONG" };
+      evidence.push("NEW_POSITION_VISIBLE", ...newPositionIds.map((id) => "POSITION_ID_" + id));
+      return {
+        status: EXECUTION_STATUS.CONFIRMED,
+        confirmed: true,
+        evidence,
+        confidence: "STRONG",
+        closeProof: null
+      };
     }
     const orderAppeared = afterSnapshot.openOrderCount > Number(before.openOrderCount || 0) ||
       newOpenOrderIds.length > 0 ||
       (!beforeSnapshot && afterSnapshot.openOrderCount > 0);
     if (orderAppeared) {
-      evidence.push("OPEN_ORDER_VISIBLE", ...newOpenOrderIds.map((id) => `ORDER_ID_${id}`));
-      return { status: EXECUTION_STATUS.ACCEPTED, confirmed: false, evidence, confidence: "MEDIUM" };
+      evidence.push("OPEN_ORDER_VISIBLE", ...newOpenOrderIds.map((id) => "ORDER_ID_" + id));
+      return {
+        status: EXECUTION_STATUS.ACCEPTED,
+        confirmed: false,
+        evidence,
+        confidence: "MEDIUM",
+        closeProof: null
+      };
     }
   } else if (normalizedSide === "SELL") {
-    const beforeCount = beforeSnapshot ? Number(before.positionLineCount || 0) : null;
-    const positionClosed = beforeSnapshot
-      ? afterSnapshot.positionLineCount < beforeCount ||
-        (beforeCount > 0 && afterSnapshot.positionLineCount === 0)
-      : afterSnapshot.positionLineCount === 0;
-    if (positionClosed) {
-      evidence.push("POSITION_CLOSED_OR_REDUCED");
-      return { status: EXECUTION_STATUS.CONFIRMED, confirmed: true, evidence, confidence: "STRONG" };
+    const closeProof = buildSellCloseProof({
+      beforeSnapshot,
+      afterSnapshot,
+      expectedPositionId
+    });
+    if (closeProof.fullCloseProven) {
+      return {
+        status: EXECUTION_STATUS.CONFIRMED,
+        confirmed: true,
+        evidence: closeProof.evidence,
+        confidence: closeProof.confidence,
+        closeProof
+      };
     }
-    const closeOrderAppeared = afterSnapshot.closeOrderCount > Number(before.closeOrderCount || 0) ||
-      newCloseOrderIds.length > 0 ||
-      (!beforeSnapshot && afterSnapshot.closeOrderCount > 0);
-    if (closeOrderAppeared) {
-      evidence.push("CLOSE_ORDER_VISIBLE", ...newCloseOrderIds.map((id) => `ORDER_ID_${id}`));
-      return { status: EXECUTION_STATUS.ACCEPTED, confirmed: false, evidence, confidence: "MEDIUM" };
-    }
+    return {
+      status: EXECUTION_STATUS.NOT_FOUND,
+      confirmed: false,
+      evidence: closeProof.evidence,
+      confidence: "NONE",
+      closeProof
+    };
   }
 
   if (Number.isFinite(Number(before.availableCash)) && Number.isFinite(Number(afterSnapshot.availableCash))) {
     const cashDelta = roundNumber(Number(afterSnapshot.availableCash) - Number(before.availableCash), 6);
-    if (Math.abs(cashDelta) > 0.0001) evidence.push(`CASH_DELTA_${cashDelta}`);
+    if (Math.abs(cashDelta) > 0.0001) evidence.push("CASH_DELTA_" + cashDelta);
   }
   evidence.push("NO_POSITION_OR_ORDER_PROOF");
-  return { status: EXECUTION_STATUS.NOT_FOUND, confirmed: false, evidence, confidence: "NONE" };
+  return {
+    status: EXECUTION_STATUS.NOT_FOUND,
+    confirmed: false,
+    evidence,
+    confidence: "NONE",
+    closeProof: null
+  };
 }
 
 async function verifyPortfolioAfterExecution({
@@ -5740,6 +5896,7 @@ async function verifyPortfolioAfterExecution({
   side,
   beforeSnapshot = null,
   intentId = null,
+  expectedPositionId = null,
   apiAccepted = true,
   trigger = "post-order"
 } = {}) {
@@ -5769,7 +5926,12 @@ async function verifyPortfolioAfterExecution({
         continue;
       }
       const afterSnapshot = buildAssetExecutionSnapshot(portfolio, asset);
-      const evaluation = evaluateExecutionEvidence({ side, beforeSnapshot, afterSnapshot });
+      const evaluation = evaluateExecutionEvidence({
+        side,
+        beforeSnapshot,
+        afterSnapshot,
+        expectedPositionId
+      });
       checks.push({ attempt, time: nowIso(), validation, afterSnapshot, evaluation });
       strongest = evaluation.status === EXECUTION_STATUS.CONFIRMED
         ? { evaluation, afterSnapshot }
@@ -5784,7 +5946,13 @@ async function verifyPortfolioAfterExecution({
   let status;
   let confirmed = false;
   let evidence = [];
-  let afterSnapshot = strongest?.afterSnapshot || checks.at(-1)?.afterSnapshot || null;
+  const afterSnapshot = strongest?.afterSnapshot || checks.at(-1)?.afterSnapshot || null;
+  const closeProof = String(side || "").toUpperCase() === "SELL"
+    ? strongest?.evaluation?.closeProof ||
+      [...checks].reverse().find((check) => check.evaluation?.closeProof)?.evaluation?.closeProof ||
+      buildSellCloseProof({ beforeSnapshot, afterSnapshot, expectedPositionId })
+    : null;
+
   if (strongest?.evaluation?.status === EXECUTION_STATUS.CONFIRMED) {
     status = EXECUTION_STATUS.CONFIRMED;
     confirmed = true;
@@ -5797,7 +5965,7 @@ async function verifyPortfolioAfterExecution({
     evidence = ["PORTFOLIO_COULD_NOT_BE_VERIFIED"];
   } else {
     status = EXECUTION_STATUS.NOT_FOUND;
-    evidence = strongest?.evaluation?.evidence || ["NO_POSITION_OR_ORDER_PROOF"];
+    evidence = closeProof?.evidence || strongest?.evaluation?.evidence || ["NO_POSITION_OR_ORDER_PROOF"];
   }
 
   const record = recordExecutionVerification({
@@ -5805,9 +5973,11 @@ async function verifyPortfolioAfterExecution({
     intentId,
     asset: String(asset || "").toUpperCase(),
     side: String(side || "").toUpperCase(),
+    expectedPositionId: expectedPositionId ?? null,
     status,
     confirmed,
     evidence,
+    closeProof,
     attempts: checks.length,
     beforeSnapshot,
     afterSnapshot,
@@ -5817,7 +5987,8 @@ async function verifyPortfolioAfterExecution({
       error: check.error || null,
       validationErrors: check.validation?.errors || [],
       status: check.evaluation?.status || null,
-      evidence: check.evaluation?.evidence || []
+      evidence: check.evaluation?.evidence || [],
+      closeProof: check.evaluation?.closeProof || null
     }))
   });
 
@@ -5827,15 +5998,21 @@ async function verifyPortfolioAfterExecution({
     confirmed,
     observed: status === EXECUTION_STATUS.CONFIRMED || status === EXECUTION_STATUS.ACCEPTED,
     evidence,
+    expectedPositionId: expectedPositionId ?? null,
+    closeProof,
     attempts: checks.length,
     beforeSnapshot,
     afterSnapshot,
     recordId: record.id,
     note: confirmed
-      ? "Position confirmée dans le portefeuille REAL."
+      ? (String(side || "").toUpperCase() === "SELL"
+          ? "SELL confirmé par disparition du positionId exact dans le portefeuille REAL."
+          : "Position confirmée dans le portefeuille REAL.")
       : status === EXECUTION_STATUS.ACCEPTED
         ? "Ordre visible mais position pas encore définitivement confirmée; aucun renvoi automatique."
-        : "Exécution non prouvée; aucun renvoi automatique et réconciliation requise."
+        : String(side || "").toUpperCase() === "SELL"
+          ? "SELL non prouvé: le positionId exact doit disparaître du portefeuille REAL; aucun renvoi automatique."
+          : "Exécution non prouvée; aucun renvoi automatique et réconciliation requise."
   };
 }
 
@@ -5869,7 +6046,8 @@ async function reconcileExecutionIntents({ trigger = "manual", limit = EXECUTION
       const evaluation = evaluateExecutionEvidence({
         side: intent.type,
         beforeSnapshot: intent.beforeSnapshot || null,
-        afterSnapshot
+        afterSnapshot,
+        expectedPositionId: intent.positionId ?? intent.expectedPositionId ?? null
       });
       let nextStatus = evaluation.status;
       const nextReconciliationAttempts = Number(intent.reconciliationAttempts || 0) + 1;
@@ -5893,6 +6071,7 @@ async function reconcileExecutionIntents({ trigger = "manual", limit = EXECUTION
         lastReconciliationTrigger: trigger,
         afterSnapshot,
         verificationEvidence: evaluation.evidence,
+        closeProof: evaluation.closeProof || intent.closeProof || null,
         noEffectAssessment,
         resolvedNoEffectAt: nextStatus === EXECUTION_STATUS.NO_EFFECT ? nowIso() : intent.resolvedNoEffectAt || null,
         confirmedAt: nextStatus === EXECUTION_STATUS.CONFIRMED ? nowIso() : intent.confirmedAt || null,
@@ -5907,8 +6086,10 @@ async function reconcileExecutionIntents({ trigger = "manual", limit = EXECUTION
         intentId: intent.id,
         asset: intent.asset,
         side: intent.type,
+        expectedPositionId: intent.positionId ?? intent.expectedPositionId ?? null,
         status: nextStatus,
         confirmed: nextStatus === EXECUTION_STATUS.CONFIRMED,
+        closeProof: evaluation.closeProof || null,
         evidence: nextStatus === EXECUTION_STATUS.NO_EFFECT
           ? [...(evaluation.evidence || []), "ORDER_NO_EFFECT_RESOLVED"]
           : evaluation.evidence,
@@ -5924,6 +6105,7 @@ async function reconcileExecutionIntents({ trigger = "manual", limit = EXECUTION
         status: updated?.status || nextStatus,
         confirmed: nextStatus === EXECUTION_STATUS.CONFIRMED,
         noEffectResolved: nextStatus === EXECUTION_STATUS.NO_EFFECT,
+        closeProof: evaluation.closeProof || null,
         evidence: nextStatus === EXECUTION_STATUS.NO_EFFECT
           ? [...(evaluation.evidence || []), "ORDER_NO_EFFECT_RESOLVED"]
           : evaluation.evidence
@@ -6020,7 +6202,14 @@ function envConfiguration() {
       reconcileOnStartup: EXECUTION_RECONCILE_ON_STARTUP,
       reconcileOnWatch: EXECUTION_RECONCILE_ON_WATCH,
       maxPerRun: EXECUTION_RECONCILE_MAX_PER_RUN,
-      noAutomaticRetryOnUncertain: true
+      noAutomaticRetryOnUncertain: true,
+      sellCloseProof: {
+        version: SELL_CLOSE_PROOF_VERSION,
+        confirmationRule: "EXACT_TARGET_POSITION_ID_MUST_DISAPPEAR",
+        requiresExactTargetPositionId: SELL_CLOSE_PROOF_REQUIRE_TARGET_POSITION_ID,
+        closeDescriptorIsProof: false,
+        cashDeltaIsProof: false
+      }
     },
     legacyAutoTradeDetected: AUTO_TRADE,
     legacyAutoTradeAllowed: ALLOW_LEGACY_AUTO_TRADE,
@@ -6599,6 +6788,11 @@ function executionVerifierStatus() {
     return acc;
   }, {});
   const active = intents.filter((intent) => isActiveExecutionStatus(intent.status));
+  const confirmedSellIntents = intents.filter((intent) =>
+    String(intent.type || "").toUpperCase() === "SELL" &&
+    normalizeExecutionIntentStatus(intent.status) === EXECUTION_STATUS.CONFIRMED
+  );
+  const milestones = getExecutionMilestones();
   return {
     version: VERSION,
     enabled: EXECUTION_VERIFIER_ENABLED,
@@ -6619,6 +6813,17 @@ function executionVerifierStatus() {
     lastVerification: runtimeState.lastExecutionVerification,
     lastReconciliation: runtimeState.lastExecutionReconciliation,
     verificationHistory: runtimeState.executionVerificationHistory.slice(0, 25),
+    sellCloseProof: {
+      version: SELL_CLOSE_PROOF_VERSION,
+      confirmationRule: "EXACT_TARGET_POSITION_ID_MUST_DISAPPEAR",
+      requiresExactTargetPositionId: SELL_CLOSE_PROOF_REQUIRE_TARGET_POSITION_ID,
+      closeDescriptorIsProof: false,
+      cashDeltaIsProof: false,
+      automaticRetryOnUncertain: false,
+      confirmedSellsMilestone: milestones.confirmedSells,
+      confirmedSellIntentsCount: confirmedSellIntents.length,
+      latestConfirmedSell: confirmedSellIntents[0] || null
+    },
     safetyRule: "Aucun ordre n'est renvoyé automatiquement lorsqu'un intent est actif ou incertain."
   };
 }
@@ -13401,9 +13606,36 @@ async function executeSell(asset, marketData = null) {
   if (!positionId) return { skipped: true, reason: `positionId introuvable pour ${asset}` };
 
   const beforeSnapshot = buildAssetExecutionSnapshot(portfolio, asset);
+  const targetPresentBefore = (beforeSnapshot.positionIds || [])
+    .map(String)
+    .includes(String(positionId));
+  if (!targetPresentBefore) {
+    addAudit("LIVE_SELL_TARGET_POSITION_PROOF_BLOCKED", {
+      asset,
+      positionId,
+      beforePositionIds: beforeSnapshot.positionIds || []
+    });
+    return {
+      skipped: true,
+      mode: "LIVE",
+      type: "SELL",
+      asset,
+      positionId,
+      reason: "SELL bloqué avant envoi: le positionId ciblé n'est pas présent dans le snapshot REAL de référence."
+    };
+  }
   const intentResult = createOrderIntent("SELL", asset, 0, {
     beforeSnapshot,
     positionId,
+    expectedPositionId: positionId,
+    sellProofContract: {
+      version: SELL_CLOSE_PROOF_VERSION,
+      fullCloseRequested: true,
+      unitsToDeduct: null,
+      confirmationRequiresExactTargetPositionRemoval: true,
+      closeDescriptorIsProof: false,
+      cashDeltaIsProof: false
+    },
     preflightValidation: preflight.validation || null
   });
   if (!intentResult.ok) {
@@ -13480,12 +13712,14 @@ async function executeSell(asset, marketData = null) {
       side: "SELL",
       beforeSnapshot,
       intentId: intent.id,
+      expectedPositionId: positionId,
       apiAccepted: businessAcknowledged,
       trigger: "live-sell-post-order"
     });
     updateOrderIntentStatus(intent.id, verification.status, {
       verificationAttempts: verification.attempts,
       verificationEvidence: verification.evidence,
+      closeProof: verification.closeProof || null,
       afterSnapshot: verification.afterSnapshot,
       verificationRecordId: verification.recordId,
       confirmedAt: verification.confirmed ? nowIso() : null,
@@ -13501,7 +13735,8 @@ async function executeSell(asset, marketData = null) {
       intentId: intent.id,
       requestId: headers["x-request-id"],
       verificationStatus: verification.status,
-      confirmed: verification.confirmed
+      confirmed: verification.confirmed,
+      closeProof: verification.closeProof || null
     });
     addAudit(verification.confirmed ? "LIVE_SELL_POSITION_CONFIRMED" : "LIVE_SELL_ACCEPTED_NOT_CONFIRMED", {
       asset,
@@ -13511,6 +13746,7 @@ async function executeSell(asset, marketData = null) {
       status: response.status,
       verificationStatus: verification.status,
       evidence: verification.evidence,
+      closeProof: verification.closeProof || null,
       preflight: preflight.validation
     });
 
@@ -17260,6 +17496,18 @@ app.get("/execution-status", requireSecret, (req, res) => {
   });
 });
 
+app.get("/sell-proof-status", requireSecret, (req, res) => {
+  const status = executionVerifierStatus();
+  res.json({
+    version: VERSION,
+    time: nowIso(),
+    tradingMode: TRADING_MODE,
+    sellCloseProof: status.sellCloseProof,
+    lastVerification: status.lastVerification?.side === "SELL" ? status.lastVerification : null,
+    executionAttempted: false
+  });
+});
+
 app.get("/portfolio-identity-status", requireSecret, async (req, res) => {
   try {
     const portfolio = await getPortfolio({ environment: "REAL" });
@@ -19493,6 +19741,7 @@ module.exports = {
   verifyRealPortfolioBeforeExecution,
   verifyPortfolioAfterExecution,
   buildAssetExecutionSnapshot,
+  buildSellCloseProof,
   evaluateExecutionEvidence,
   reconcileExecutionIntents,
   executionVerifierStatus,
