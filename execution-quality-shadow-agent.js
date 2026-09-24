@@ -28,7 +28,7 @@
 
 const crypto = require('crypto');
 
-const VERSION = 'v10.22.21.0-execution-quality-copy-calibration';
+const VERSION = 'v10.22.22.0-execution-quality-readiness';
 const COMPONENT = 'LEO_EXECUTION_QUALITY_SHADOW';
 const MODE = 'shadow';
 const ENABLED = process.env.EXECUTION_QUALITY_SHADOW_ENABLED !== 'false';
@@ -966,6 +966,55 @@ function calibrationSummary() {
   };
 }
 
+// Read-only operational diagnostics. Counts cover the retained observation window,
+// while counters in statusPayload cover the whole persisted lifetime.
+function observationReadiness(nowMs = Date.now()) {
+  const observations = state.observations;
+  const confirmed = observations.filter((row) => row?.status === 'PORTFOLIO_CONFIRMED');
+  const awaiting = observations.filter((row) => row?.brokerResponse?.httpOk && row.status !== 'PORTFOLIO_CONFIRMED');
+  const reviewAfterMs = 180 * 60 * 1000;
+  const overdue = awaiting.filter((row) => {
+    const at = Date.parse(row.requestObservedAt);
+    return Number.isFinite(at) && nowMs - at >= reviewAfterMs;
+  });
+  const withoutResponse = observations.filter((row) => row?.status === 'ORDER_REQUEST_OBSERVED' && !row.brokerResponse);
+  const rejected = observations.filter((row) => row?.brokerResponse?.httpOk === false);
+  const missingSlippage = confirmed.filter((row) => !Number.isFinite(row.executionQuality?.slippageBps));
+  const missingFill = confirmed.filter((row) => row.side === 'BUY' && !Number.isFinite(row.executionQuality?.virtualFillRatio));
+  const missingSellProof = confirmed.filter((row) => row.side === 'SELL' &&
+    row.confirmation?.proof !== 'EXACT_TARGET_POSITION_ID_REMOVED_FROM_REAL_PNL');
+  const pnlObserved = state.counters.pnlReadsObserved > 0 || Boolean(state.lastPnlSnapshot?.observedAt);
+  const status = !ENABLED ? 'DISABLED'
+    : !pnlObserved ? 'NO_REAL_PNL_OBSERVED'
+    : observations.length === 0 ? 'WAITING_FOR_ORDER'
+    : overdue.length || missingSellProof.length ? 'REVIEW_REQUIRED'
+    : awaiting.length || withoutResponse.length ? 'WAITING_FOR_CONFIRMATION'
+    : 'OBSERVING';
+
+  return {
+    status,
+    scope: 'RETAINED_OBSERVATIONS_ONLY',
+    historyLimit: HISTORY_LIMIT,
+    persistence: REDIS ? 'UPSTASH_CONFIGURED' : 'MEMORY_ONLY',
+    realPnlObserved: pnlObserved,
+    lastRealPnlObservedAt: state.lastPnlSnapshot?.observedAt || null,
+    latestOrderObservedAt: observations.length ? observations[observations.length - 1]?.requestObservedAt || null : null,
+    reviewAfterMinutes: 180,
+    counts: {
+      observedOrders: observations.length,
+      confirmedPositions: confirmed.length,
+      brokerHttpRejected: rejected.length,
+      brokerResponseNotObserved: withoutResponse.length,
+      brokerAcceptedAwaitingPortfolio: awaiting.length,
+      awaitingPortfolioOverReviewAge: overdue.length,
+      confirmedWithoutComparableSlippage: missingSlippage.length,
+      confirmedBuysWithoutFillRatio: missingFill.length,
+      confirmedSellsWithoutExactCloseProof: missingSellProof.length
+    },
+    caveat: 'HTTP success is not execution proof. An overdue observation requires review; it does not prove that an order failed. No order is created by this status.'
+  };
+}
+
 function qualitySummary() {
   const confirmed = state.observations.filter((observation) => observation.status === 'PORTFOLIO_CONFIRMED');
   const slippages = confirmed
@@ -996,6 +1045,7 @@ function qualitySummary() {
     generatedAt: iso(),
     mode: MODE,
     governance: GOVERNANCE,
+    observationReadiness: observationReadiness(),
     counts: {
       observations: state.observations.length,
       confirmed: confirmed.length,
@@ -1189,6 +1239,7 @@ module.exports = {
   slippageBps,
   calibrationSummary,
   qualitySummary,
+  observationReadiness,
   installAgent,
   autoInstalled,
   _test: {

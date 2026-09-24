@@ -19,7 +19,7 @@ function pnl({ credit = 9000, positions = [] } = {}) {
 }
 
 test('governance is strictly shadow-only and cannot alter LIVE sizing or orders', () => {
-  assert.equal(mod.VERSION, 'v10.22.21.0-execution-quality-copy-calibration');
+  assert.equal(mod.VERSION, 'v10.22.22.0-execution-quality-readiness');
   assert.equal(mod.GOVERNANCE.analysisOnly, true);
   assert.equal(mod.GOVERNANCE.shadowOnly, true);
   assert.equal(mod.GOVERNANCE.canPlaceOrder, false);
@@ -206,6 +206,43 @@ test('copy calibration waits for several observed agent fills and never auto-app
   assert.equal(calibration.eligibleForAutomaticSizingChange, false);
   assert.equal(calibration.reviewRequired, true);
   assert.equal(calibration.recommendationSource, 'ESTIMATED_NOT_DIRECTLY_OBSERVED_ON_COPIER_ACCOUNT');
+});
+
+test('readiness distinguishes absent PnL, idle operation, and broker acceptance without execution proof', () => {
+  mod._test.resetState();
+  assert.equal(mod.observationReadiness().status, 'NO_REAL_PNL_OBSERVED');
+  mod._test.ingestPnl(pnl(), async () => {});
+  assert.equal(mod.observationReadiness().status, 'WAITING_FOR_ORDER');
+
+  const row = mod._test.makeBuyObservation({ instrumentId: 100109, amount: 523.95 });
+  row.requestObservedAt = new Date(Date.now() - 181 * 60 * 1000).toISOString();
+  row.status = 'BROKER_HTTP_OK';
+  row.brokerResponse = { httpOk: true, httpStatus: 200, positionId: '123' };
+  mod._test.getState().observations.push(row);
+  const readiness = mod.observationReadiness();
+  assert.equal(readiness.status, 'REVIEW_REQUIRED');
+  assert.equal(readiness.counts.brokerAcceptedAwaitingPortfolio, 1);
+  assert.equal(readiness.counts.awaitingPortfolioOverReviewAge, 1);
+  assert.equal(readiness.counts.confirmedPositions, 0);
+  assert.equal(readiness.counts.brokerHttpRejected, 0);
+  assert.equal(mod.qualitySummary().observationReadiness.counts.observedOrders, 1);
+});
+
+test('readiness reports missing measurements after exact confirmation without inventing slippage', () => {
+  mod._test.resetState();
+  mod._test.ingestPnl(pnl(), async () => {});
+  mod._test.getState().observations.push({
+    side: 'BUY',
+    status: 'PORTFOLIO_CONFIRMED',
+    requestObservedAt: new Date().toISOString(),
+    confirmation: { proof: 'BROKER_POSITION_ID_VISIBLE_IN_REAL_PNL' },
+    executionQuality: { slippageBps: null, virtualFillRatio: null }
+  });
+  const readiness = mod.observationReadiness();
+  assert.equal(readiness.status, 'OBSERVING');
+  assert.equal(readiness.counts.confirmedPositions, 1);
+  assert.equal(readiness.counts.confirmedWithoutComparableSlippage, 1);
+  assert.equal(readiness.counts.confirmedBuysWithoutFillRatio, 1);
 });
 
 test('fetch wrapper forwards the exact BUY request once and adds no broker/provider call', async () => {
