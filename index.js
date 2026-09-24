@@ -163,7 +163,7 @@ function getOpenAIClient() {
   return openAIClient;
 }
 
-const VERSION = "v10.22.20-real-sell-proof";
+const VERSION = "v10.22.21-execution-quality-copy-calibration";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
@@ -6210,6 +6210,18 @@ function envConfiguration() {
         closeDescriptorIsProof: false,
         cashDeltaIsProof: false
       }
+    },
+    executionQualityShadow: {
+      version: global.__LEO_EXECUTION_QUALITY_SHADOW__?.version || null,
+      installed: Boolean(global.__LEO_EXECUTION_QUALITY_SHADOW__?.installed),
+      enabled: global.__LEO_EXECUTION_QUALITY_SHADOW__?.enabled ?? null,
+      mode: global.__LEO_EXECUTION_QUALITY_SHADOW__?.mode || "shadow",
+      governance: global.__LEO_EXECUTION_QUALITY_SHADOW__?.governance || null,
+      secureEndpoints: [
+        "/execution-quality-status",
+        "/execution-quality-history",
+        "/copy-calibration-status"
+      ]
     },
     legacyAutoTradeDetected: AUTO_TRADE,
     legacyAutoTradeAllowed: ALLOW_LEGACY_AUTO_TRADE,
@@ -17506,6 +17518,97 @@ app.get("/sell-proof-status", requireSecret, (req, res) => {
     lastVerification: status.lastVerification?.side === "SELL" ? status.lastVerification : null,
     executionAttempted: false
   });
+});
+
+app.get("/execution-quality-status", requireSecret, async (req, res) => {
+  try {
+    const agent = global.__LEO_EXECUTION_QUALITY_SHADOW__;
+    if (!agent?.installed || typeof agent.status !== "function") {
+      return res.status(503).json({
+        version: VERSION,
+        time: nowIso(),
+        available: false,
+        executionAttempted: false,
+        reason: "Execution Quality Shadow Agent indisponible"
+      });
+    }
+    const status = await agent.status();
+    res.json({
+      version: VERSION,
+      time: nowIso(),
+      tradingMode: TRADING_MODE,
+      executionAttempted: false,
+      ...status
+    });
+  } catch (error) {
+    res.status(500).json({
+      version: VERSION,
+      time: nowIso(),
+      executionAttempted: false,
+      error: error.message
+    });
+  }
+});
+
+app.get("/execution-quality-history", requireSecret, async (req, res) => {
+  try {
+    const agent = global.__LEO_EXECUTION_QUALITY_SHADOW__;
+    if (!agent?.installed || typeof agent.history !== "function") {
+      return res.status(503).json({
+        version: VERSION,
+        time: nowIso(),
+        available: false,
+        executionAttempted: false,
+        reason: "Execution Quality Shadow Agent indisponible"
+      });
+    }
+    const limit = Math.max(1, Math.min(250, Number(req.query.limit || 100)));
+    const history = await agent.history(limit);
+    res.json({
+      version: VERSION,
+      time: nowIso(),
+      tradingMode: TRADING_MODE,
+      executionAttempted: false,
+      ...history
+    });
+  } catch (error) {
+    res.status(500).json({
+      version: VERSION,
+      time: nowIso(),
+      executionAttempted: false,
+      error: error.message
+    });
+  }
+});
+
+app.get("/copy-calibration-status", requireSecret, async (req, res) => {
+  try {
+    const agent = global.__LEO_EXECUTION_QUALITY_SHADOW__;
+    if (!agent?.installed || typeof agent.calibration !== "function") {
+      return res.status(503).json({
+        version: VERSION,
+        time: nowIso(),
+        available: false,
+        executionAttempted: false,
+        reason: "Execution Quality Shadow Agent indisponible"
+      });
+    }
+    const calibration = await agent.calibration();
+    res.json({
+      version: VERSION,
+      time: nowIso(),
+      tradingMode: TRADING_MODE,
+      executionAttempted: false,
+      calibration
+    });
+  } catch (error) {
+    res.status(500).json({
+      version: VERSION,
+      time: nowIso(),
+      executionAttempted: false,
+      error: error.message
+    });
+  }
 });
 
 app.get("/portfolio-identity-status", requireSecret, async (req, res) => {
