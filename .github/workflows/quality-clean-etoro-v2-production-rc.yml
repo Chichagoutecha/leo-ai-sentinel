@@ -15,6 +15,7 @@ on:
       - 'production-ai-preflight.js'
       - 'etoro-execution-diagnostics.js'
       - 'etoro-agent-scope-compat.js'
+      - 'execution-quality-shadow-agent.js'
       - 'etoro-acknowledged-no-effect-hotfix.js'
       - 'etoro-ucits-execution-bridge.js'
       - 'all-in-cost-shadow-agent.js'
@@ -31,6 +32,7 @@ on:
       - 'test-execution-aware-decision-runtime.js'
       - 'test-lot-aware-risk-sizing.js'
       - 'test-real-sell-proof.js'
+      - 'test-execution-quality-shadow-agent.js'
       - 'test-ai-context-preload-integration.js'
       - 'test-ai-cost-concurrency-reservation.js'
       - 'test-ai-cost-missing-usage.js'
@@ -62,7 +64,7 @@ jobs:
         run: |
           git fetch origin main --depth=1
           git diff --exit-code origin/main...HEAD -- ai-cost-optimizer.js ai-luna-temperature-compat.js production-ai-preflight.js
-          allowed='^(index\.js|ai-context-optimizer\.js|ai-context-optimizer-v2\.js|execution-aware-decision-runtime\.js|package\.json|etoro-execution-diagnostics\.js|etoro-agent-scope-compat\.js|etoro-acknowledged-no-effect-hotfix\.js|etoro-ucits-execution-bridge\.js|all-in-cost-shadow-agent\.js|hold-opportunity-shadow-agent\.js|test-etoro-execution-diagnostics\.js|test-etoro-agent-scope-compat\.js|test-etoro-acknowledged-no-effect-hotfix\.js|test-etoro-ucits-execution-bridge\.js|test-all-in-cost-shadow-agent\.js|test-hold-opportunity-shadow-agent\.js|test-ai-context-adaptive\.js|test-ai-context-v2\.js|test-execution-aware-decision-runtime\.js|test-lot-aware-risk-sizing\.js|test-real-sell-proof\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
+          allowed='^(index\.js|ai-context-optimizer\.js|ai-context-optimizer-v2\.js|execution-aware-decision-runtime\.js|package\.json|etoro-execution-diagnostics\.js|etoro-agent-scope-compat\.js|etoro-acknowledged-no-effect-hotfix\.js|etoro-ucits-execution-bridge\.js|all-in-cost-shadow-agent\.js|hold-opportunity-shadow-agent\.js|test-etoro-execution-diagnostics\.js|test-etoro-agent-scope-compat\.js|test-etoro-acknowledged-no-effect-hotfix\.js|test-etoro-ucits-execution-bridge\.js|test-all-in-cost-shadow-agent\.js|test-hold-opportunity-shadow-agent\.js|test-ai-context-adaptive\.js|test-ai-context-v2\.js|test-execution-aware-decision-runtime\.js|test-lot-aware-risk-sizing\.js|test-real-sell-proof\.js|execution-quality-shadow-agent\.js|test-execution-quality-shadow-agent\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
           unexpected="$(git diff --name-only origin/main...HEAD | grep -Ev "$allowed" || true)"
           if [ -n "$unexpected" ]; then
             echo "Unexpected changed files:"
@@ -75,7 +77,7 @@ jobs:
         shell: bash
         run: |
           git fetch origin main --depth=1
-          grep -Fq 'const VERSION = "v10.22.20-real-sell-proof";' index.js
+          grep -Fq 'const VERSION = "v10.22.21-execution-quality-copy-calibration";' index.js
           grep -Fq 'const UCITS_OVERLAP_SCAN_SCHEDULE =' index.js
           grep -Fq 'process.env.UCITS_OVERLAP_SCAN_SCHEDULE || "45 14 * * 1-5"' index.js
           grep -Fq 'SCAN UCITS OVERLAP START:' index.js
@@ -181,6 +183,28 @@ jobs:
           fi
           npm run test:real-sell-proof
 
+      - name: Prove Execution Quality shadow is non-interfering and estimate-only
+        shell: bash
+        run: |
+          grep -Fq "v10.22.21.0-execution-quality-copy-calibration" execution-quality-shadow-agent.js
+          grep -Fq "canPlaceOrder: false" execution-quality-shadow-agent.js
+          grep -Fq "canBlockOrder: false" execution-quality-shadow-agent.js
+          grep -Fq "canModifyOrder: false" execution-quality-shadow-agent.js
+          grep -Fq "canModifySizing: false" execution-quality-shadow-agent.js
+          grep -Fq "canChangeMinimumOrder: false" execution-quality-shadow-agent.js
+          grep -Fq "canRetryOrder: false" execution-quality-shadow-agent.js
+          grep -Fq "providerCallsAdded: 0" execution-quality-shadow-agent.js
+          grep -Fq "brokerReadCallsAdded: 0" execution-quality-shadow-agent.js
+          grep -Fq "orderCallsAdded: 0" execution-quality-shadow-agent.js
+          grep -Fq "copyCalibrationAutoApply: false" execution-quality-shadow-agent.js
+          grep -Fq "directCopierObservationAvailable: false" execution-quality-shadow-agent.js
+          grep -Fq "eligibleForAutomaticSizingChange: false" execution-quality-shadow-agent.js
+          grep -Fq "READY_FOR_HUMAN_REVIEW_ESTIMATE_ONLY" execution-quality-shadow-agent.js
+          grep -Fq 'app.get("/execution-quality-status", requireSecret' index.js
+          grep -Fq 'app.get("/execution-quality-history", requireSecret' index.js
+          grep -Fq 'app.get("/copy-calibration-status", requireSecret' index.js
+          npm run test:execution-quality
+
       - name: Prove eToro scope guard is fail-closed in armed LIVE
         shell: bash
         run: |
@@ -262,4 +286,4 @@ jobs:
       - name: Prove canonical production start command
         shell: bash
         run: |
-          node -e "const p=require('./package.json'); const expected='node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js -r ./ai-context-optimizer-v2.js -r ./execution-aware-decision-runtime.js -r ./production-ai-preflight.js -r ./etoro-execution-diagnostics.js -r ./etoro-agent-scope-compat.js -r ./etoro-ucits-execution-bridge.js -r ./etoro-acknowledged-no-effect-hotfix.js -r ./all-in-cost-shadow-agent.js -r ./hold-opportunity-shadow-agent.js index.js'; if(p.scripts.start!==expected){console.error(p.scripts.start);process.exit(1)}"
+          node -e "const p=require('./package.json'); const expected='node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js -r ./ai-context-optimizer-v2.js -r ./execution-aware-decision-runtime.js -r ./production-ai-preflight.js -r ./etoro-execution-diagnostics.js -r ./etoro-agent-scope-compat.js -r ./execution-quality-shadow-agent.js -r ./etoro-ucits-execution-bridge.js -r ./etoro-acknowledged-no-effect-hotfix.js -r ./all-in-cost-shadow-agent.js -r ./hold-opportunity-shadow-agent.js index.js'; if(p.scripts.start!==expected){console.error(p.scripts.start);process.exit(1)}"
