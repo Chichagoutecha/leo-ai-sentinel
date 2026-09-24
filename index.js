@@ -5891,7 +5891,7 @@ function evaluateExecutionEvidence({
   };
 }
 
-async async function verifyPortfolioAfterExecution({
+async function verifyPortfolioAfterExecution({
   asset,
   side,
   beforeSnapshot = null,
