@@ -1,7 +1,7 @@
 {
   "name": "leo-ai-sentinel",
-  "version": "10.22.25.0",
-  "description": "LEO-AI SENTINEL with read-only decision outcome ledger and conservative net performance coverage",
+  "version": "10.22.26.0",
+  "description": "LEO-AI SENTINEL with explicit read-only broker closed-trade history reconciliation",
   "main": "index.js",
   "scripts": {
     "start": "node -r ./ai-cost-optimizer.js -r ./ai-luna-temperature-compat.js -r ./ai-context-optimizer.js -r ./ai-context-optimizer-v2.js -r ./execution-aware-decision-runtime.js -r ./production-ai-preflight.js -r ./etoro-execution-diagnostics.js -r ./etoro-agent-scope-compat.js -r ./execution-quality-shadow-agent.js -r ./etoro-ucits-execution-bridge.js -r ./etoro-acknowledged-no-effect-hotfix.js -r ./all-in-cost-shadow-agent.js -r ./hold-opportunity-shadow-agent.js index.js",

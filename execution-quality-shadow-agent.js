@@ -28,9 +28,9 @@
 
 const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
-const { buildLedger } = require('./decision-outcome-ledger');
+const { buildLedger, normalizeClosedHistory } = require('./decision-outcome-ledger');
 
-const VERSION = 'v10.22.25.0-decision-outcome-ledger';
+const VERSION = 'v10.22.26.0-realized-history-shadow';
 const COMPONENT = 'LEO_EXECUTION_QUALITY_SHADOW';
 const MODE = 'shadow';
 const ENABLED = process.env.EXECUTION_QUALITY_SHADOW_ENABLED !== 'false';
@@ -182,6 +182,8 @@ function freshState() {
     quotesByInstrument: {},
     executionAliases: {},
     lastPnlSnapshot: null,
+    closedHistoryByPosition: {},
+    closedHistoryStatus: null,
     lastEvent: null,
     counters: {
       buyAttemptsObserved: 0,
@@ -215,6 +217,9 @@ function normalizeState(value) {
     lastPnlSnapshot: value.lastPnlSnapshot && typeof value.lastPnlSnapshot === 'object'
       ? value.lastPnlSnapshot
       : null,
+    closedHistoryByPosition: value.closedHistoryByPosition && typeof value.closedHistoryByPosition === 'object'
+      ? value.closedHistoryByPosition : {},
+    closedHistoryStatus: value.closedHistoryStatus || null,
     counters: { ...base.counters, ...(value.counters || {}) }
   };
 }
@@ -1175,6 +1180,7 @@ async function statusPayload(baseFetch = installedAgent?.baseFetch || global.fet
     persistent: REDIS,
     enabled: ENABLED,
     counters: { ...state.counters },
+    closedHistoryStatus: state.closedHistoryStatus,
     copyCalibration: calibrationSummary()
   };
 }
@@ -1296,7 +1302,29 @@ function installAgent(options = {}) {
     calibration: () => calibrationPayload(baseFetch),
     ledger: async (limit) => {
       await loadState(baseFetch);
-      return buildLedger(state.observations, state.lastPnlSnapshot, limit);
+      return { ...buildLedger(state.observations, state.lastPnlSnapshot, limit, state.closedHistoryByPosition),
+        closedHistoryStatus: state.closedHistoryStatus };
+    },
+    ingestHistory: async (data, metadata = {}) => {
+      await loadState(baseFetch);
+      const normalized = normalizeClosedHistory(data, state.observations);
+      if (!normalized.valid) return { ok: false, reason: normalized.reason };
+      const ambiguous = new Set(normalized.ambiguousPositionIds);
+      state.closedHistoryByPosition = Object.fromEntries(Object.entries({
+        ...state.closedHistoryByPosition, ...normalized.matches
+      }).filter(([id]) => !ambiguous.has(id) && state.observations.some((row) => row?.side === 'BUY' &&
+        row.confirmation?.proof === 'BROKER_POSITION_ID_VISIBLE_IN_REAL_PNL' && String(row.confirmation.positionId) === id)));
+      state.closedHistoryStatus = {
+        observedAt: iso(), source: 'ETORO_REAL_TRADE_HISTORY',
+        page: 1, pageSize: 100, returnedRows: data.length,
+        possiblyMorePages: data.length >= 100,
+        matchedPositions: Object.keys(normalized.matches).length,
+        ambiguousPositions: normalized.ambiguousPositions,
+        minDate: metadata.minDate || null,
+        automaticBrokerCalls: 0
+      };
+      scheduleSave(baseFetch);
+      return { ok: true, ...state.closedHistoryStatus };
     },
     runWithDecision
   };
