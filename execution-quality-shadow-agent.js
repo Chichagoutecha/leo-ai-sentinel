@@ -28,7 +28,7 @@
 
 const crypto = require('crypto');
 
-const VERSION = 'v10.22.23.0-execution-proof-integrity';
+const VERSION = 'v10.22.24.0-exact-open-order-trace';
 const COMPONENT = 'LEO_EXECUTION_QUALITY_SHADOW';
 const MODE = 'shadow';
 const ENABLED = process.env.EXECUTION_QUALITY_SHADOW_ENABLED !== 'false';
@@ -593,6 +593,9 @@ function extractPnlSnapshot(data, readStartedAt = iso()) {
     .filter(Number.isFinite)
     .reduce((sum, value) => sum + value, 0);
   const portfolioValue = Number.isFinite(credit) ? credit + gross : null;
+  const openOrders = (Array.isArray(root.ordersForOpen) ? root.ordersForOpen : [])
+    .map((raw) => ({ orderId: orderIdOf(raw), instrumentId: instrumentIdOf(raw) }))
+    .filter((order) => order.orderId && Number.isFinite(order.instrumentId) && order.instrumentId > 0);
   return {
     observedAt: iso(),
     readStartedAt,
@@ -600,6 +603,7 @@ function extractPnlSnapshot(data, readStartedAt = iso()) {
     credit: round(credit, 6),
     positions,
     positionsById: Object.fromEntries(positions.map((position) => [String(position.positionId), position])),
+    openOrders,
     agentPortfolioValueUsd: round(portfolioValue, 6),
     source: 'REAL_PNL_RESPONSE_OBSERVED'
   };
@@ -651,6 +655,7 @@ function makeBuyObservation(body) {
     beforeAgentPortfolioValueUsd: context.beforeAgentPortfolioValueUsd,
     beforePositionIdsForInstrument: context.beforePositionIdsForInstrument,
     brokerResponse: null,
+    orderTrace: null,
     confirmation: null,
     executionQuality: null,
     copyEstimate: null,
@@ -705,6 +710,7 @@ function makeSellObservation(url, body) {
     beforeAgentPortfolioValueUsd: context.beforeAgentPortfolioValueUsd,
     targetPositionBefore: before,
     brokerResponse: null,
+    orderTrace: null,
     confirmation: null,
     executionQuality: null,
     copyEstimate: null,
@@ -874,9 +880,31 @@ function confirmSellObservation(observation, pnlSnapshot) {
   return true;
 }
 
+function traceOpenOrder(observation, pnlSnapshot) {
+  if (observation.side !== 'BUY' || observation.orderTrace || !pnlSnapshot.valid) return false;
+  const orderId = observation.brokerResponse?.orderId;
+  if (!orderId || !Number.isFinite(Number(observation.executionInstrumentId))) return false;
+  const matches = (pnlSnapshot.openOrders || []).filter((order) =>
+    String(order.orderId) === String(orderId) &&
+    Number(order.instrumentId) === Number(observation.executionInstrumentId)
+  );
+  if (matches.length !== 1) return false;
+  observation.orderTrace = {
+    observedAt: pnlSnapshot.observedAt,
+    orderId: String(orderId),
+    executionInstrumentId: Number(observation.executionInstrumentId),
+    evidence: 'EXACT_OPEN_ORDER_ID_VISIBLE_IN_REAL_PNL',
+    executionConfirmed: false,
+    positionIdProven: false,
+    eligibleForCopyCalibration: false
+  };
+  return true;
+}
+
 function reconcileObservationsWithPnl(pnlSnapshot, baseFetch) {
   if (!pnlSnapshot.valid) return 0;
   let changed = 0;
+  let traced = 0;
   for (const observation of state.observations) {
     if (!observation || observation.status === 'PORTFOLIO_CONFIRMED') continue;
     if (!observation.brokerResponse?.httpOk) continue;
@@ -884,6 +912,7 @@ function reconcileObservationsWithPnl(pnlSnapshot, baseFetch) {
     const brokerResponded = Date.parse(observation.brokerResponse.observedAt);
     // A read started before the broker response can contain pre-order state.
     if (!Number.isFinite(readStarted) || !Number.isFinite(brokerResponded) || readStarted < brokerResponded) continue;
+    if (traceOpenOrder(observation, pnlSnapshot)) traced += 1;
     const confirmed = observation.side === 'SELL'
       ? confirmSellObservation(observation, pnlSnapshot)
       : confirmBuyObservation(observation, pnlSnapshot);
@@ -900,7 +929,7 @@ function reconcileObservationsWithPnl(pnlSnapshot, baseFetch) {
       });
     }
   }
-  if (changed > 0) scheduleSave(baseFetch);
+  if (changed > 0 || traced > 0) scheduleSave(baseFetch);
   return changed;
 }
 
@@ -1001,6 +1030,8 @@ function observationReadiness(nowMs = Date.now()) {
   });
   const withoutResponse = observations.filter((row) => row?.status === 'ORDER_REQUEST_OBSERVED' && !row.brokerResponse);
   const rejected = observations.filter((row) => row?.brokerResponse?.httpOk === false);
+  const tracedOpenOrders = awaiting.filter((row) => row.side === 'BUY' &&
+    row.orderTrace?.evidence === 'EXACT_OPEN_ORDER_ID_VISIBLE_IN_REAL_PNL');
   const missingSlippage = confirmed.filter((row) => !Number.isFinite(row.executionQuality?.slippageBps));
   const missingFill = confirmed.filter((row) => row.side === 'BUY' && !Number.isFinite(row.executionQuality?.virtualFillRatio));
   const pnlObserved = Boolean(state.lastPnlSnapshot?.valid);
@@ -1026,6 +1057,7 @@ function observationReadiness(nowMs = Date.now()) {
       brokerHttpRejected: rejected.length,
       brokerResponseNotObserved: withoutResponse.length,
       brokerAcceptedAwaitingPortfolio: awaiting.length,
+      brokerOrderIdVisibleWithoutPositionProof: tracedOpenOrders.length,
       awaitingPortfolioOverReviewAge: overdue.length,
       confirmedWithoutComparableSlippage: missingSlippage.length,
       confirmedBuysWithoutFillRatio: missingFill.length,
@@ -1279,6 +1311,7 @@ module.exports = {
     makeSellObservation,
     attachOrderResponse,
     reconcileObservationsWithPnl,
+    traceOpenOrder,
     configuredCopyCapitalUsd,
     recentQuote,
     drainPendingTasks
