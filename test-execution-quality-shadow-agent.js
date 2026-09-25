@@ -19,7 +19,7 @@ function pnl({ credit = 9000, positions = [] } = {}) {
 }
 
 test('governance is strictly shadow-only and cannot alter LIVE sizing or orders', () => {
-  assert.equal(mod.VERSION, 'v10.22.22.0-execution-quality-readiness');
+  assert.equal(mod.VERSION, 'v10.22.23.0-execution-proof-integrity');
   assert.equal(mod.GOVERNANCE.analysisOnly, true);
   assert.equal(mod.GOVERNANCE.shadowOnly, true);
   assert.equal(mod.GOVERNANCE.canPlaceOrder, false);
@@ -191,6 +191,7 @@ test('copy calibration waits for several observed agent fills and never auto-app
     state.observations.push({
       side: 'BUY',
       status: 'PORTFOLIO_CONFIRMED',
+      confirmation: { proof: 'BROKER_POSITION_ID_VISIBLE_IN_REAL_PNL' },
       executionQuality: { virtualFillRatio: 0.9998 + index * 0.00001 },
       copyEstimate: { replicationRatioEstimate: 0.02 + index * 0.000001 }
     });
@@ -243,6 +244,72 @@ test('readiness reports missing measurements after exact confirmation without in
   assert.equal(readiness.counts.confirmedPositions, 1);
   assert.equal(readiness.counts.confirmedWithoutComparableSlippage, 1);
   assert.equal(readiness.counts.confirmedBuysWithoutFillRatio, 1);
+});
+
+test('incomplete REAL PnL cannot falsely confirm SELL disappearance', () => {
+  mod._test.resetState();
+  mod._test.ingestPnl(pnl({ positions: [{ positionId: 77, instrumentId: 100109, amount: 500 }] }), async () => {});
+  const row = mod._test.makeSellObservation(
+    new URL('https://public-api.etoro.com/api/v1/trading/execution/market-close-orders/positions/77'),
+    { UnitsToDeduct: null }
+  );
+  row.brokerResponse = { httpOk: true, observedAt: new Date(Date.now() - 1000).toISOString() };
+  row.status = 'BROKER_HTTP_OK';
+  mod._test.getState().observations.push(row);
+
+  for (const invalid of [
+    {},
+    { clientPortfolio: { credit: 9000, positions: [{ instrumentId: 100109 }] } },
+    { clientPortfolio: { positions: [] } }
+  ]) {
+    const result = mod._test.ingestPnl(invalid, async () => {});
+    assert.equal(result.snapshot.valid, false);
+    assert.equal(result.reconciled, 0);
+    assert.equal(row.status, 'BROKER_HTTP_OK');
+  }
+  assert.equal(mod._test.getState().lastPnlSnapshot.positionsById['77'].positionId, '77');
+  assert.equal(mod._test.getState().counters.pnlReadsInvalid, 3);
+});
+
+test('BUY requires broker position ID and matching instrument; legacy inferred fills are excluded', () => {
+  mod._test.resetState();
+  mod._test.ingestPnl(pnl(), async () => {});
+  const row = mod._test.makeBuyObservation({ instrumentId: 100109, amount: 500 });
+  row.brokerResponse = { httpOk: true, observedAt: new Date(Date.now() - 1000).toISOString(), orderId: '10', positionId: '88' };
+  row.status = 'BROKER_HTTP_OK';
+  mod._test.getState().observations.push(row);
+
+  mod._test.ingestPnl(pnl({ positions: [{ positionId: 89, instrumentId: 100109, amount: 500 }] }), async () => {});
+  assert.equal(row.status, 'BROKER_HTTP_OK');
+  mod._test.ingestPnl(pnl({ positions: [{ positionId: 88, instrumentId: 100001, amount: 500 }] }), async () => {});
+  assert.equal(row.status, 'BROKER_HTTP_OK');
+  row.brokerResponse.positionId = null;
+  mod._test.ingestPnl(pnl({ positions: [{ positionId: 88, instrumentId: 100109, amount: 500 }] }), async () => {});
+  assert.equal(row.status, 'BROKER_HTTP_OK');
+
+  mod._test.getState().observations.push({
+    side: 'BUY', status: 'PORTFOLIO_CONFIRMED',
+    confirmation: { proof: 'SINGLE_NEW_EXECUTION_POSITION_VISIBLE_IN_REAL_PNL' },
+    executionQuality: { virtualFillRatio: 1 },
+    copyEstimate: { replicationRatioEstimate: 0.02 }
+  });
+  assert.equal(mod.calibrationSummary().observationsUsed, 0);
+  assert.equal(mod.qualitySummary().counts.confirmedBuys, 0);
+  assert.equal(mod.observationReadiness().counts.legacyConfirmationsWithoutExactProof, 1);
+});
+
+test('a PnL read started before the broker response cannot confirm an order', () => {
+  mod._test.resetState();
+  const row = mod._test.makeBuyObservation({ instrumentId: 100109, amount: 500 });
+  row.brokerResponse = { httpOk: true, observedAt: '2026-09-25T10:01:00.000Z', positionId: '88' };
+  row.status = 'BROKER_HTTP_OK';
+  mod._test.getState().observations.push(row);
+  mod._test.ingestPnl(pnl({ positions: [{ positionId: 88, instrumentId: 100109, amount: 500 }] }),
+    async () => {}, '2026-09-25T10:00:00.000Z');
+  assert.equal(row.status, 'BROKER_HTTP_OK');
+  mod._test.ingestPnl(pnl({ positions: [{ positionId: 88, instrumentId: 100109, amount: 500 }] }),
+    async () => {}, '2026-09-25T10:02:00.000Z');
+  assert.equal(row.confirmation.proof, 'BROKER_POSITION_ID_VISIBLE_IN_REAL_PNL');
 });
 
 test('fetch wrapper forwards the exact BUY request once and adds no broker/provider call', async () => {

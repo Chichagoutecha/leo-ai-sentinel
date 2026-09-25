@@ -28,7 +28,7 @@
 
 const crypto = require('crypto');
 
-const VERSION = 'v10.22.22.0-execution-quality-readiness';
+const VERSION = 'v10.22.23.0-execution-proof-integrity';
 const COMPONENT = 'LEO_EXECUTION_QUALITY_SHADOW';
 const MODE = 'shadow';
 const ENABLED = process.env.EXECUTION_QUALITY_SHADOW_ENABLED !== 'false';
@@ -161,6 +161,7 @@ function freshState() {
       orderHttpSuccess: 0,
       orderHttpFailure: 0,
       pnlReadsObserved: 0,
+      pnlReadsInvalid: 0,
       quoteReadsObserved: 0,
       exactBuyConfirmations: 0,
       exactSellConfirmations: 0
@@ -533,15 +534,29 @@ function assetForExecutionInstrument(instrumentId) {
   return aliasForInstrument(instrumentId);
 }
 
-function extractPnlSnapshot(data) {
+function extractPnlSnapshot(data, readStartedAt = iso()) {
   const root = portfolioRoot(data);
-  if (!root) return {
+  const rawCredit = root?.credit ?? root?.Credit;
+  const creditValid = rawCredit !== null && rawCredit !== undefined && rawCredit !== '' &&
+    Number.isFinite(Number(rawCredit));
+  const positionsValid = root && root.positions.every((raw) => {
+    const rawId = raw?.positionId ?? raw?.positionID ?? raw?.PositionId ?? raw?.PositionID;
+    const rawInstrument = raw?.instrumentId ?? raw?.instrumentID ?? raw?.InstrumentId ?? raw?.InstrumentID;
+    return raw && typeof raw === 'object' && rawId !== null && rawId !== undefined && rawId !== '' &&
+      rawInstrument !== null && rawInstrument !== undefined && rawInstrument !== '' &&
+      Number.isFinite(Number(rawId)) && Number(rawId) > 0 &&
+      Number.isFinite(Number(rawInstrument)) && Number(rawInstrument) > 0;
+  });
+  if (!root || !creditValid || !positionsValid) return {
     observedAt: iso(),
+    readStartedAt,
+    valid: false,
+    invalidReason: !root ? 'POSITIONS_MISSING' : !creditValid ? 'CREDIT_MISSING' : 'POSITION_ID_OR_INSTRUMENT_MISSING',
     credit: null,
     positions: [],
     positionsById: {},
     agentPortfolioValueUsd: null,
-    source: 'REAL_PNL_RESPONSE_OBSERVED'
+    source: 'INVALID_REAL_PNL_RESPONSE'
   };
   const positions = [];
   for (const raw of root.positions) {
@@ -580,6 +595,8 @@ function extractPnlSnapshot(data) {
   const portfolioValue = Number.isFinite(credit) ? credit + gross : null;
   return {
     observedAt: iso(),
+    readStartedAt,
+    valid: true,
     credit: round(credit, 6),
     positions,
     positionsById: Object.fromEntries(positions.map((position) => [String(position.positionId), position])),
@@ -762,24 +779,10 @@ function copyEstimateForObservation(observation, pnlSnapshot) {
 
 function confirmBuyObservation(observation, pnlSnapshot) {
   const brokerPositionId = observation.brokerResponse?.positionId;
-  let position = brokerPositionId ? pnlSnapshot.positionsById?.[String(brokerPositionId)] || null : null;
-  let proof = null;
-
-  if (position) {
-    proof = 'BROKER_POSITION_ID_VISIBLE_IN_REAL_PNL';
-  } else {
-    const before = new Set((observation.beforePositionIdsForInstrument || []).map(String));
-    const newPositions = (pnlSnapshot.positions || []).filter((candidate) =>
-      Number(candidate.instrumentId) === Number(observation.executionInstrumentId) &&
-      !before.has(String(candidate.positionId))
-    );
-    if (newPositions.length === 1) {
-      position = newPositions[0];
-      proof = 'SINGLE_NEW_EXECUTION_POSITION_VISIBLE_IN_REAL_PNL';
-    }
-  }
-
-  if (!position) return false;
+  if (!brokerPositionId || !pnlSnapshot.valid) return false;
+  const position = pnlSnapshot.positionsById?.[String(brokerPositionId)];
+  if (!position || Number(position.instrumentId) !== Number(observation.executionInstrumentId) ||
+      (observation.beforePositionIdsForInstrument || []).map(String).includes(String(brokerPositionId))) return false;
 
   const requestTime = new Date(observation.requestObservedAt).getTime();
   const confirmedTime = new Date(pnlSnapshot.observedAt).getTime();
@@ -793,7 +796,7 @@ function confirmBuyObservation(observation, pnlSnapshot) {
 
   observation.confirmation = {
     confirmedAt: pnlSnapshot.observedAt,
-    proof,
+    proof: 'BROKER_POSITION_ID_VISIBLE_IN_REAL_PNL',
     positionId: position.positionId,
     virtualInvestedAmountUsd: position.amountUsdVirtual,
     units: position.units,
@@ -827,7 +830,7 @@ function confirmBuyObservation(observation, pnlSnapshot) {
 
 function confirmSellObservation(observation, pnlSnapshot) {
   const target = String(observation.targetPositionId || '');
-  if (!target || !observation.targetPositionBefore) return false;
+  if (!pnlSnapshot.valid || !target || !observation.targetPositionBefore) return false;
   if (pnlSnapshot.positionsById?.[target]) return false;
 
   const requestTime = new Date(observation.requestObservedAt).getTime();
@@ -872,10 +875,15 @@ function confirmSellObservation(observation, pnlSnapshot) {
 }
 
 function reconcileObservationsWithPnl(pnlSnapshot, baseFetch) {
+  if (!pnlSnapshot.valid) return 0;
   let changed = 0;
   for (const observation of state.observations) {
     if (!observation || observation.status === 'PORTFOLIO_CONFIRMED') continue;
     if (!observation.brokerResponse?.httpOk) continue;
+    const readStarted = Date.parse(pnlSnapshot.readStartedAt);
+    const brokerResponded = Date.parse(observation.brokerResponse.observedAt);
+    // A read started before the broker response can contain pre-order state.
+    if (!Number.isFinite(readStarted) || !Number.isFinite(brokerResponded) || readStarted < brokerResponded) continue;
     const confirmed = observation.side === 'SELL'
       ? confirmSellObservation(observation, pnlSnapshot)
       : confirmBuyObservation(observation, pnlSnapshot);
@@ -896,10 +904,19 @@ function reconcileObservationsWithPnl(pnlSnapshot, baseFetch) {
   return changed;
 }
 
-function ingestPnl(data, baseFetch) {
-  const snapshot = extractPnlSnapshot(data);
-  state.lastPnlSnapshot = snapshot;
+function ingestPnl(data, baseFetch, readStartedAt = iso()) {
+  const snapshot = extractPnlSnapshot(data, readStartedAt);
   state.counters.pnlReadsObserved += 1;
+  if (!snapshot.valid) {
+    state.counters.pnlReadsInvalid += 1;
+    scheduleSave(baseFetch);
+    return { snapshot, reconciled: 0 };
+  }
+  if (state.lastPnlSnapshot?.readStartedAt &&
+      Date.parse(snapshot.readStartedAt) < Date.parse(state.lastPnlSnapshot.readStartedAt)) {
+    return { snapshot, reconciled: 0, ignored: 'OLDER_READ_COMPLETED_LATE' };
+  }
+  state.lastPnlSnapshot = snapshot;
   const changed = reconcileObservationsWithPnl(snapshot, baseFetch);
   scheduleSave(baseFetch);
   return { snapshot, reconciled: changed };
@@ -909,6 +926,7 @@ function calibrationRows() {
   return state.observations.filter((observation) =>
     observation.side === 'BUY' &&
     observation.status === 'PORTFOLIO_CONFIRMED' &&
+    observation.confirmation?.proof === 'BROKER_POSITION_ID_VISIBLE_IN_REAL_PNL' &&
     Number.isFinite(Number(observation.executionQuality?.virtualFillRatio)) &&
     Number(observation.executionQuality.virtualFillRatio) > 0 &&
     Number.isFinite(Number(observation.copyEstimate?.replicationRatioEstimate)) &&
@@ -970,7 +988,11 @@ function calibrationSummary() {
 // while counters in statusPayload cover the whole persisted lifetime.
 function observationReadiness(nowMs = Date.now()) {
   const observations = state.observations;
-  const confirmed = observations.filter((row) => row?.status === 'PORTFOLIO_CONFIRMED');
+  const isExactProof = (row) => row?.status === 'PORTFOLIO_CONFIRMED' &&
+    (row.side === 'BUY' ? row.confirmation?.proof === 'BROKER_POSITION_ID_VISIBLE_IN_REAL_PNL'
+      : row.side === 'SELL' && row.confirmation?.proof === 'EXACT_TARGET_POSITION_ID_REMOVED_FROM_REAL_PNL');
+  const confirmed = observations.filter(isExactProof);
+  const legacyUnattributed = observations.filter((row) => row?.status === 'PORTFOLIO_CONFIRMED' && !isExactProof(row));
   const awaiting = observations.filter((row) => row?.brokerResponse?.httpOk && row.status !== 'PORTFOLIO_CONFIRMED');
   const reviewAfterMs = 180 * 60 * 1000;
   const overdue = awaiting.filter((row) => {
@@ -981,13 +1003,11 @@ function observationReadiness(nowMs = Date.now()) {
   const rejected = observations.filter((row) => row?.brokerResponse?.httpOk === false);
   const missingSlippage = confirmed.filter((row) => !Number.isFinite(row.executionQuality?.slippageBps));
   const missingFill = confirmed.filter((row) => row.side === 'BUY' && !Number.isFinite(row.executionQuality?.virtualFillRatio));
-  const missingSellProof = confirmed.filter((row) => row.side === 'SELL' &&
-    row.confirmation?.proof !== 'EXACT_TARGET_POSITION_ID_REMOVED_FROM_REAL_PNL');
-  const pnlObserved = state.counters.pnlReadsObserved > 0 || Boolean(state.lastPnlSnapshot?.observedAt);
+  const pnlObserved = Boolean(state.lastPnlSnapshot?.valid);
   const status = !ENABLED ? 'DISABLED'
     : !pnlObserved ? 'NO_REAL_PNL_OBSERVED'
     : observations.length === 0 ? 'WAITING_FOR_ORDER'
-    : overdue.length || missingSellProof.length ? 'REVIEW_REQUIRED'
+    : overdue.length || legacyUnattributed.length ? 'REVIEW_REQUIRED'
     : awaiting.length || withoutResponse.length ? 'WAITING_FOR_CONFIRMATION'
     : 'OBSERVING';
 
@@ -1009,14 +1029,16 @@ function observationReadiness(nowMs = Date.now()) {
       awaitingPortfolioOverReviewAge: overdue.length,
       confirmedWithoutComparableSlippage: missingSlippage.length,
       confirmedBuysWithoutFillRatio: missingFill.length,
-      confirmedSellsWithoutExactCloseProof: missingSellProof.length
+      legacyConfirmationsWithoutExactProof: legacyUnattributed.length
     },
     caveat: 'HTTP success is not execution proof. An overdue observation requires review; it does not prove that an order failed. No order is created by this status.'
   };
 }
 
 function qualitySummary() {
-  const confirmed = state.observations.filter((observation) => observation.status === 'PORTFOLIO_CONFIRMED');
+  const confirmed = state.observations.filter((observation) => observation.status === 'PORTFOLIO_CONFIRMED' &&
+    (observation.side === 'BUY' ? observation.confirmation?.proof === 'BROKER_POSITION_ID_VISIBLE_IN_REAL_PNL'
+      : observation.side === 'SELL' && observation.confirmation?.proof === 'EXACT_TARGET_POSITION_ID_REMOVED_FROM_REAL_PNL'));
   const slippages = confirmed
     .map((observation) => observation.executionQuality?.slippageBps)
     .filter(Number.isFinite);
@@ -1114,6 +1136,8 @@ function installAgent(options = {}) {
   async function wrappedFetch(input, init = {}) {
     const url = safeUrl(input);
     const method = methodOf(input, init);
+    const readStartedAt = method === 'GET' && url?.origin === ETORO_ORIGIN && url.pathname === REAL_PNL_PATH
+      ? iso() : null;
 
     if (!ENABLED || !url || url.origin !== ETORO_ORIGIN) {
       return baseFetch(input, init);
@@ -1187,7 +1211,7 @@ function installAgent(options = {}) {
           .catch(() => null));
       } else if (url.pathname === REAL_PNL_PATH) {
         trackTask(response.clone().json()
-          .then((data) => ingestPnl(data, baseFetch))
+          .then((data) => ingestPnl(data, baseFetch, readStartedAt))
           .catch(() => null));
       }
     }
