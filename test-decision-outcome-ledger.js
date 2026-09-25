@@ -2,7 +2,42 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { buildLedger, normalizeClosedHistory } = require('./decision-outcome-ledger');
+const { buildLedger, normalizeClosedHistory, readClosedHistoryPages } = require('./decision-outcome-ledger');
+
+test('closed history visits successive pages and declares the 90-day window covered only after a short page', async () => {
+  const pages = [];
+  const result = await readClosedHistoryPages(async (page, size) => {
+    pages.push([page, size]);
+    return page === 1 ? Array.from({ length: 100 }, (_, i) => ({ positionId: i }))
+      : [{ positionId: 100 }];
+  });
+  assert.deepEqual(pages, [[1, 100], [2, 100]]);
+  assert.equal(result.trades.length, 101);
+  assert.equal(result.windowCoverageComplete, true);
+  assert.equal(result.possiblyMorePages, false);
+});
+
+test('closed history stops at five full pages and marks coverage incomplete', async () => {
+  let reads = 0;
+  const result = await readClosedHistoryPages(async (page) => {
+    reads++;
+    return Array.from({ length: 100 }, (_, i) => ({ positionId: page * 100 + i }));
+  });
+  assert.equal(reads, 5);
+  assert.equal(result.trades.length, 500);
+  assert.equal(result.possiblyMorePages, true);
+  assert.equal(result.windowCoverageComplete, false);
+});
+
+test('a failed later page or a repeated full page cannot return partial history for ingestion', async () => {
+  const full = Array.from({ length: 100 }, (_, i) => ({ positionId: i }));
+  await assert.rejects(readClosedHistoryPages(async (page) => {
+    if (page === 2) throw new Error('broker failure');
+    return full;
+  }), /broker failure/);
+  await assert.rejects(readClosedHistoryPages(async () => full), /BROKER_HISTORY_REPEATED_PAGE/);
+  await assert.rejects(readClosedHistoryPages(async () => ({ items: [] })), /BROKER_HISTORY_INVALID_PAGE/);
+});
 process.env.EXECUTION_QUALITY_AUTO_INSTALL = 'false';
 const observer = require('./execution-quality-shadow-agent');
 
