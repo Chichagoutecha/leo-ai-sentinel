@@ -27,8 +27,10 @@
  */
 
 const crypto = require('crypto');
+const { AsyncLocalStorage } = require('async_hooks');
+const { buildLedger } = require('./decision-outcome-ledger');
 
-const VERSION = 'v10.22.24.0-exact-open-order-trace';
+const VERSION = 'v10.22.25.0-decision-outcome-ledger';
 const COMPONENT = 'LEO_EXECUTION_QUALITY_SHADOW';
 const MODE = 'shadow';
 const ENABLED = process.env.EXECUTION_QUALITY_SHADOW_ENABLED !== 'false';
@@ -102,6 +104,32 @@ let loadPromise = null;
 let saveTimer = null;
 let installedAgent = null;
 const pendingTasks = new Set();
+const decisionContext = new AsyncLocalStorage();
+
+function runWithDecision(decision, operation) {
+  // The context is observational. Never prevent a legitimate LIVE operation.
+  if (typeof operation !== 'function') return undefined;
+  let trace = null;
+  try {
+    const action = String(decision?.action || '').toUpperCase();
+    const asset = String(decision?.asset || '').toUpperCase();
+    if (['BUY', 'SELL'].includes(action) && asset) trace = {
+      id: crypto.randomUUID(), at: iso(), action, asset,
+      confidence: round(decision?.confidence),
+      rawSignalAction: String(decision?.rawAction || '').toUpperCase().slice(0, 12) || null,
+      rawSignalAsset: String(decision?.rawAsset || '').toUpperCase().slice(0, 32) || null,
+      source: String(decision?.source || '').slice(0, 80),
+      provenance: 'SCAN_FINAL_RISK_APPROVED_DECISION'
+    };
+  } catch {}
+  return trace ? decisionContext.run(trace, operation) : operation();
+}
+
+function traceForOrder(side, asset) {
+  const trace = decisionContext.getStore();
+  return trace?.action === side && trace?.asset === String(asset || '').toUpperCase()
+    ? trace : null;
+}
 
 function iso() { return new Date().toISOString(); }
 
@@ -642,6 +670,7 @@ function makeBuyObservation(body) {
     status: 'ORDER_REQUEST_OBSERVED',
     requestObservedAt: iso(),
     asset: context.alias.asset,
+    decisionTrace: traceForOrder('BUY', context.alias.asset),
     analysisInstrumentId: context.alias.analysisInstrumentId,
     executionInstrumentId: instrumentId,
     executionSymbol: context.alias.executionSymbol,
@@ -697,6 +726,7 @@ function makeSellObservation(url, body) {
     status: 'ORDER_REQUEST_OBSERVED',
     requestObservedAt: iso(),
     asset: before?.asset || context.alias.asset,
+    decisionTrace: traceForOrder('SELL', before?.asset || context.alias.asset),
     analysisInstrumentId: before?.analysisInstrumentId ?? context.alias.analysisInstrumentId,
     executionInstrumentId: Number.isFinite(instrumentId) ? instrumentId : null,
     executionSymbol: before?.executionSymbol || context.alias.executionSymbol,
@@ -1263,7 +1293,12 @@ function installAgent(options = {}) {
     governance: GOVERNANCE,
     status: () => statusPayload(baseFetch),
     history: (limit) => getHistory(limit, baseFetch),
-    calibration: () => calibrationPayload(baseFetch)
+    calibration: () => calibrationPayload(baseFetch),
+    ledger: async (limit) => {
+      await loadState(baseFetch);
+      return buildLedger(state.observations, state.lastPnlSnapshot, limit);
+    },
+    runWithDecision
   };
 
   global.__LEO_EXECUTION_QUALITY_SHADOW__ = installedAgent;
@@ -1296,6 +1331,8 @@ module.exports = {
   calibrationSummary,
   qualitySummary,
   observationReadiness,
+  buildLedger,
+  runWithDecision,
   installAgent,
   autoInstalled,
   _test: {

@@ -163,7 +163,7 @@ function getOpenAIClient() {
   return openAIClient;
 }
 
-const VERSION = "v10.22.24-exact-open-order-trace";
+const VERSION = "v10.22.25-decision-outcome-ledger";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
@@ -14320,10 +14320,21 @@ async function scanMarket(source = "manual-scan") {
 
     const control = riskController(decisionRaw, context.decisionPortfolio, context.marketData, context.trendSummary, context.foundationAgents);
     let execution = { skipped: true, mode: TRADING_MODE, reason: "Aucun ordre exécuté" };
+    const observer = global.__LEO_EXECUTION_QUALITY_SHADOW__;
+    const observeDecision = (operation) => observer?.installed && typeof observer.runWithDecision === "function"
+      ? observer.runWithDecision({
+          action: control.finalDecision.decision,
+          asset: control.finalDecision.asset,
+          confidence: control.finalDecision.confidence,
+          rawAction: decisionRaw?.decision,
+          rawAsset: decisionRaw?.asset,
+          source
+        }, operation)
+      : operation();
     if (control.approved && control.finalDecision.decision === "BUY") {
-      execution = await executeBuy(control.finalDecision.asset, control.finalDecision.amount_usd, context.marketData);
+      execution = await observeDecision(() => executeBuy(control.finalDecision.asset, control.finalDecision.amount_usd, context.marketData));
     } else if (control.approved && control.finalDecision.decision === "SELL") {
-      execution = await executeSell(control.finalDecision.asset, context.marketData);
+      execution = await observeDecision(() => executeSell(control.finalDecision.asset, context.marketData));
     }
 
     if (PAPER_TRADING_ENABLED) {
@@ -17578,6 +17589,19 @@ app.get("/execution-quality-history", requireSecret, async (req, res) => {
       executionAttempted: false,
       error: error.message
     });
+  }
+});
+
+app.get("/decision-outcome-ledger", requireSecret, async (req, res) => {
+  try {
+    const observer = global.__LEO_EXECUTION_QUALITY_SHADOW__;
+    if (!observer?.installed || typeof observer.ledger !== "function") {
+      return res.status(503).json({ version: VERSION, available: false, executionAttempted: false });
+    }
+    res.json({ version: VERSION, time: nowIso(), tradingMode: TRADING_MODE,
+      executionAttempted: false, ...(await observer.ledger(req.query.limit)) });
+  } catch (error) {
+    res.status(500).json({ version: VERSION, executionAttempted: false, error: error.message });
   }
 });
 
