@@ -10,6 +10,12 @@ function numberOrNull(value) {
 
 function money(value) { return Math.round(value * 1e6) / 1e6; }
 
+function measuredDecisionCost(trace) {
+  const cost = trace?.aiDecisionCost;
+  return cost?.basis === 'PROVIDER_USAGE_OR_CACHE_ONLY' && cost?.scope === 'DECISION_AGENT_CALL_ONLY'
+    ? numberOrNull(cost.totalAttributedUsd) : null;
+}
+
 function normalizeClosedHistory(data, observations) {
   if (!Array.isArray(data)) return { valid: false, reason: 'HISTORY_RESPONSE_NOT_ARRAY', matches: {} };
   const known = new Map((observations || []).filter((row) => row?.side === 'BUY' &&
@@ -71,7 +77,10 @@ function buildLedger(observations = [], snapshot = null, limit = 100, history = 
     const realizedGross = numberOrNull(sell?.confirmation?.realizedPnlUsdVirtual);
     const brokerNet = historyMatches ? numberOrNull(closedTrade.netProfitUsdVirtual) : null;
     const fees = historyMatches ? numberOrNull(closedTrade.feesUsdVirtual) : null;
-    const aiCost = numberOrNull(buy?.decisionTrace?.aiCostUsd);
+    const buyAiCost = measuredDecisionCost(buy.decisionTrace);
+    const sellAiCost = sell ? measuredDecisionCost(sell.decisionTrace) : null;
+    const aiCost = buyAiCost !== null && sellAiCost !== null
+      ? money(buyAiCost + sellAiCost) : null;
     const fxCost = numberOrNull(sell?.confirmation?.fxFeesUsdVirtual);
     // eToro calls this field netProfit: its fees must never be subtracted again.
     // FX/account-wide expenses and AI costs are only deducted if attributed.
@@ -90,7 +99,11 @@ function buildLedger(observations = [], snapshot = null, limit = 100, history = 
       brokerNetProfitSource: brokerNet === null ? null : closedTrade.provenance,
       brokerClosedAt: historyMatches ? closedTrade.closeTimestamp : null,
       observedBrokerFeesUsdVirtual: fees, observedFxFeesUsdVirtual: fxCost,
-      attributedAiCostUsd: aiCost, realizedNetUsdVirtual: net,
+      buyDecisionAiCostUsd: buyAiCost, sellDecisionAiCostUsd: sellAiCost,
+      attributedAiCostUsd: aiCost,
+      brokerNetAfterMeasuredDecisionAiCostUsdVirtual: brokerNet !== null && aiCost !== null
+        ? money(brokerNet - aiCost) : null,
+      realizedNetUsdVirtual: net,
       buySlippageBps: numberOrNull(buy.executionQuality?.slippageBps),
       sellSlippageBps: numberOrNull(sell?.executionQuality?.slippageBps),
       missingForNet: ['CLOSE_OBSERVED', 'BROKER_CLOSED_TRADE'].includes(state) ? [

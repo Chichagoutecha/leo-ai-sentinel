@@ -30,7 +30,7 @@ const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
 const { buildLedger, normalizeClosedHistory } = require('./decision-outcome-ledger');
 
-const VERSION = 'v10.22.26.0-realized-history-shadow';
+const VERSION = 'v10.22.27.0-ai-decision-cost-attribution';
 const COMPONENT = 'LEO_EXECUTION_QUALITY_SHADOW';
 const MODE = 'shadow';
 const ENABLED = process.env.EXECUTION_QUALITY_SHADOW_ENABLED !== 'false';
@@ -105,6 +105,36 @@ let saveTimer = null;
 let installedAgent = null;
 const pendingTasks = new Set();
 const decisionContext = new AsyncLocalStorage();
+const aiCallContext = new AsyncLocalStorage();
+
+function recordAiCostEvent(event) {
+  const context = aiCallContext.getStore();
+  if (!context || !['CALL_COMPLETED', 'CACHE_HIT', 'CALL_FAILED'].includes(event?.event)) return;
+  if (event.event === 'CACHE_HIT') { context.cacheHits++; return; }
+  if (event.event === 'CALL_FAILED') { context.unknownCalls++; return; }
+  const value = Number(event.callCostUsd);
+  if (!Number.isFinite(value) || value < 0) { context.unknownCalls++; return; }
+  context.calls++;
+  if (event.costBasis === 'PROVIDER_USAGE') context.measuredUsd += value;
+  else context.estimatedUsd += value;
+}
+
+async function runWithAiDecisionCost(operation) {
+  if (typeof operation !== 'function') return { result: undefined, cost: null };
+  if (!global.__LEO_AI_COST_OBSERVER_HOOK_READY__) return { result: await operation(), cost: null };
+  const context = { calls: 0, cacheHits: 0, unknownCalls: 0, measuredUsd: 0, estimatedUsd: 0 };
+  const result = await aiCallContext.run(context, operation);
+  const complete = context.unknownCalls === 0 && context.estimatedUsd === 0;
+  return { result, cost: {
+    scope: 'DECISION_AGENT_CALL_ONLY',
+    providerUsageCostUsd: round(context.measuredUsd, 6),
+    conservativeFallbackUsd: round(context.estimatedUsd, 6),
+    totalAttributedUsd: round(context.measuredUsd + context.estimatedUsd, 6),
+    callCount: context.calls, cacheHits: context.cacheHits,
+    basis: complete ? 'PROVIDER_USAGE_OR_CACHE_ONLY' : 'INCLUDES_ESTIMATE_OR_UNKNOWN',
+    coversAllBotAndInfrastructureCosts: false
+  } };
+}
 
 function runWithDecision(decision, operation) {
   // The context is observational. Never prevent a legitimate LIVE operation.
@@ -119,6 +149,8 @@ function runWithDecision(decision, operation) {
       rawSignalAction: String(decision?.rawAction || '').toUpperCase().slice(0, 12) || null,
       rawSignalAsset: String(decision?.rawAsset || '').toUpperCase().slice(0, 32) || null,
       source: String(decision?.source || '').slice(0, 80),
+      aiDecisionCost: decision?.aiDecisionCost && typeof decision.aiDecisionCost === 'object'
+        ? decision.aiDecisionCost : null,
       provenance: 'SCAN_FINAL_RISK_APPROVED_DECISION'
     };
   } catch {}
@@ -1326,7 +1358,9 @@ function installAgent(options = {}) {
       scheduleSave(baseFetch);
       return { ok: true, ...state.closedHistoryStatus };
     },
-    runWithDecision
+    runWithDecision,
+    runWithAiDecisionCost,
+    recordAiCostEvent
   };
 
   global.__LEO_EXECUTION_QUALITY_SHADOW__ = installedAgent;
@@ -1361,6 +1395,8 @@ module.exports = {
   observationReadiness,
   buildLedger,
   runWithDecision,
+  runWithAiDecisionCost,
+  recordAiCostEvent,
   installAgent,
   autoInstalled,
   _test: {

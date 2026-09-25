@@ -3,6 +3,10 @@ const test=require('node:test');
 const assert=require('node:assert/strict');
 
 test('successful response without usage is charged conservatively instead of zero',async()=>{
+  let hookEvents = 0;
+  global.__LEO_EXECUTION_QUALITY_SHADOW__ = { recordAiCostEvent(event) {
+    if (event.event === 'CALL_COMPLETED') { hookEvents++; throw new Error('observer unavailable'); }
+  } };
   const fakeFetch=async()=>new Response(JSON.stringify({
     id:'chatcmpl-no-usage',object:'chat.completion',created:1,model:'gpt-5.6-luna',
     choices:[{index:0,message:{role:'assistant',content:'{"action":"HOLD"}'},finish_reason:'stop'}]
@@ -17,4 +21,5 @@ test('successful response without usage is charged conservatively instead of zer
   assert.equal(state.lastEvent.event,'CALL_COMPLETED');
   assert.equal(state.lastEvent.usageMissing,true);
   assert.equal(state.lastEvent.costBasis,'CONSERVATIVE_RESERVED_FALLBACK');
+  assert.equal(hookEvents,1);
 });

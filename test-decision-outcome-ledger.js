@@ -54,16 +54,59 @@ test('history requires exact position and instrument and preserves broker netPro
 
 test('a complete result subtracts only separately attributed external FX and AI cost', () => {
   const position = buy();
-  position.decisionTrace.aiCostUsd = 0.2;
+  position.decisionTrace.aiDecisionCost = { scope: 'DECISION_AGENT_CALL_ONLY',
+    basis: 'PROVIDER_USAGE_OR_CACHE_ONLY', totalAttributedUsd: 0.2 };
   const sell = { id: 'sell-1', side: 'SELL', targetPositionId: '100', executionInstrumentId: 100109,
     fullCloseRequested: true, confirmation: { proof: 'EXACT_TARGET_POSITION_ID_REMOVED_FROM_REAL_PNL',
-      fxFeesUsdVirtual: 0.3 } };
+      fxFeesUsdVirtual: 0.3 }, decisionTrace: { aiDecisionCost: { scope: 'DECISION_AGENT_CALL_ONLY',
+        basis: 'PROVIDER_USAGE_OR_CACHE_ONLY', totalAttributedUsd: 0.1 } } };
   const closed = normalizeClosedHistory([{ positionId: 100, instrumentId: 100109, orderId: 'order-1',
     closeTimestamp: '2026-09-25T12:00:00Z', netProfit: 10, fees: 2 }], [position]);
   const ledger = buildLedger([position, sell], { valid: true, positionsById: {} }, 100, closed.matches);
-  assert.equal(ledger.entries[0].realizedNetUsdVirtual, 9.5);
-  assert.equal(ledger.realizedNetTotalUsdVirtual, 9.5);
+  assert.equal(ledger.entries[0].realizedNetUsdVirtual, 9.4);
+  assert.equal(ledger.realizedNetTotalUsdVirtual, 9.4);
   assert.equal(ledger.entries[0].observedBrokerFeesUsdVirtual, 2);
+});
+
+test('a cached decision is zero-cost, while an estimated usage fallback cannot certify net', () => {
+  const previous = global.__LEO_AI_COST_OBSERVER_HOOK_READY__;
+  global.__LEO_AI_COST_OBSERVER_HOOK_READY__ = true;
+  try {
+    const buyTrace = { ...buy(), decisionTrace: { aiDecisionCost: { scope: 'DECISION_AGENT_CALL_ONLY',
+      basis: 'INCLUDES_ESTIMATE_OR_UNKNOWN', totalAttributedUsd: 0.5 } } };
+    const sell = { id: 'sell-1', side: 'SELL', targetPositionId: '100', executionInstrumentId: 100109,
+      fullCloseRequested: true, confirmation: { proof: 'EXACT_TARGET_POSITION_ID_REMOVED_FROM_REAL_PNL',
+        fxFeesUsdVirtual: 0 }, decisionTrace: { aiDecisionCost: { scope: 'DECISION_AGENT_CALL_ONLY',
+        basis: 'PROVIDER_USAGE_OR_CACHE_ONLY', totalAttributedUsd: 0 } } };
+    const closed = { 100: { positionId: '100', instrumentId: 100109, netProfitUsdVirtual: 10,
+      provenance: 'ETORO_REAL_TRADE_HISTORY_EXACT_POSITION_INSTRUMENT' } };
+    const entry = buildLedger([buyTrace, sell], { valid: true, positionsById: {} }, 100, closed).entries[0];
+    assert.equal(entry.attributedAiCostUsd, null);
+    assert.equal(entry.realizedNetUsdVirtual, null);
+  } finally { global.__LEO_AI_COST_OBSERVER_HOOK_READY__ = previous; }
+});
+
+test('asynchronous cost records remain isolated across concurrent decisions', async () => {
+  const previous = global.__LEO_AI_COST_OBSERVER_HOOK_READY__;
+  global.__LEO_AI_COST_OBSERVER_HOOK_READY__ = true;
+  try {
+    const one = observer.runWithAiDecisionCost(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 3));
+      observer.recordAiCostEvent({ event: 'CALL_COMPLETED', costBasis: 'PROVIDER_USAGE', callCostUsd: 0.2 });
+      return 'one';
+    });
+    const two = observer.runWithAiDecisionCost(async () => {
+      observer.recordAiCostEvent({ event: 'CALL_COMPLETED', costBasis: 'CONSERVATIVE_RESERVED_FALLBACK', callCostUsd: 0.7 });
+      observer.recordAiCostEvent({ event: 'CACHE_HIT' });
+      return 'two';
+    });
+    const [a, b] = await Promise.all([one, two]);
+    assert.equal(a.cost.totalAttributedUsd, 0.2);
+    assert.equal(a.cost.basis, 'PROVIDER_USAGE_OR_CACHE_ONLY');
+    assert.equal(b.cost.totalAttributedUsd, 0.7);
+    assert.equal(b.cost.cacheHits, 1);
+    assert.equal(b.cost.basis, 'INCLUDES_ESTIMATE_OR_UNKNOWN');
+  } finally { global.__LEO_AI_COST_OBSERVER_HOOK_READY__ = previous; }
 });
 
 test('duplicate, wrong account shape, wrong instrument and order cannot create broker profit', () => {

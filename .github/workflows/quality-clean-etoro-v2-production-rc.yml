@@ -66,8 +66,22 @@ jobs:
         shell: bash
         run: |
           git fetch origin main --depth=1
-          git diff --exit-code origin/main...HEAD -- ai-cost-optimizer.js ai-luna-temperature-compat.js production-ai-preflight.js
-          allowed='^(index\.js|ai-context-optimizer\.js|ai-context-optimizer-v2\.js|execution-aware-decision-runtime\.js|package\.json|package-lock\.json|decision-outcome-ledger\.js|test-decision-outcome-ledger\.js|etoro-execution-diagnostics\.js|etoro-agent-scope-compat\.js|etoro-acknowledged-no-effect-hotfix\.js|etoro-ucits-execution-bridge\.js|all-in-cost-shadow-agent\.js|hold-opportunity-shadow-agent\.js|test-etoro-execution-diagnostics\.js|test-etoro-agent-scope-compat\.js|test-etoro-acknowledged-no-effect-hotfix\.js|test-etoro-ucits-execution-bridge\.js|test-all-in-cost-shadow-agent\.js|test-hold-opportunity-shadow-agent\.js|test-ai-context-adaptive\.js|test-ai-context-v2\.js|test-execution-aware-decision-runtime\.js|test-lot-aware-risk-sizing\.js|test-real-sell-proof\.js|execution-quality-shadow-agent\.js|test-execution-quality-shadow-agent\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
+          git diff --exit-code origin/main...HEAD -- ai-luna-temperature-compat.js production-ai-preflight.js
+          python3 - <<'PY'
+          import subprocess
+          from pathlib import Path
+          base = subprocess.check_output(['git', 'show', 'origin/main:ai-cost-optimizer.js'], text=True)
+          anchor = '  global.__LEO_AI_COST_LAST_EVENT__ = payload;\n'
+          insert = ('  // Observer-only hook: it cannot change the cost gate, the provider response,\n'
+                    '  // reservation accounting, or the result of an OpenAI request.\n'
+                    '  try { global.__LEO_EXECUTION_QUALITY_SHADOW__?.recordAiCostEvent?.(payload); } catch {}\n')
+          assert base.count(anchor) == 1
+          expected = base.replace(anchor, anchor + insert).replace(
+              'async function redis(cmd) {',
+              'global.__LEO_AI_COST_OBSERVER_HOOK_READY__ = ENABLED;\nasync function redis(cmd) {', 1)
+          assert Path('ai-cost-optimizer.js').read_text() == expected, 'AI cost gate changed beyond the observer hook'
+          PY
+          allowed='^(index\.js|ai-cost-optimizer\.js|ai-context-optimizer\.js|ai-context-optimizer-v2\.js|execution-aware-decision-runtime\.js|package\.json|package-lock\.json|decision-outcome-ledger\.js|test-decision-outcome-ledger\.js|etoro-execution-diagnostics\.js|etoro-agent-scope-compat\.js|etoro-acknowledged-no-effect-hotfix\.js|etoro-ucits-execution-bridge\.js|all-in-cost-shadow-agent\.js|hold-opportunity-shadow-agent\.js|test-etoro-execution-diagnostics\.js|test-etoro-agent-scope-compat\.js|test-etoro-acknowledged-no-effect-hotfix\.js|test-etoro-ucits-execution-bridge\.js|test-all-in-cost-shadow-agent\.js|test-hold-opportunity-shadow-agent\.js|test-ai-context-adaptive\.js|test-ai-context-v2\.js|test-execution-aware-decision-runtime\.js|test-lot-aware-risk-sizing\.js|test-real-sell-proof\.js|execution-quality-shadow-agent\.js|test-execution-quality-shadow-agent\.js|test-ai-cost-missing-usage\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
           unexpected="$(git diff --name-only origin/main...HEAD | grep -Ev "$allowed" || true)"
           if [ -n "$unexpected" ]; then
             echo "Unexpected changed files:"
@@ -80,7 +94,7 @@ jobs:
         shell: bash
         run: |
           git fetch origin main --depth=1
-          grep -Fq 'const VERSION = "v10.22.26-realized-history-shadow";' index.js
+          grep -Fq 'const VERSION = "v10.22.27-ai-decision-cost-attribution";' index.js
           grep -Fq 'const UCITS_OVERLAP_SCAN_SCHEDULE =' index.js
           grep -Fq 'process.env.UCITS_OVERLAP_SCAN_SCHEDULE || "45 14 * * 1-5"' index.js
           grep -Fq 'SCAN UCITS OVERLAP START:' index.js
@@ -189,7 +203,7 @@ jobs:
       - name: Prove Execution Quality shadow is non-interfering and estimate-only
         shell: bash
         run: |
-          grep -Fq "v10.22.26.0-realized-history-shadow" execution-quality-shadow-agent.js
+          grep -Fq "v10.22.27.0-ai-decision-cost-attribution" execution-quality-shadow-agent.js
           grep -Fq "EXACT_OPEN_ORDER_ID_VISIBLE_IN_REAL_PNL" execution-quality-shadow-agent.js
           grep -Fq "eligibleForCopyCalibration: false" execution-quality-shadow-agent.js
           grep -Fq "if (!pnlSnapshot.valid) return 0" execution-quality-shadow-agent.js

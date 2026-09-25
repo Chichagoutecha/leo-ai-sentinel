@@ -92,8 +92,12 @@ function log(event, details = {}, level = 'log') {
   const payload = { component: 'LEO_AI_COST_OPTIMIZER', version: VERSION, event, at: iso(), ...details };
   lastEvent = payload;
   global.__LEO_AI_COST_LAST_EVENT__ = payload;
+  // Observer-only hook: it cannot change the cost gate, the provider response,
+  // reservation accounting, or the result of an OpenAI request.
+  try { global.__LEO_EXECUTION_QUALITY_SHADOW__?.recordAiCostEvent?.(payload); } catch {}
   (console[level] || console.log)(`[LEO_AI_COST] ${JSON.stringify(payload)}`);
 }
+global.__LEO_AI_COST_OBSERVER_HOOK_READY__ = ENABLED;
 async function redis(cmd) {
   if (!REDIS) throw new Error('UPSTASH_NOT_CONFIGURED');
   const r = await global.fetch(UPSTASH_URL, {
