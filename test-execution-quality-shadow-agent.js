@@ -19,7 +19,7 @@ function pnl({ credit = 9000, positions = [] } = {}) {
 }
 
 test('governance is strictly shadow-only and cannot alter LIVE sizing or orders', () => {
-  assert.equal(mod.VERSION, 'v10.22.23.0-execution-proof-integrity');
+  assert.equal(mod.VERSION, 'v10.22.24.0-exact-open-order-trace');
   assert.equal(mod.GOVERNANCE.analysisOnly, true);
   assert.equal(mod.GOVERNANCE.shadowOnly, true);
   assert.equal(mod.GOVERNANCE.canPlaceOrder, false);
@@ -310,6 +310,46 @@ test('a PnL read started before the broker response cannot confirm an order', ()
   mod._test.ingestPnl(pnl({ positions: [{ positionId: 88, instrumentId: 100109, amount: 500 }] }),
     async () => {}, '2026-09-25T10:02:00.000Z');
   assert.equal(row.confirmation.proof, 'BROKER_POSITION_ID_VISIBLE_IN_REAL_PNL');
+});
+
+test('exact open order ID traces broker acceptance without claiming a BUY fill', () => {
+  mod._test.resetState();
+  const row = mod._test.makeBuyObservation({ instrumentId: 100109, amount: 500 });
+  row.brokerResponse = { httpOk: true, observedAt: '2026-09-25T10:01:00.000Z', orderId: '456', positionId: null };
+  row.status = 'BROKER_HTTP_OK';
+  mod._test.getState().observations.push(row);
+  const readAt = '2026-09-25T10:02:00.000Z';
+  mod._test.ingestPnl({ clientPortfolio: {
+    credit: 9000, positions: [],
+    ordersForOpen: [{ orderID: 456, instrumentId: 100109 }]
+  } }, async () => {}, readAt);
+  assert.equal(row.orderTrace.evidence, 'EXACT_OPEN_ORDER_ID_VISIBLE_IN_REAL_PNL');
+  assert.equal(row.orderTrace.executionConfirmed, false);
+  assert.equal(row.orderTrace.eligibleForCopyCalibration, false);
+  assert.equal(row.confirmation, null);
+  assert.equal(row.status, 'BROKER_HTTP_OK');
+  assert.equal(mod.calibrationSummary().observationsUsed, 0);
+  assert.equal(mod.observationReadiness().counts.brokerOrderIdVisibleWithoutPositionProof, 1);
+});
+
+test('wrong-instrument or duplicate order descriptors cannot create an exact trace', () => {
+  mod._test.resetState();
+  const row = mod._test.makeBuyObservation({ instrumentId: 100109, amount: 500 });
+  row.brokerResponse = { httpOk: true, observedAt: '2026-09-25T10:01:00.000Z', orderId: '456' };
+  row.status = 'BROKER_HTTP_OK';
+  mod._test.getState().observations.push(row);
+  const readAt = '2026-09-25T10:02:00.000Z';
+  mod._test.ingestPnl({ clientPortfolio: {
+    credit: 9000, positions: [], ordersForOpen: [{ orderID: 456, instrumentId: 100001 }]
+  } }, async () => {}, readAt);
+  assert.equal(row.orderTrace, null);
+  mod._test.ingestPnl({ clientPortfolio: {
+    credit: 9000, positions: [], ordersForOpen: [
+      { orderID: 456, instrumentId: 100109 }, { orderId: 456, instrumentId: 100109 }
+    ]
+  } }, async () => {}, readAt);
+  assert.equal(row.orderTrace, null);
+  assert.equal(row.status, 'BROKER_HTTP_OK');
 });
 
 test('fetch wrapper forwards the exact BUY request once and adds no broker/provider call', async () => {
