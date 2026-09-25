@@ -19,7 +19,7 @@ function pnl({ credit = 9000, positions = [] } = {}) {
 }
 
 test('governance is strictly shadow-only and cannot alter LIVE sizing or orders', () => {
-  assert.equal(mod.VERSION, 'v10.22.27.0-ai-decision-cost-attribution');
+  assert.equal(mod.VERSION, 'v10.22.28.0-paginated-realized-history');
   assert.equal(mod.GOVERNANCE.analysisOnly, true);
   assert.equal(mod.GOVERNANCE.shadowOnly, true);
   assert.equal(mod.GOVERNANCE.canPlaceOrder, false);

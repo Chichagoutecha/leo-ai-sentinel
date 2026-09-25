@@ -30,7 +30,7 @@ const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
 const { buildLedger, normalizeClosedHistory } = require('./decision-outcome-ledger');
 
-const VERSION = 'v10.22.27.0-ai-decision-cost-attribution';
+const VERSION = 'v10.22.28.0-paginated-realized-history';
 const COMPONENT = 'LEO_EXECUTION_QUALITY_SHADOW';
 const MODE = 'shadow';
 const ENABLED = process.env.EXECUTION_QUALITY_SHADOW_ENABLED !== 'false';
@@ -1348,8 +1348,9 @@ function installAgent(options = {}) {
         row.confirmation?.proof === 'BROKER_POSITION_ID_VISIBLE_IN_REAL_PNL' && String(row.confirmation.positionId) === id)));
       state.closedHistoryStatus = {
         observedAt: iso(), source: 'ETORO_REAL_TRADE_HISTORY',
-        page: 1, pageSize: 100, returnedRows: data.length,
-        possiblyMorePages: data.length >= 100,
+        pagesFetched: metadata.pagesFetched || 1, pageSize: metadata.pageSize || 100,
+        returnedRows: data.length, possiblyMorePages: metadata.possiblyMorePages ?? data.length >= 100,
+        windowCoverageComplete: metadata.windowCoverageComplete === true,
         matchedPositions: Object.keys(normalized.matches).length,
         ambiguousPositions: normalized.ambiguousPositions,
         minDate: metadata.minDate || null,

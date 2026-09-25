@@ -16,6 +16,27 @@ function measuredDecisionCost(trace) {
     ? numberOrNull(cost.totalAttributedUsd) : null;
 }
 
+// Read sequentially so the refresh has a strict broker-call ceiling. A failed
+// page discards the entire response: the observer must never ingest a subset.
+async function readClosedHistoryPages(fetchPage, pageSize = 100, maxPages = 5) {
+  const trades = [];
+  let previousFullPage = null;
+  for (let page = 1; page <= maxPages; page++) {
+    const rows = await fetchPage(page, pageSize);
+    if (!Array.isArray(rows) || rows.length > pageSize)
+      throw new Error('BROKER_HISTORY_INVALID_PAGE');
+    const fingerprint = rows.length === pageSize ? JSON.stringify(rows) : null;
+    if (fingerprint && fingerprint === previousFullPage)
+      throw new Error('BROKER_HISTORY_REPEATED_PAGE');
+    previousFullPage = fingerprint;
+    trades.push(...rows);
+    if (rows.length < pageSize) return { trades, pagesFetched: page, pageSize,
+      returnedRows: trades.length, possiblyMorePages: false, windowCoverageComplete: true };
+  }
+  return { trades, pagesFetched: maxPages, pageSize,
+    returnedRows: trades.length, possiblyMorePages: true, windowCoverageComplete: false };
+}
+
 function normalizeClosedHistory(data, observations) {
   if (!Array.isArray(data)) return { valid: false, reason: 'HISTORY_RESPONSE_NOT_ARRAY', matches: {} };
   const known = new Map((observations || []).filter((row) => row?.side === 'BUY' &&
@@ -131,4 +152,4 @@ function buildLedger(observations = [], snapshot = null, limit = 100, history = 
   };
 }
 
-module.exports = { buildLedger, normalizeClosedHistory };
+module.exports = { buildLedger, normalizeClosedHistory, readClosedHistoryPages };
