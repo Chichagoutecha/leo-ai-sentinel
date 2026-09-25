@@ -19,7 +19,7 @@ function pnl({ credit = 9000, positions = [] } = {}) {
 }
 
 test('governance is strictly shadow-only and cannot alter LIVE sizing or orders', () => {
-  assert.equal(mod.VERSION, 'v10.22.24.0-exact-open-order-trace');
+  assert.equal(mod.VERSION, 'v10.22.25.0-decision-outcome-ledger');
   assert.equal(mod.GOVERNANCE.analysisOnly, true);
   assert.equal(mod.GOVERNANCE.shadowOnly, true);
   assert.equal(mod.GOVERNANCE.canPlaceOrder, false);
