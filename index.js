@@ -163,7 +163,7 @@ function getOpenAIClient() {
   return openAIClient;
 }
 
-const VERSION = "v10.22.26-realized-history-shadow";
+const VERSION = "v10.22.27-ai-decision-cost-attribution";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
@@ -14197,14 +14197,18 @@ async function scanMarket(source = "manual-scan") {
   try {
     const context = await buildRuntimeContext(source);
     let decisionRaw;
+    let aiDecisionCost = null;
     try {
-      decisionRaw = await askDecisionAgent(
-        context.portfolioSummary,
-        context.marketSummary,
-        context.trendSummary,
-        source,
-        context.foundationAgents
+      const decide = () => askDecisionAgent(
+        context.portfolioSummary, context.marketSummary, context.trendSummary,
+        source, context.foundationAgents
       );
+      const costObserver = global.__LEO_EXECUTION_QUALITY_SHADOW__;
+      if (costObserver?.installed && typeof costObserver.runWithAiDecisionCost === "function") {
+        const observed = await costObserver.runWithAiDecisionCost(decide);
+        decisionRaw = observed.result;
+        aiDecisionCost = observed.cost;
+      } else decisionRaw = await decide();
     } catch (error) {
       addLog({ source, event: "AI_DECISION_ERROR", tradingMode: TRADING_MODE, error: error.message, foundationAgents: context.foundationAgents, memory: memoryStatus() });
       return { version: VERSION, source, trading_mode: TRADING_MODE, error: "Erreur décision IA", details: error.message };
@@ -14328,6 +14332,7 @@ async function scanMarket(source = "manual-scan") {
           confidence: control.finalDecision.confidence,
           rawAction: decisionRaw?.decision,
           rawAsset: decisionRaw?.asset,
+          aiDecisionCost,
           source
         }, operation)
       : operation();
