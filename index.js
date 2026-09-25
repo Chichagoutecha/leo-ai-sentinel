@@ -163,7 +163,7 @@ function getOpenAIClient() {
   return openAIClient;
 }
 
-const VERSION = "v10.22.25-decision-outcome-ledger";
+const VERSION = "v10.22.26-realized-history-shadow";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
@@ -17602,6 +17602,33 @@ app.get("/decision-outcome-ledger", requireSecret, async (req, res) => {
       executionAttempted: false, ...(await observer.ledger(req.query.limit)) });
   } catch (error) {
     res.status(500).json({ version: VERSION, executionAttempted: false, error: error.message });
+  }
+});
+
+// A human-initiated, read-only broker history refresh. No scan or order can
+// originate here; a single bounded page is fetched using the REAL token.
+app.post("/decision-outcome-ledger-refresh", requireSecret, async (_req, res) => {
+  const observer = global.__LEO_EXECUTION_QUALITY_SHADOW__;
+  if (!observer?.installed || typeof observer.ingestHistory !== "function") {
+    return res.status(503).json({ version: VERSION, available: false, executionAttempted: false });
+  }
+  const minDate = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
+  const endpoint = "https://public-api.etoro.com/api/v1/trading/info/trade/history";
+  const url = `${endpoint}?minDate=${minDate}&page=1&pageSize=100`;
+  try {
+    const { response, data } = await fetchJsonWithRetry(url,
+      { method: "GET", headers: etoroHeaders() },
+      { label: "eToro REAL closed trading history", retries: 0 });
+    if (!response.ok) {
+      return res.status(502).json({ version: VERSION, refreshed: false, brokerHttpStatus: response.status,
+        executionAttempted: false, reason: "BROKER_HISTORY_READ_FAILED" });
+    }
+    const result = await observer.ingestHistory(data, { minDate });
+    res.status(result.ok ? 200 : 422).json({ version: VERSION, refreshed: result.ok,
+      executionAttempted: false, brokerReadCallsAdded: 1, ...result });
+  } catch (error) {
+    res.status(502).json({ version: VERSION, refreshed: false, executionAttempted: false,
+      reason: "BROKER_HISTORY_READ_FAILED" });
   }
 });
 

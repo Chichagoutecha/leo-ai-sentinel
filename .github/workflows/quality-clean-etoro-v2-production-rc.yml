@@ -80,7 +80,7 @@ jobs:
         shell: bash
         run: |
           git fetch origin main --depth=1
-          grep -Fq 'const VERSION = "v10.22.25-decision-outcome-ledger";' index.js
+          grep -Fq 'const VERSION = "v10.22.26-realized-history-shadow";' index.js
           grep -Fq 'const UCITS_OVERLAP_SCAN_SCHEDULE =' index.js
           grep -Fq 'process.env.UCITS_OVERLAP_SCAN_SCHEDULE || "45 14 * * 1-5"' index.js
           grep -Fq 'SCAN UCITS OVERLAP START:' index.js
@@ -189,7 +189,7 @@ jobs:
       - name: Prove Execution Quality shadow is non-interfering and estimate-only
         shell: bash
         run: |
-          grep -Fq "v10.22.25.0-decision-outcome-ledger" execution-quality-shadow-agent.js
+          grep -Fq "v10.22.26.0-realized-history-shadow" execution-quality-shadow-agent.js
           grep -Fq "EXACT_OPEN_ORDER_ID_VISIBLE_IN_REAL_PNL" execution-quality-shadow-agent.js
           grep -Fq "eligibleForCopyCalibration: false" execution-quality-shadow-agent.js
           grep -Fq "if (!pnlSnapshot.valid) return 0" execution-quality-shadow-agent.js
@@ -212,6 +212,8 @@ jobs:
           grep -Fq 'app.get("/execution-quality-history", requireSecret' index.js
           grep -Fq 'app.get("/copy-calibration-status", requireSecret' index.js
           grep -Fq 'app.get("/decision-outcome-ledger", requireSecret' index.js
+          grep -Fq 'app.post("/decision-outcome-ledger-refresh", requireSecret' index.js
+          grep -Fq 'retries: 0' index.js
           node --test test-decision-outcome-ledger.js
           npm run test:execution-quality
 
