@@ -136,6 +136,8 @@ const { randomUUID, createHash, timingSafeEqual } = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { marketSourceAudit, decisionMarketEvidence } = require('./market-source-audit');
+const { ENDPOINT: SEC_BLACKROCK_ENDPOINT, REFRESH_INTERVAL_MS: SEC_REFRESH_INTERVAL_MS,
+  normalizeBlackRockFilings, institutionalWatchStatus } = require('./sec-institutional-watch');
 
 const app = express();
 app.use(express.json());
@@ -164,7 +166,9 @@ function getOpenAIClient() {
   return openAIClient;
 }
 
-const VERSION = "v10.22.29-market-source-audit";
+const VERSION = "v10.22.30-sec-institutional-watch";
+const SEC_EDGAR_USER_AGENT = String(process.env.SEC_EDGAR_USER_AGENT || '').trim();
+let secInstitutionalRefreshInFlight = false;
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
@@ -1824,6 +1828,7 @@ const runtimeState = {
     lastConfirmedAt: null
   },
   lastMarketData: null,
+  secInstitutionalWatch: null,
   trendMemory: {},
   equityHistory: [],
   performanceHistory: [],
@@ -2396,7 +2401,8 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
       strategyCandidates: (runtimeState.strategyCandidates || []).slice(0, STRATEGY_CANDIDATE_HISTORY_LIMIT),
       improvementHistory: (runtimeState.improvementHistory || []).slice(0, STRATEGY_CANDIDATE_HISTORY_LIMIT),
       lastImprovementRun: runtimeState.lastImprovementRun || null,
-      lastMarketData: runtimeState.lastMarketData || null
+      lastMarketData: runtimeState.lastMarketData || null,
+      secInstitutionalWatch: runtimeState.secInstitutionalWatch || null
     };
   }
 
@@ -2482,7 +2488,8 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
     strategyRegistry: runtimeState.strategyRegistry || null,
     strategyCandidates: (runtimeState.strategyCandidates || []).slice(0, 30),
     improvementHistory: (runtimeState.improvementHistory || []).slice(0, 30),
-    lastMarketData: compactLastMarketDataForPersistence(runtimeState.lastMarketData)
+    lastMarketData: compactLastMarketDataForPersistence(runtimeState.lastMarketData),
+    secInstitutionalWatch: runtimeState.secInstitutionalWatch || null
   };
 }
 
@@ -2852,6 +2859,9 @@ function applyPersistentState(state) {
   if (Array.isArray(state.improvementHistory)) runtimeState.improvementHistory = state.improvementHistory.slice(0, STRATEGY_CANDIDATE_HISTORY_LIMIT);
   if (state.lastImprovementRun && typeof state.lastImprovementRun === "object") runtimeState.lastImprovementRun = state.lastImprovementRun;
   if (state.lastMarketData) runtimeState.lastMarketData = state.lastMarketData;
+  if (state.secInstitutionalWatch && typeof state.secInstitutionalWatch === 'object') {
+    runtimeState.secInstitutionalWatch = state.secInstitutionalWatch;
+  }
 
   prunePointInTimeArchive();
   ensureStrategyRegistry();
@@ -19139,6 +19149,59 @@ app.get("/data-sources", requireSecret, (req, res) => {
       secondaryQuoteEntries: Object.keys(runtimeState.secondaryCache || {}).length
     }
   });
+});
+
+// Public SEC filing metadata, fetched only by an explicit authenticated request.
+// It never changes a live decision, an order, or a market price.
+app.get('/institutional-filings-status', requireSecret, (_req, res) => {
+  const snapshot = runtimeState.secInstitutionalWatch;
+  res.json({ version: VERSION, executionAttempted: false,
+    ...institutionalWatchStatus(snapshot, Boolean(SEC_EDGAR_USER_AGENT)),
+    lastAttemptAt: snapshot?.lastAttemptAt || null,
+    lastFailureAt: snapshot?.lastFailureAt || null });
+});
+
+app.post('/institutional-filings-refresh', requireSecret, async (_req, res) => {
+  if (!SEC_EDGAR_USER_AGENT || !SEC_EDGAR_USER_AGENT.includes('@')) {
+    return res.status(503).json({ version: VERSION, refreshed: false,
+      executionAttempted: false, reason: 'SEC_USER_AGENT_NOT_CONFIGURED' });
+  }
+  const previous = runtimeState.secInstitutionalWatch || {};
+  const now = Date.now();
+  const sinceSuccess = now - Date.parse(previous.checkedAt || '');
+  if (Number.isFinite(sinceSuccess) && sinceSuccess >= 0 && sinceSuccess < SEC_REFRESH_INTERVAL_MS) {
+    return res.json({ version: VERSION, refreshed: false, brokerReadCallsAdded: 0,
+      executionAttempted: false, ...institutionalWatchStatus(previous, true, now) });
+  }
+  const sinceFailure = now - Date.parse(previous.lastFailureAt || '');
+  if (Number.isFinite(sinceFailure) && sinceFailure >= 0 && sinceFailure < 15 * 60000) {
+    return res.status(429).json({ version: VERSION, refreshed: false,
+      executionAttempted: false, reason: 'SEC_READ_COOLDOWN' });
+  }
+  if (secInstitutionalRefreshInFlight) {
+    return res.status(409).json({ version: VERSION, refreshed: false,
+      executionAttempted: false, reason: 'SEC_READ_IN_PROGRESS' });
+  }
+  secInstitutionalRefreshInFlight = true;
+  try {
+    const { response, data } = await fetchJsonWithRetry(SEC_BLACKROCK_ENDPOINT,
+      { method: 'GET', headers: { 'User-Agent': SEC_EDGAR_USER_AGENT, Accept: 'application/json' } },
+      { label: 'SEC EDGAR BlackRock submissions', retries: 0 });
+    if (!response.ok) throw new Error('SEC_READ_FAILED');
+    const filings = normalizeBlackRockFilings(data);
+    runtimeState.secInstitutionalWatch = { checkedAt: nowIso(), lastAttemptAt: nowIso(),
+      lastFailureAt: null, filings };
+    scheduleSave();
+    return res.json({ version: VERSION, refreshed: true, secReadCallsAdded: 1,
+      executionAttempted: false, ...institutionalWatchStatus(runtimeState.secInstitutionalWatch, true) });
+  } catch {
+    runtimeState.secInstitutionalWatch = { ...previous, lastAttemptAt: nowIso(), lastFailureAt: nowIso() };
+    scheduleSave();
+    return res.status(502).json({ version: VERSION, refreshed: false,
+      executionAttempted: false, reason: 'SEC_READ_FAILED' });
+  } finally {
+    secInstitutionalRefreshInFlight = false;
+  }
 });
 
 app.get("/provider-health", requireSecret, (req, res) => {
