@@ -135,6 +135,7 @@ const cron = require("node-cron");
 const { randomUUID, createHash, timingSafeEqual } = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const { marketSourceAudit, decisionMarketEvidence } = require('./market-source-audit');
 
 const app = express();
 app.use(express.json());
@@ -163,7 +164,7 @@ function getOpenAIClient() {
   return openAIClient;
 }
 
-const VERSION = "v10.22.28-paginated-realized-history";
+const VERSION = "v10.22.29-market-source-audit";
 
 const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
@@ -2238,6 +2239,7 @@ function compactLogForPersistence(log) {
       starterTargetPositions: Number(log.decisionDiagnostics.starterTargetPositions || TARGET_STARTER_POSITIONS),
       topCandidates: Array.isArray(log.decisionDiagnostics.topCandidates) ? log.decisionDiagnostics.topCandidates.slice(0, 3) : []
     } : null,
+    marketEvidence: log.marketEvidence || null,
     risk_reason: String(log.risk_reason || "").slice(0, 800),
     execution: compactExecutionForPersistence(log.execution),
     error: log.error || null
@@ -14323,6 +14325,8 @@ async function scanMarket(source = "manual-scan") {
     }
 
     const control = riskController(decisionRaw, context.decisionPortfolio, context.marketData, context.trendSummary, context.foundationAgents);
+    const marketEvidence = decisionMarketEvidence(String(control.finalDecision.asset || 'NONE').toUpperCase(),
+      context.marketSummary, context.dataIntegrityAgent, Date.now(), MAX_RATE_AGE_MINUTES);
     let execution = { skipped: true, mode: TRADING_MODE, reason: "Aucun ordre exécuté" };
     const observer = global.__LEO_EXECUTION_QUALITY_SHADOW__;
     const observeDecision = (operation) => observer?.installed && typeof observer.runWithDecision === "function"
@@ -14333,6 +14337,7 @@ async function scanMarket(source = "manual-scan") {
           rawAction: decisionRaw?.decision,
           rawAsset: decisionRaw?.asset,
           aiDecisionCost,
+          marketEvidence,
           source
         }, operation)
       : operation();
@@ -14366,6 +14371,7 @@ async function scanMarket(source = "manual-scan") {
       riskController: control,
       decision: control.finalDecision,
       decisionDiagnostics,
+      marketEvidence,
       execution,
       memory: memoryStatus()
     };
@@ -14373,6 +14379,7 @@ async function scanMarket(source = "manual-scan") {
       source, event: "SCAN_COMPLETED", tradingMode: TRADING_MODE,
       decision: control.finalDecision, decision_raw: decisionRaw,
       decisionDiagnostics,
+      marketEvidence,
       risk_reason: control.reason, execution,
       foundationAgents: context.foundationAgents,
       agentCouncil: context.agentCouncil || context.foundationAgents?.agentCouncil || null,
@@ -19115,13 +19122,16 @@ app.get("/risk-status", requireSecret, async (req, res) => {
 });
 
 app.get("/data-sources", requireSecret, (req, res) => {
+  const providerHealthAgent = buildProviderHealthAgent();
   res.json({
     version: VERSION,
     time: nowIso(),
     configuration: envConfiguration().marketDataFusion,
     executionReference: "eToro",
     policy: "Twelve Data et Alpha Vantage servent au contrôle et au fallback d'analyse; aucun ordre n'utilise leur prix directement.",
-    providerHealthAgent: buildProviderHealthAgent(),
+    providerHealthAgent,
+    liveAudit: marketSourceAudit(runtimeState.lastMarketData, runtimeState.lastMarketDataFusion,
+      providerHealthAgent, Date.now(), MAX_RATE_AGE_MINUTES),
     lastMarketDataFusion: runtimeState.lastMarketDataFusion,
     cache: {
       consensusEntries: Object.keys(runtimeState.marketConsensusCache || {}).length,

@@ -30,7 +30,7 @@ const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
 const { buildLedger, normalizeClosedHistory } = require('./decision-outcome-ledger');
 
-const VERSION = 'v10.22.28.0-paginated-realized-history';
+const VERSION = 'v10.22.29.0-market-source-audit';
 const COMPONENT = 'LEO_EXECUTION_QUALITY_SHADOW';
 const MODE = 'shadow';
 const ENABLED = process.env.EXECUTION_QUALITY_SHADOW_ENABLED !== 'false';
@@ -151,6 +151,8 @@ function runWithDecision(decision, operation) {
       source: String(decision?.source || '').slice(0, 80),
       aiDecisionCost: decision?.aiDecisionCost && typeof decision.aiDecisionCost === 'object'
         ? decision.aiDecisionCost : null,
+      marketEvidence: decision?.marketEvidence && typeof decision.marketEvidence === 'object'
+        ? decision.marketEvidence : null,
       provenance: 'SCAN_FINAL_RISK_APPROVED_DECISION'
     };
   } catch {}
