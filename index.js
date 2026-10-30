@@ -1425,7 +1425,9 @@ const WATCHLIST = {
   PANW: 9422,
   CRWD: 9419
 };
-const TRADE_ALLOWED_ASSETS = new Set(resolveTradeAllowlist(WATCHLIST, process.env));\nconst TRADE_ALLOWED_CATEGORIES = new Set(resolveAllowedCategories(process.env));\nconst TRADE_EXCLUSION_REASONS = parseExclusionReasons(process.env);
+const TRADE_ALLOWED_ASSETS = new Set(resolveTradeAllowlist(WATCHLIST, process.env));
+const TRADE_ALLOWED_CATEGORIES = new Set(resolveAllowedCategories(process.env));
+const TRADE_EXCLUSION_REASONS = parseExclusionReasons(process.env);
 
 const CRYPTO_ASSETS = new Set(["BTC", "ETH", "SOL"]);
 const MARKET_TIME_ZONE = "America/New_York";
