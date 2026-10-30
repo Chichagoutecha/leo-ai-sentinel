@@ -33,6 +33,12 @@ test('trade allowlist intersects the current instrument registry and applies exc
     TRADE_ALLOWED_ASSETS: 'SPY,BTC,UNKNOWN', TRADE_EXCLUDED_ASSETS: 'BTC'
   }), ['SPY']);
   assert.deepEqual(policy.resolveTradeAllowlist({ SPY: 1 }, {}), []);
+  assert.deepEqual(policy.resolveTradeAllowlist({ SPY: 1, BTC: 2 }, {
+    TRADE_ALLOWED_ASSETS: 'SPY,BTC', TRADE_EXCLUSIONS_JSON: '{"BTC":"Review required"}'
+  }), ['SPY']);
+  assert.deepEqual(policy.resolveTradeAllowlist({ SPY: 1 }, {
+    TRADE_ALLOWED_ASSETS: 'SPY', TRADE_EXCLUSIONS_JSON: '{bad-json'
+  }), []);
   assert.deepEqual(policy.resolveAllowedCategories({ TRADE_ALLOWED_CATEGORIES: 'ETF,CRYPTO,SMART_PORTFOLIO' }), ['CRYPTO', 'ETF']);
   assert.equal(policy.parseExclusionReasons({ TRADE_EXCLUSIONS_JSON: '{"BTC":"Volatility policy"}' }).BTC, 'Volatility policy');
 });
