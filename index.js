@@ -1425,10 +1425,6 @@ const WATCHLIST = {
   PANW: 9422,
   CRWD: 9419
 };
-const TRADE_ALLOWED_ASSETS = new Set(resolveTradeAllowlist(WATCHLIST, process.env));
-const TRADE_ALLOWED_CATEGORIES = new Set(resolveAllowedCategories(process.env));
-const TRADE_EXCLUSION_REASONS = parseExclusionReasons(process.env);
-
 const CRYPTO_ASSETS = new Set(["BTC", "ETH", "SOL"]);
 const MARKET_TIME_ZONE = "America/New_York";
 const US_REGULAR_SESSION_OPEN_MINUTE = 9 * 60 + 30;
@@ -1471,6 +1467,30 @@ const ASSET_RULES = {
   PANW: { category: "CYBERSECURITY", buyThreshold: 76, sellThreshold: 76 },
   CRWD: { category: "CYBERSECURITY", buyThreshold: 78, sellThreshold: 76 }
 };
+
+const CONFIGURED_UNIVERSE_CANDIDATES = (() => {
+  try {
+    const parsed = JSON.parse(String(process.env.ANALYSIS_ONLY_CANDIDATES_JSON || "[]"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
+})();
+for (const candidate of CONFIGURED_UNIVERSE_CANDIDATES) {
+  const symbol = String(candidate?.symbol || "").trim().toUpperCase();
+  const instrumentId = Number(candidate?.instrumentId);
+  const category = String(candidate?.category || "").trim().toUpperCase();
+  if (!/^[A-Z0-9.:-]{1,24}$/.test(symbol) || WATCHLIST[symbol] ||
+      !Number.isSafeInteger(instrumentId) || instrumentId <= 0 ||
+      !["ETF", "STOCK", "CRYPTO"].includes(category)) continue;
+  WATCHLIST[symbol] = instrumentId;
+  ASSET_RULES[symbol] = {
+    category: category === "ETF" ? "ETF_CONFIGURED" : category === "CRYPTO" ? "CRYPTO_CONFIGURED" : "STOCK_CONFIGURED",
+    buyThreshold: category === "CRYPTO" ? 78 : 72,
+    sellThreshold: 76
+  };
+}
+const TRADE_ALLOWED_ASSETS = new Set(resolveTradeAllowlist(WATCHLIST, process.env));
+const TRADE_ALLOWED_CATEGORIES = new Set(resolveAllowedCategories(process.env));
+const TRADE_EXCLUSION_REASONS = parseExclusionReasons(process.env);
 
 const STARTER_PRIORITY = [
   "SPY",
