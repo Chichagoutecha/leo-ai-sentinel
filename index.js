@@ -136,6 +136,7 @@ const { randomUUID, createHash, timingSafeEqual } = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { marketSourceAudit, decisionMarketEvidence } = require('./market-source-audit');
+const { createEligibilityClient, createEligibilityRegistry } = require('./etoro-instrument-eligibility');
 const { resolveTradingMode, liveBuyReady, demoBuyReady, liveBuyMaxOrderUsd, classifyAsset, buildUniverse, resolveTradeAllowlist, resolveAllowedCategories, parseExclusionReasons, analyzeLookThroughExposure, evaluateBuyPolicy } = require('./trade-universe-policy');
 const { ENDPOINT: SEC_BLACKROCK_ENDPOINT, REFRESH_INTERVAL_MS: SEC_REFRESH_INTERVAL_MS,
   normalizeBlackRockFilings, institutionalWatchStatus } = require('./sec-institutional-watch');
@@ -1491,6 +1492,8 @@ for (const candidate of CONFIGURED_UNIVERSE_CANDIDATES) {
 const TRADE_ALLOWED_ASSETS = new Set(resolveTradeAllowlist(WATCHLIST, process.env));
 const TRADE_ALLOWED_CATEGORIES = new Set(resolveAllowedCategories(process.env));
 const TRADE_EXCLUSION_REASONS = parseExclusionReasons(process.env);
+// Informational registry only. No background refresh or execution integration.
+const instrumentEligibilityRegistry = createEligibilityRegistry({ client: createEligibilityClient({ env: process.env }) });
 
 const STARTER_PRIORITY = [
   "SPY",
@@ -19321,6 +19324,23 @@ app.get("/risk-status", requireSecret, async (req, res) => {
       healthAgent: context.foundationAgents.healthAgent
     });
   } catch (error) { res.status(500).json({ version: VERSION, error: error.message }); }
+});
+
+// Explicit human-initiated information query; this is not an order endpoint.
+app.post("/instrument-eligibility-refresh", requireSecret, async (req, res) => {
+  try {
+    const result = await instrumentEligibilityRegistry.refresh(req.body);
+    res.json({ version: VERSION, executionAttempted: false, informationalOnly: true, result });
+  } catch {
+    res.status(400).json({ executionAttempted: false, error: "INVALID_ELIGIBILITY_REQUEST" });
+  }
+});
+app.get("/instrument-eligibility-status", requireSecret, (_req, res) => {
+  const universe = buildUniverse(WATCHLIST, ASSET_RULES, CONFIGURED_UNIVERSE_CANDIDATES);
+  res.json({ version: VERSION, executionAttempted: false, informationalOnly: true,
+    instruments: universe.map(item => ({ symbol: item.symbol, instrumentId: item.instrumentId,
+      eligibility: instrumentEligibilityRegistry.inspect({ symbol: item.symbol, instrumentId: item.instrumentId,
+        category: item.category, allowedAssets: [...TRADE_ALLOWED_ASSETS], allowedCategories: [...TRADE_ALLOWED_CATEGORIES] }) })) });
 });
 
 app.get("/portfolio-universe-status", requireSecret, async (_req, res) => {
