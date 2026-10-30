@@ -137,6 +137,7 @@ const fs = require("fs");
 const path = require("path");
 const { marketSourceAudit, decisionMarketEvidence } = require('./market-source-audit');
 const { resolveTradingMode, liveBuyReady, demoBuyReady, liveBuyMaxOrderUsd, classifyAsset, buildUniverse, resolveTradeAllowlist, resolveAllowedCategories, parseExclusionReasons, analyzeLookThroughExposure, evaluateBuyPolicy } = require('./trade-universe-policy');
+const { buildPaperShadowScorecard } = require('./paper-shadow-accounting');
 const { ENDPOINT: SEC_BLACKROCK_ENDPOINT, REFRESH_INTERVAL_MS: SEC_REFRESH_INTERVAL_MS,
   normalizeBlackRockFilings, institutionalWatchStatus } = require('./sec-institutional-watch');
 
@@ -614,6 +615,8 @@ const PAPER_SNAPSHOT_MINUTES = Math.max(1, Number(process.env.PAPER_SNAPSHOT_MIN
 const PAPER_SNAPSHOT_LIMIT = Math.max(100, Math.min(5000, Number(process.env.PAPER_SNAPSHOT_LIMIT || 2000)));
 const PAPER_LEDGER_LIMIT = Math.max(100, Math.min(5000, Number(process.env.PAPER_LEDGER_LIMIT || 1500)));
 const PAPER_BENCHMARK_ASSET = String(process.env.PAPER_BENCHMARK_ASSET || "SPY").toUpperCase();
+const PAPER_CURRENCY = "USD";
+const PAPER_BENCHMARK_CURRENCY = String(process.env.PAPER_BENCHMARK_CURRENCY || (PAPER_BENCHMARK_ASSET === "SPY" ? "USD" : "")).trim().toUpperCase() || null;
 const PAPER_PERFORMANCE_MODE = String(process.env.PAPER_PERFORMANCE_MODE || "advisory").toLowerCase();
 
 
@@ -2296,11 +2299,17 @@ function compactAuditForPersistence(entry) {
 
 function compactPaperPortfolioForPersistence(paper) {
   if (!paper || typeof paper !== "object") return null;
+  const cashFlows = Array.isArray(paper.cashFlows) ? paper.cashFlows : [];
+  const snapshots = Array.isArray(paper.snapshots) ? paper.snapshots : [];
   return {
     ...paper,
     orders: (paper.orders || []).slice(0, 250),
     closedTrades: (paper.closedTrades || []).slice(0, 250),
-    snapshots: (paper.snapshots || []).slice(-UPSTASH_PERSISTED_PAPER_SNAPSHOTS)
+    decisions: (paper.decisions || []).slice(0, 250),
+    cashFlows: cashFlows.slice(0, 250),
+    cashFlowHistoryComplete: paper.cashFlowHistoryComplete === true && cashFlows.length <= 250,
+    snapshots: snapshots.slice(-UPSTASH_PERSISTED_PAPER_SNAPSHOTS),
+    snapshotHistoryComplete: paper.snapshotHistoryComplete !== false && snapshots.length <= UPSTASH_PERSISTED_PAPER_SNAPSHOTS
   };
 }
 
@@ -2627,6 +2636,7 @@ function fitPersistentStateToBudget(
     if (working.paperPortfolio?.snapshots?.length > 40) {
       const nextLength = Math.max(40, Math.ceil(working.paperPortfolio.snapshots.length / 2));
       working.paperPortfolio.snapshots = working.paperPortfolio.snapshots.slice(-nextLength);
+      working.paperPortfolio.snapshotHistoryComplete = false;
       reductions.push(`paperPortfolio.snapshots:${nextLength}`);
       changed = true;
     }
@@ -2640,6 +2650,19 @@ function fitPersistentStateToBudget(
       const nextLength = Math.max(80, Math.ceil(working.paperPortfolio.closedTrades.length / 2));
       working.paperPortfolio.closedTrades = working.paperPortfolio.closedTrades.slice(0, nextLength);
       reductions.push(`paperPortfolio.closedTrades:${nextLength}`);
+      changed = true;
+    }
+    if (working.paperPortfolio?.decisions?.length > 80) {
+      const nextLength = Math.max(80, Math.ceil(working.paperPortfolio.decisions.length / 2));
+      working.paperPortfolio.decisions = working.paperPortfolio.decisions.slice(0, nextLength);
+      reductions.push(`paperPortfolio.decisions:${nextLength}`);
+      changed = true;
+    }
+    if (working.paperPortfolio?.cashFlows?.length > 80) {
+      const nextLength = Math.max(80, Math.ceil(working.paperPortfolio.cashFlows.length / 2));
+      working.paperPortfolio.cashFlows = working.paperPortfolio.cashFlows.slice(0, nextLength);
+      working.paperPortfolio.cashFlowHistoryComplete = false;
+      reductions.push(`paperPortfolio.cashFlows:${nextLength}`);
       changed = true;
     }
 
@@ -2687,7 +2710,11 @@ function fitPersistentStateToBudget(
         ...working.paperPortfolio,
         orders: (working.paperPortfolio.orders || []).slice(0, 50),
         closedTrades: (working.paperPortfolio.closedTrades || []).slice(0, 50),
-        snapshots: (working.paperPortfolio.snapshots || []).slice(-50)
+        decisions: (working.paperPortfolio.decisions || []).slice(0, 50),
+        cashFlows: (working.paperPortfolio.cashFlows || []).slice(0, 50),
+        cashFlowHistoryComplete: false,
+        snapshots: (working.paperPortfolio.snapshots || []).slice(-50),
+        snapshotHistoryComplete: false
       } : null,
       systemHealth: working.systemHealth || {},
       providerHealth: working.providerHealth || {},
@@ -8498,9 +8525,40 @@ function ensurePaperPortfolio(realSummary, marketSummary) {
     runtimeState.paperPortfolio.snapshots = runtimeState.paperPortfolio.snapshots || [];
     runtimeState.paperPortfolio.closedTrades = runtimeState.paperPortfolio.closedTrades || [];
     runtimeState.paperPortfolio.orders = runtimeState.paperPortfolio.orders || [];
+    runtimeState.paperPortfolio.cashFlows = runtimeState.paperPortfolio.cashFlows || [];
+    runtimeState.paperPortfolio.decisions = runtimeState.paperPortfolio.decisions || [];
+    if (runtimeState.paperPortfolio.cashFlowHistoryComplete === undefined) {
+      runtimeState.paperPortfolio.cashFlowHistoryComplete = false;
+    }
+    if (runtimeState.paperPortfolio.snapshotHistoryComplete === undefined) {
+      runtimeState.paperPortfolio.snapshotHistoryComplete = false;
+    }
+    if (!runtimeState.paperPortfolio.performanceBaseline) {
+      const firstSnapshot = runtimeState.paperPortfolio.snapshots[0] || null;
+      runtimeState.paperPortfolio.performanceBaseline = firstSnapshot ? { ...firstSnapshot } : {
+        time: runtimeState.paperPortfolio.createdAt || null,
+        equity: Number(runtimeState.paperPortfolio.startingEquity) || null,
+        valuationComplete: false,
+        priceCoverage: { status: "LEGACY_BASELINE_UNVERIFIED" },
+        source: "legacy-paper-baseline"
+      };
+      runtimeState.paperPortfolio.snapshotHistoryComplete = false;
+    }
+    if (!runtimeState.paperPortfolio.seedCoverage) {
+      runtimeState.paperPortfolio.seedCoverage = {
+        source: "LEGACY_SEED_COVERAGE_UNKNOWN", omittedAssets: [], complete: false,
+        capturedAt: runtimeState.paperPortfolio.createdAt || null
+      };
+    }
+    runtimeState.paperPortfolio.currency = runtimeState.paperPortfolio.currency || PAPER_CURRENCY;
+    runtimeState.paperPortfolio.assumptions = runtimeState.paperPortfolio.assumptions || {
+      feePct: PAPER_FEE_PCT, slippageBpsPerSide: PAPER_SLIPPAGE_BPS,
+      feeBasis: "CONFIGURED_SIMULATION_ASSUMPTION", slippageBasis: "CONFIGURED_SIMULATION_ASSUMPTION"
+    };
     return runtimeState.paperPortfolio;
   }
   const positions = {};
+  const seedOmittedAssets = [];
   let cash = PAPER_STARTING_CASH_USD;
   if (PAPER_SEED_FROM_REAL && realSummary) {
     const realCash = Number(realSummary.availableCash);
@@ -8509,7 +8567,10 @@ function ensurePaperPortfolio(realSummary, marketSummary) {
       const rate = marketSummary?.ratesByAsset?.[position.asset];
       const price = Number(rate?.mid);
       const value = Number(position.estimatedValue ?? position.totalAmount);
-      if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(value) || value <= 0) continue;
+      if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(value) || value <= 0) {
+        seedOmittedAssets.push(String(position.asset || "UNKNOWN").toUpperCase());
+        continue;
+      }
       positions[position.asset] = {
         asset: position.asset,
         units: value / price,
@@ -8537,13 +8598,35 @@ function ensurePaperPortfolio(realSummary, marketSummary) {
     orders: [],
     closedTrades: [],
     snapshots: [],
+    performanceBaseline: null,
+    cashFlows: [],
+    cashFlowHistoryComplete: true,
+    snapshotHistoryComplete: true,
+    decisions: [],
+    currency: PAPER_CURRENCY,
+    seedCoverage: {
+      source: PAPER_SEED_FROM_REAL ? "READ_ONLY_ETORO_PORTFOLIO_SNAPSHOT" : "CONFIGURED_STARTING_CASH",
+      omittedAssets: [...new Set(seedOmittedAssets)].sort(),
+      complete: seedOmittedAssets.length === 0,
+      capturedAt: nowIso()
+    },
+    assumptions: {
+      feePct: PAPER_FEE_PCT, slippageBpsPerSide: PAPER_SLIPPAGE_BPS,
+      feeBasis: "CONFIGURED_SIMULATION_ASSUMPTION", slippageBasis: "CONFIGURED_SIMULATION_ASSUMPTION"
+    },
     startingEquity: cash + positionValue,
     benchmark: Number.isFinite(benchmarkPrice) && benchmarkPrice > 0 ? {
       asset: PAPER_BENCHMARK_ASSET,
       startPrice: benchmarkPrice,
       currentPrice: benchmarkPrice,
-      startTime: nowIso()
-    } : { asset: PAPER_BENCHMARK_ASSET, startPrice: null, currentPrice: null, startTime: null }
+      startTime: nowIso(),
+      currency: PAPER_BENCHMARK_CURRENCY,
+      currencySource: process.env.PAPER_BENCHMARK_CURRENCY ? "ENV_CONFIGURATION" : "DEFAULT_FOR_SPY",
+      startPriceStatus: marketSummary?.ratesByAsset?.[PAPER_BENCHMARK_ASSET]?.priceStatus || "UNKNOWN",
+      source: marketSummary?.ratesByAsset?.[PAPER_BENCHMARK_ASSET]?.source || "UNKNOWN",
+      priceStatus: marketSummary?.ratesByAsset?.[PAPER_BENCHMARK_ASSET]?.priceStatus || "UNKNOWN",
+      priceTime: marketSummary?.ratesByAsset?.[PAPER_BENCHMARK_ASSET]?.date || null
+    } : { asset: PAPER_BENCHMARK_ASSET, startPrice: null, currentPrice: null, startTime: null, currency: PAPER_BENCHMARK_CURRENCY, currencySource: process.env.PAPER_BENCHMARK_CURRENCY ? "ENV_CONFIGURATION" : "DEFAULT_FOR_SPY", startPriceStatus: "UNAVAILABLE", source: null, priceStatus: "UNAVAILABLE", priceTime: null }
   };
   addAudit("PAPER_PORTFOLIO_CREATED", { seedFromReal: PAPER_SEED_FROM_REAL, cash, positionCount: Object.keys(positions).length });
   recordPaperSnapshot(marketSummary, "paper-created", true);
@@ -8563,16 +8646,56 @@ function recordPaperSnapshot(marketSummary, source = "paper-mark", force = false
   const positionValue = Object.values(paper.positions || {}).reduce((sum, position) => sum + Number(position.currentValue || 0), 0);
   const unrealizedPnl = Object.values(paper.positions || {}).reduce((sum, position) => sum + Number(position.unrealizedPnl || 0), 0);
   const equity = Number(paper.cash || 0) + positionValue;
-  const benchmarkRate = Number(marketSummary?.ratesByAsset?.[PAPER_BENCHMARK_ASSET]?.mid);
+  const benchmarkQuote = marketSummary?.ratesByAsset?.[PAPER_BENCHMARK_ASSET] || null;
+  const benchmarkRate = Number(benchmarkQuote?.mid);
+  const missingAssets = [];
+  const staleAssets = [];
+  const marketClosedAssets = [];
+  for (const [asset, position] of Object.entries(paper.positions || {})) {
+    const quote = marketSummary?.ratesByAsset?.[asset] || null;
+    const knownPrice = Number(quote?.mid ?? position.currentPrice);
+    if (!Number.isFinite(knownPrice) || knownPrice <= 0) missingAssets.push(asset);
+    if (quote?.priceStatus === "MARKET_CLOSED" && Number.isFinite(Number(quote.ageMinutes)) && Number(quote.ageMinutes) >= 0) {
+      marketClosedAssets.push(asset);
+    } else if (!quote || quote.priceStatus !== "FRESH" || !Number.isFinite(Number(quote.ageMinutes)) || Number(quote.ageMinutes) > MAX_RATE_AGE_MINUTES) {
+      staleAssets.push(asset);
+    }
+  }
+  const priceCoverage = {
+    heldAssets: Object.keys(paper.positions || {}).length,
+    missingAssets: [...new Set(missingAssets)].sort(),
+    staleAssets: [...new Set(staleAssets)].sort(),
+    marketClosedAssets: [...new Set(marketClosedAssets)].sort(),
+    omittedSeedAssets: paper.seedCoverage?.omittedAssets || [],
+    marketDataSource: marketSummary?.provider || benchmarkQuote?.source || "UNKNOWN",
+    marketDataFetchedAt: marketSummary?.fetchedAt || null,
+    valuationComplete: missingAssets.length === 0 && staleAssets.length === 0 && paper.seedCoverage?.complete !== false
+  };
   paper.benchmark = paper.benchmark || { asset: PAPER_BENCHMARK_ASSET, startPrice: null, currentPrice: null, startTime: null };
+  if (!paper.benchmark.currency) {
+    paper.benchmark.currency = PAPER_BENCHMARK_CURRENCY;
+    paper.benchmark.currencySource = process.env.PAPER_BENCHMARK_CURRENCY ? "ENV_CONFIGURATION" : "DEFAULT_FOR_SPY";
+    if (Number.isFinite(Number(paper.benchmark.startPrice))) paper.benchmark.startPriceStatus = paper.benchmark.startPriceStatus || "UNKNOWN";
+  }
   if (Number.isFinite(benchmarkRate) && benchmarkRate > 0) {
     if (!Number.isFinite(Number(paper.benchmark.startPrice))) {
       paper.benchmark.startPrice = benchmarkRate;
       paper.benchmark.startTime = nowIso();
+      paper.benchmark.currency = PAPER_BENCHMARK_CURRENCY;
+      paper.benchmark.currencySource = process.env.PAPER_BENCHMARK_CURRENCY ? "ENV_CONFIGURATION" : "DEFAULT_FOR_SPY";
+      paper.benchmark.startPriceStatus = benchmarkQuote?.priceStatus || "UNKNOWN";
+      paper.benchmark.source = benchmarkQuote?.source || "UNKNOWN";
     }
     paper.benchmark.currentPrice = benchmarkRate;
+    paper.benchmark.priceStatus = benchmarkQuote?.priceStatus || "UNKNOWN";
+    paper.benchmark.priceTime = benchmarkQuote?.date || null;
   }
-  const benchmarkReturnPct = Number.isFinite(Number(paper.benchmark.startPrice)) && Number(paper.benchmark.startPrice) > 0 && Number.isFinite(Number(paper.benchmark.currentPrice))
+  const baselineTime = Date.parse(paper.performanceBaseline?.time || paper.createdAt || "");
+  const benchmarkStartTime = Date.parse(paper.benchmark.startTime || "");
+  const benchmarkWindowMatches = Number.isFinite(baselineTime) && Number.isFinite(benchmarkStartTime) && Math.abs(baselineTime - benchmarkStartTime) <= 60000;
+  const benchmarkReturnPct = paper.currency === PAPER_BENCHMARK_CURRENCY && benchmarkWindowMatches &&
+    paper.benchmark.startPriceStatus === "FRESH" && paper.benchmark.priceStatus === "FRESH" &&
+    Number.isFinite(Number(paper.benchmark.startPrice)) && Number(paper.benchmark.startPrice) > 0 && Number.isFinite(Number(paper.benchmark.currentPrice))
     ? (Number(paper.benchmark.currentPrice) / Number(paper.benchmark.startPrice) - 1) * 100
     : null;
   const snapshot = {
@@ -8580,9 +8703,16 @@ function recordPaperSnapshot(marketSummary, source = "paper-mark", force = false
     positionValue: roundNumber(positionValue, 6), unrealizedPnl: roundNumber(unrealizedPnl, 6),
     realizedPnl: roundNumber(paper.realizedPnl, 6), feesPaid: roundNumber(paper.feesPaid, 6),
     slippageCost: roundNumber(paper.slippageCost || 0, 6), positionsCount: Object.keys(paper.positions || {}).length,
-    benchmarkAsset: paper.benchmark.asset, benchmarkReturnPct: roundNumber(benchmarkReturnPct, 4)
+    benchmarkAsset: paper.benchmark.asset, benchmarkReturnPct: roundNumber(benchmarkReturnPct, 4),
+    benchmarkCurrency: paper.benchmark.currency || null,
+    benchmarkPriceStatus: paper.benchmark.priceStatus || "UNKNOWN",
+    benchmarkPriceTime: paper.benchmark.priceTime || null,
+    valuationComplete: priceCoverage.valuationComplete,
+    priceCoverage
   };
   paper.snapshots.push(snapshot);
+  if (!paper.performanceBaseline) paper.performanceBaseline = { ...snapshot, source: "paper-performance-baseline" };
+  if (paper.snapshots.length > PAPER_SNAPSHOT_LIMIT) paper.snapshotHistoryComplete = false;
   paper.snapshots = paper.snapshots.slice(-PAPER_SNAPSHOT_LIMIT);
   runtimeState.paperPerformanceHistory.push(snapshot);
   runtimeState.paperPerformanceHistory = runtimeState.paperPerformanceHistory.slice(-PAPER_SNAPSHOT_LIMIT);
@@ -8618,12 +8748,113 @@ function paperPortfolioResponse() {
   return { status: 200, ok: true, data: { clientPortfolio: { positions, ordersForOpen: [], ordersForClose: [], orders: [], credit: roundNumber(paper.cash, 4), paperMode: true } } };
 }
 
+function recordPaperDecision({ proposedDecision, control, marketEvidence, execution } = {}) {
+  const paper = runtimeState.paperPortfolio;
+  if (!PAPER_TRADING_ENABLED || !paper) return null;
+  paper.decisions = Array.isArray(paper.decisions) ? paper.decisions : [];
+  const rawProposal = proposedDecision && typeof proposedDecision === "object" ? proposedDecision : {};
+  const rawAction = String(rawProposal.decision || "HOLD").trim().toUpperCase();
+  const proposalActionMap = { BUY: "BUY", ACHAT: "BUY", ACHETER: "BUY", SELL: "SELL", VENTE: "SELL", VENDRE: "SELL", HOLD: "HOLD", CONSERVER: "HOLD", GARDER: "HOLD", ATTENDRE: "HOLD" };
+  const proposed = {
+    decision: proposalActionMap[rawAction] || "HOLD",
+    asset: String(rawProposal.asset || "NONE").trim().toUpperCase().slice(0, 32),
+    amount_usd: rawProposal.amount_usd !== null && rawProposal.amount_usd !== undefined && Number.isFinite(Number(rawProposal.amount_usd)) ? Number(rawProposal.amount_usd) : null,
+    confidence: normalizeConfidence(rawProposal.confidence),
+    reason: String(rawProposal.reason || "").slice(0, 500)
+  };
+  const finalDecision = sanitizeDecision(control?.finalDecision || {});
+  const proposalAction = String(proposed.decision || "HOLD").toUpperCase();
+  const wasVetoed = ["BUY", "SELL"].includes(proposalAction) &&
+    (!control?.approved || finalDecision.decision !== proposalAction || finalDecision.asset !== proposed.asset);
+  const status = wasVetoed ? "VETOED"
+    : ["BUY", "SELL"].includes(proposalAction) && control?.approved
+      ? (execution?.simulated ? "SIMULATED" : (execution?.skipped ? "EXECUTION_SKIPPED" : "EXECUTION_RESULT_UNKNOWN"))
+      : "NO_ACTION";
+  const row = {
+    id: randomUUID(), time: nowIso(), mode: "SHADOW", status,
+    proposed: { decision: proposed.decision, asset: proposed.asset, amountUsd: proposed.amount_usd, confidence: proposed.confidence, reason: proposed.reason || null },
+    final: { decision: finalDecision.decision, asset: finalDecision.asset, amountUsd: finalDecision.amount_usd, riskCheck: finalDecision.risk_check },
+    vetoReason: wasVetoed ? String(control?.reason || finalDecision.reason || "RISK_VETO").slice(0, 500) : null,
+    ruleCode: wasVetoed ? String(control?.code || finalDecision.hold_code || "RISK_VETO").slice(0, 80) : null,
+    marketEvidence: marketEvidence ? {
+      priceSource: marketEvidence.executionReference || marketEvidence.source || marketEvidence.provider || null,
+      price: marketEvidence.price !== null && marketEvidence.price !== undefined && Number.isFinite(Number(marketEvidence.price)) ? Number(marketEvidence.price) : null,
+      instrumentId: marketEvidence.instrumentId !== null && marketEvidence.instrumentId !== undefined && Number.isSafeInteger(Number(marketEvidence.instrumentId)) ? Number(marketEvidence.instrumentId) : null,
+      quoteTime: marketEvidence.sourceTimestamp || marketEvidence.quoteTime || marketEvidence.date || null,
+      fetchedAt: marketEvidence.fetchedAt || null,
+      status: marketEvidence.freshAtDecision === true ? "FRESH" : (marketEvidence.priceStatusAtFetch || marketEvidence.status || "UNKNOWN"),
+      ageMinutes: (marketEvidence.quoteAgeMinutes ?? marketEvidence.ageMinutes) !== null && (marketEvidence.quoteAgeMinutes ?? marketEvidence.ageMinutes) !== undefined && Number.isFinite(Number(marketEvidence.quoteAgeMinutes ?? marketEvidence.ageMinutes)) ? Number(marketEvidence.quoteAgeMinutes ?? marketEvidence.ageMinutes) : null,
+      consensusStatus: marketEvidence.consensusStatus || null
+    } : null,
+    execution: execution && !wasVetoed && (execution.simulated || execution.ok || execution.uncertain) ? {
+      simulated: Boolean(execution.simulated), ok: execution.ok ?? null,
+      skipped: Boolean(execution.skipped), reason: String(execution.reason || "").slice(0, 300) || null
+    } : null
+  };
+  paper.decisions.unshift(row);
+  paper.decisions = paper.decisions.slice(0, PAPER_LEDGER_LIMIT);
+  scheduleSave();
+  return row;
+}
+
+function recordPaperCashFlow({ type, amount, idempotencyKey } = {}) {
+  if (!PAPER_TRADING_ENABLED) return { ok: false, status: "SHADOW_MODE_REQUIRED", executionAttempted: false };
+  const paper = runtimeState.paperPortfolio;
+  if (!paper) return { ok: false, status: "PAPER_PORTFOLIO_NOT_INITIALIZED", executionAttempted: false };
+  const normalizedType = String(type || "").trim().toUpperCase();
+  const numericAmount = Number(amount);
+  const key = String(idempotencyKey || "").trim();
+  if (!["DEPOSIT", "WITHDRAWAL"].includes(normalizedType) || !Number.isFinite(numericAmount) || numericAmount <= 0) {
+    return { ok: false, status: "INVALID_CASH_FLOW", executionAttempted: false };
+  }
+  if (!/^[A-Za-z0-9._:-]{8,120}$/.test(key)) return { ok: false, status: "IDEMPOTENCY_KEY_REQUIRED", executionAttempted: false };
+  paper.cashFlows = Array.isArray(paper.cashFlows) ? paper.cashFlows : [];
+  const keyHash = createHash("sha256").update(key).digest("hex");
+  const duplicate = paper.cashFlows.find((flow) => flow.idempotencyKeyHash === keyHash);
+  if (duplicate) return { ok: true, duplicate: true, flow: duplicate, executionAttempted: false };
+  if (normalizedType === "WITHDRAWAL" && numericAmount > Number(paper.cash || 0)) {
+    return { ok: false, status: "INSUFFICIENT_PAPER_CASH", executionAttempted: false };
+  }
+  const latest = paper.snapshots?.[paper.snapshots.length - 1] || null;
+  const positionsValue = Object.values(paper.positions || {}).reduce((sum, position) => sum + Number(position.currentValue || 0), 0);
+  const equityBefore = Number(paper.cash || 0) + positionsValue;
+  const signedAmount = normalizedType === "DEPOSIT" ? numericAmount : -numericAmount;
+  const valuationComplete = latest?.valuationComplete === true;
+  const eventTime = Date.now();
+  const beforePoint = latest ? { ...latest, time: new Date(eventTime - 1).toISOString(), source: "paper-cash-flow-before", equity: roundNumber(equityBefore, 6) } : null;
+  paper.cash = Number(paper.cash || 0) + signedAmount;
+  const equityAfter = equityBefore + signedAmount;
+  const afterPoint = latest ? { ...latest, time: new Date(eventTime + 1).toISOString(), source: "paper-cash-flow-after", equity: roundNumber(equityAfter, 6), cash: roundNumber(paper.cash, 6) } : null;
+  const flow = {
+    id: randomUUID(), idempotencyKeyHash: keyHash,
+    time: new Date(eventTime).toISOString(), type: normalizedType,
+    amount: roundNumber(numericAmount, 6), signedAmount: roundNumber(signedAmount, 6),
+    currency: paper.currency || PAPER_CURRENCY,
+    equityBefore: roundNumber(equityBefore, 6), equityAfter: roundNumber(equityAfter, 6),
+    valuationComplete, valuationSource: "LATEST_PAPER_MARKS", source: "USER_RECORDED_SHADOW_ONLY"
+  };
+  paper.cashFlows.unshift(flow);
+  if (beforePoint && afterPoint) paper.snapshots.push(beforePoint, afterPoint);
+  if (paper.cashFlows.length > PAPER_LEDGER_LIMIT) {
+    paper.cashFlows = paper.cashFlows.slice(0, PAPER_LEDGER_LIMIT);
+    paper.cashFlowHistoryComplete = false;
+  }
+  if (paper.snapshots.length > PAPER_SNAPSHOT_LIMIT) {
+    paper.snapshots = paper.snapshots.slice(-PAPER_SNAPSHOT_LIMIT);
+    paper.snapshotHistoryComplete = false;
+  }
+  scheduleSave();
+  return { ok: true, duplicate: false, flow, executionAttempted: false };
+}
+
 function executePaperBuy(asset, amount, marketData) {
   const paper = runtimeState.paperPortfolio;
   const rate = getMarketRateForAsset(marketData, asset);
+  const marketCheck = isMarketRateTradable(marketData, asset);
   const expectedPrice = Number(rate?.ask ?? rate?.mid);
   const price = paperExecutionPrice(rate, "BUY");
-  if (!paper || !Number.isFinite(price) || price <= 0) return { ok: false, skipped: true, reason: "Prix papier invalide" };
+  if (!paper || !Number.isFinite(price) || price <= 0) return { ok: false, skipped: true, reason: "Prix papier invalide", executionAttempted: false };
+  if (!marketCheck.ok) return { ok: false, skipped: true, reason: `Simulation bloquée: ${marketCheck.reason}`, reasonCode: marketCheck.code, executionAttempted: false };
   if (paper.positions[asset]) return { ok: false, skipped: true, reason: `Position papier déjà ouverte sur ${asset}` };
   const notional = Math.max(0, Number(amount));
   const fee = notional * PAPER_FEE_PCT / 100;
@@ -8651,10 +8882,12 @@ function executePaperSell(asset, marketData) {
   const paper = runtimeState.paperPortfolio;
   const position = paper?.positions?.[asset];
   const rate = getMarketRateForAsset(marketData, asset);
+  const marketCheck = isMarketRateTradable(marketData, asset);
   const expectedPrice = Number(rate?.bid ?? rate?.mid);
   const price = paperExecutionPrice(rate, "SELL");
   if (!paper || !position) return { ok: false, skipped: true, reason: `Aucune position papier sur ${asset}` };
   if (!Number.isFinite(price) || price <= 0) return { ok: false, skipped: true, reason: "Prix papier invalide" };
+  if (!marketCheck.ok) return { ok: false, skipped: true, reason: `Simulation bloquée: ${marketCheck.reason}`, reasonCode: marketCheck.code, executionAttempted: false };
   const proceedsBeforeFee = position.units * price;
   const fee = proceedsBeforeFee * PAPER_FEE_PCT / 100;
   const proceeds = proceedsBeforeFee - fee;
@@ -8711,18 +8944,39 @@ function calculatePaperPerformance(paper = runtimeState.paperPortfolio) {
   const grossProfit = wins.reduce((sum, trade) => sum + Number(trade.pnl || 0), 0);
   const grossLoss = Math.abs(losses.reduce((sum, trade) => sum + Number(trade.pnl || 0), 0));
   const benchmarkReturnPct = snapshots.length ? snapshots[snapshots.length - 1].benchmarkReturnPct : null;
-  const blockBuy = Number(drawdown || 0) >= MAX_DRAWDOWN_PCT || (closed.length >= BACKTEST_MIN_TRADES_FOR_VALIDATION && Number(totalReturnPct) < -MAX_DAILY_LOSS_PCT);
-  const status = blockBuy ? "RISK_BLOCK" : closed.length >= BACKTEST_MIN_TRADES_FOR_VALIDATION ? "MEASURED" : "BUILDING_HISTORY";
+  const legacyMetrics = {
+    totalReturnPct: roundNumber(totalReturnPct, 4),
+    maxDrawdownPct: roundNumber(drawdown, 4),
+    annualizedVolatilityPct: roundNumber(Number(vol) * Math.sqrt(252) * 100, 4),
+    sharpe: roundNumber(sharpe, 4),
+    sortino: roundNumber(sortino, 4)
+  };
+  const shadowScorecard = buildPaperShadowScorecard(paper, legacyMetrics);
+  const adjustedRisk = shadowScorecard.risk || {};
+  const adjustedReturn = shadowScorecard.return?.flowAdjusted;
+  const adjustedReturnPct = adjustedReturn?.status === "APPROXIMATE" ? Number(adjustedReturn.returnPct) : null;
+  const adjustedDrawdownPct = adjustedRisk.maxDrawdownPct !== null && adjustedRisk.maxDrawdownPct !== undefined && Number.isFinite(Number(adjustedRisk.maxDrawdownPct))
+    ? Number(adjustedRisk.maxDrawdownPct) : null;
+  const blockBuy = (adjustedDrawdownPct !== null && adjustedDrawdownPct >= MAX_DRAWDOWN_PCT) ||
+    (adjustedReturnPct !== null && closed.length >= BACKTEST_MIN_TRADES_FOR_VALIDATION && adjustedReturnPct < -MAX_DAILY_LOSS_PCT) ||
+    (PAPER_PERFORMANCE_MODE === "required" && shadowScorecard.status === "INCOMPLETE_COVERAGE");
+  const status = blockBuy ? "RISK_BLOCK" : shadowScorecard.status === "MEASURED_VIRTUAL" ? "MEASURED_VIRTUAL" : "INCOMPLETE_COVERAGE";
   return {
     name: "PaperPerformanceAgent", generatedAt: nowIso(), initialized: true, status, blockBuy,
     snapshots: snapshots.length, closedTrades: closed.length, openPositions: Object.keys(paper.positions || {}).length,
     startingEquity: roundNumber(startEquity, 4), currentEquity: roundNumber(currentEquity, 4),
-    totalReturnPct: roundNumber(totalReturnPct, 4), benchmarkReturnPct: roundNumber(benchmarkReturnPct, 4),
-    excessReturnPct: Number.isFinite(Number(totalReturnPct)) && Number.isFinite(Number(benchmarkReturnPct)) ? roundNumber(totalReturnPct - benchmarkReturnPct, 4) : null,
-    maxDrawdownPct: roundNumber(drawdown, 4), annualizedVolatilityPct: roundNumber(Number(vol) * Math.sqrt(252) * 100, 4),
-    sharpe: roundNumber(sharpe, 4), sortino: roundNumber(sortino, 4), winRatePct: closed.length ? roundNumber(wins.length / closed.length * 100, 2) : null,
+    totalReturnPct: adjustedReturnPct,
+    rawUnadjustedTotalReturnPct: roundNumber(totalReturnPct, 4),
+    benchmarkReturnPct: shadowScorecard.return?.benchmark?.returnPct ?? null,
+    excessReturnPct: adjustedReturnPct !== null && Number.isFinite(Number(shadowScorecard.return?.benchmark?.returnPct)) ? roundNumber(adjustedReturnPct - Number(shadowScorecard.return.benchmark.returnPct), 4) : null,
+    maxDrawdownPct: adjustedRisk.maxDrawdownPct,
+    annualizedVolatilityPct: adjustedRisk.annualizedVolatilityPct,
+    sharpe: null, sortino: null,
+    legacyUnadjustedMetrics: legacyMetrics,
+    winRatePct: closed.length ? roundNumber(wins.length / closed.length * 100, 2) : null,
     profitFactor: grossLoss > 0 ? roundNumber(grossProfit / grossLoss, 4) : (grossProfit > 0 ? null : 0),
-    realizedPnl: roundNumber(paper.realizedPnl, 4), feesPaid: roundNumber(paper.feesPaid, 4), slippageCost: roundNumber(paper.slippageCost || 0, 4)
+    realizedPnl: roundNumber(paper.realizedPnl, 4), feesPaid: roundNumber(paper.feesPaid, 4), slippageCost: roundNumber(paper.slippageCost || 0, 4),
+    shadowScorecard
   };
 }
 
@@ -13265,6 +13519,13 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
     return hold(`ExecutionVerifier bloque tout nouvel ordre: ${unresolvedLiveIntents.length} intent(s) LIVE à réconcilier`);
   }
   if (d.risk_check !== "passed") return hold("Risk check IA non validé");
+  if (PAPER_TRADING_ENABLED && d.decision === "BUY" && runtimeState.paperPortfolio?.seedCoverage?.complete === false) {
+    return hold("Portefeuille SHADOW incomplet au démarrage; initialiser ou vérifier le portefeuille virtuel avant de simuler un achat", "failed", "SHADOW_SEED_INCOMPLETE");
+  }
+  if (PAPER_TRADING_ENABLED && d.decision === "BUY" && runtimeState.paperPortfolio?.snapshots?.length &&
+      runtimeState.paperPortfolio.snapshots[runtimeState.paperPortfolio.snapshots.length - 1]?.valuationComplete === false) {
+    return hold("Valorisation SHADOW incomplète ou périmée; achat virtuel bloqué jusqu'à une couverture de prix suffisante", "failed", "SHADOW_VALUATION_INCOMPLETE");
+  }
   if (!WATCHLIST[d.asset]) return hold("Actif absent du registre d'instruments");
   if ((LIVE_TRADING_ENABLED || DEMO_TRADING_ENABLED) &&
       (!TRADE_ALLOWED_ASSETS.has(d.asset) || !TRADE_ALLOWED_CATEGORIES.has(classifyAsset(d.asset, ASSET_RULES[d.asset])))) {
@@ -14529,6 +14790,10 @@ async function scanMarket(source = "manual-scan") {
       execution = await observeDecision(() => executeBuy(control.finalDecision.asset, control.finalDecision.amount_usd, context.marketData));
     } else if (control.approved && control.finalDecision.decision === "SELL") {
       execution = await observeDecision(() => executeSell(control.finalDecision.asset, context.marketData));
+    }
+
+    if (PAPER_TRADING_ENABLED) {
+      recordPaperDecision({ proposedDecision: decisionRaw, control, marketEvidence, execution });
     }
 
     if (PAPER_TRADING_ENABLED) {
@@ -18883,12 +19148,33 @@ app.get("/backtest-history", requireSecret, (req, res) => {
 });
 
 app.get("/paper-performance", requireSecret, (req, res) => {
-  res.json({ version: VERSION, tradingMode: TRADING_MODE, paperPerformanceAgent: calculatePaperPerformance(), portfolio: runtimeState.paperPortfolio, memory: memoryStatus() });
+  const paperPerformanceAgent = calculatePaperPerformance();
+  res.json({ version: VERSION, tradingMode: TRADING_MODE_LABEL, paperPerformanceAgent,
+    shadowScorecard: paperPerformanceAgent.shadowScorecard || null,
+    portfolio: runtimeState.paperPortfolio, executionAttempted: false, memory: memoryStatus() });
 });
 
 app.get("/paper-ledger", requireSecret, (req, res) => {
   const limit = Math.max(1, Math.min(PAPER_LEDGER_LIMIT, Number(req.query.limit || 100)));
-  res.json({ version: VERSION, orders: (runtimeState.paperPortfolio?.orders || []).slice(0, limit), closedTrades: (runtimeState.paperPortfolio?.closedTrades || []).slice(0, limit), snapshots: (runtimeState.paperPortfolio?.snapshots || []).slice(-limit) });
+  res.json({ version: VERSION, mode: TRADING_MODE_LABEL,
+    orders: (runtimeState.paperPortfolio?.orders || []).slice(0, limit),
+    closedTrades: (runtimeState.paperPortfolio?.closedTrades || []).slice(0, limit),
+    snapshots: (runtimeState.paperPortfolio?.snapshots || []).slice(-limit),
+    cashFlows: (runtimeState.paperPortfolio?.cashFlows || []).slice(0, limit),
+    decisions: (runtimeState.paperPortfolio?.decisions || []).slice(0, limit),
+    executionAttempted: false });
+});
+
+app.post("/paper-cash-flow", requireSecret, (req, res) => {
+  const result = recordPaperCashFlow({
+    type: req.body?.type,
+    amount: req.body?.amount,
+    idempotencyKey: req.get("Idempotency-Key") || req.body?.idempotencyKey
+  });
+  if (!result.ok) return res.status(result.status === "SHADOW_MODE_REQUIRED" ? 409 : 400).json({
+    version: VERSION, ...result, executionAttempted: false
+  });
+  return res.json({ version: VERSION, ...result, shadowOnly: true });
 });
 
 app.get("/paper-reset", requireSecret, (req, res) => {
@@ -19631,13 +19917,15 @@ app.get("/paper-status", requireSecret, async (req, res) => {
     res.json({
       version: VERSION,
       active: PAPER_TRADING_ENABLED,
-      tradingMode: TRADING_MODE,
+      tradingMode: TRADING_MODE_LABEL,
       paperPortfolio: runtimeState.paperPortfolio,
       summary,
+      shadowScorecard: calculatePaperPerformance().shadowScorecard || null,
+      executionAttempted: false,
       riskBudgetAgent: context?.foundationAgents?.riskBudgetAgent || buildRiskBudgetState(summary),
       note: PAPER_TRADING_ENABLED
-        ? "Les ordres sont simulés et persistés. Aucun ordre réel eToro n'est envoyé."
-        : "Passe TRADING_MODE=PAPER dans Render puis redéploie pour activer la simulation."
+        ? "Mode SHADOW : décisions et ordres virtuels persistés. Aucun ordre d'achat, de vente ou de copie n'est envoyé à eToro."
+        : "Passe TRADING_MODE=SHADOW dans l'environnement puis redéploie pour activer le portefeuille virtuel."
     });
   } catch (error) {
     if (PAPER_TRADING_ENABLED && runtimeState.paperPortfolio) {
@@ -19646,7 +19934,7 @@ app.get("/paper-status", requireSecret, async (req, res) => {
       return res.json({
         version: VERSION,
         active: true,
-        tradingMode: TRADING_MODE,
+        tradingMode: TRADING_MODE_LABEL,
         degraded: true,
         warning: `Données eToro indisponibles : ${error.message}`,
         paperPortfolio: runtimeState.paperPortfolio,
@@ -20246,6 +20534,9 @@ module.exports = {
   riskController,
   executePaperBuy,
   executePaperSell,
+  executeBuy,
+  recordPaperDecision,
+  recordPaperCashFlow,
   ensurePaperPortfolio,
   markPaperPortfolio,
   paperPortfolioResponse,
