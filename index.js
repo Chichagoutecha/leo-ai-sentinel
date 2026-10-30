@@ -19345,12 +19345,20 @@ app.get("/portfolio-universe-status", requireSecret, async (_req, res) => {
       validation, universe, tradeAllowlist: [...TRADE_ALLOWED_ASSETS]
     });
     const summary = extractPortfolioSummary(portfolio);
-    const exposure = analyzeLookThroughExposure({ positions: summary.openPositions, compositions: [] });
+    const exposure = analyzeLookThroughExposure({
+      positions: summary.openPositions.map(position => ({
+        ...position,
+        category: Object.prototype.hasOwnProperty.call(WATCHLIST, position.asset)
+          ? classifyAsset(position.asset, ASSET_RULES[position.asset]) : "UNCLASSIFIED"
+      })),
+      compositions: [], valuationCurrency: "USD", cash: summary.availableCash
+    });
     const candidateOverlap = universe.map((item) => ({
       symbol: item.symbol,
-      directValue: exposure.direct[item.symbol] || 0,
-      indirectValue: exposure.indirect[item.symbol] || 0,
-      overlapDetected: Boolean((exposure.direct[item.symbol] || 0) + (exposure.indirect[item.symbol] || 0) > 0),
+      directValue: exposure.direct[item.symbol] ?? null,
+      indirectValue: exposure.indirect?.[item.symbol] ?? null,
+      overlapDetected: exposure.overlaps.some(overlap => overlap.instrument === item.symbol)
+        ? true : exposure.coverage === "COMPLETE" ? false : null,
       indirectCoverage: exposure.coverage
     }));
     res.json({
@@ -19367,9 +19375,14 @@ app.get("/portfolio-universe-status", requireSecret, async (_req, res) => {
       combinedExposure: exposure.combined,
       candidateOverlap,
       lookThrough: {
-        status: "INCOMPLETE",
-        unavailable: "No verified official eToro endpoint for Smart Portfolio and ETF constituent snapshots is configured.",
-        knownOfficialCompositions: exposure.knownOfficialCompositions
+        ...exposure,
+        status: exposure.coverage,
+        sources: {
+          positions: { source: "EXISTING_ETORO_REAL_PORTFOLIO", fetchedAt: portfolio.fetchedAt,
+            valuation: "INVESTED_AMOUNT_PLUS_REPORTED_PROFIT", currencyBasis: "EXISTING_USD_ACCOUNTING_CONVENTION" },
+          compositions: { status: "UNAVAILABLE", reason: "NO_DOCUMENTED_ACCESSIBLE_CONSTITUENT_SOURCE_CONFIGURED" },
+          taxonomy: { status: "UNAVAILABLE", reason: "NO_VERIFIED_SECTOR_ISSUER_GEOGRAPHY_OR_CURRENCY_METADATA" }
+        }
       },
       smartPortfolioTrading: {
         status: "NOT_TRADEABLE_VIA_CURRENT_API",
