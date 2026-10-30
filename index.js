@@ -136,6 +136,7 @@ const { randomUUID, createHash, timingSafeEqual } = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { marketSourceAudit, decisionMarketEvidence } = require('./market-source-audit');
+const { resolveTradingMode, liveBuyReady, demoBuyReady, liveBuyMaxOrderUsd, classifyAsset, buildUniverse, resolveTradeAllowlist, resolveAllowedCategories, parseExclusionReasons, analyzeLookThroughExposure, evaluateBuyPolicy } = require('./trade-universe-policy');
 const { ENDPOINT: SEC_BLACKROCK_ENDPOINT, REFRESH_INTERVAL_MS: SEC_REFRESH_INTERVAL_MS,
   normalizeBlackRockFilings, institutionalWatchStatus } = require('./sec-institutional-watch');
 
@@ -174,14 +175,15 @@ const AUTO_TRADE = process.env.AUTO_TRADE === "true";
 const ALLOW_LEGACY_AUTO_TRADE = process.env.ALLOW_LEGACY_AUTO_TRADE === "true";
 const BOT_SECRET = process.env.BOT_SECRET || "";
 
-const MODE_FROM_ENV = String(process.env.TRADING_MODE || "").trim().toUpperCase();
-const TRADING_MODE = ["OBSERVE", "PAPER", "LIVE"].includes(MODE_FROM_ENV)
-  ? MODE_FROM_ENV
-  : (process.env.PAPER_TRADING === "true"
-      ? "PAPER"
-      : (AUTO_TRADE && ALLOW_LEGACY_AUTO_TRADE ? "LIVE" : "OBSERVE"));
+const MODE_RESOLUTION = resolveTradingMode(process.env);
+const TRADING_MODE = MODE_RESOLUTION.internalMode;
+const TRADING_MODE_LABEL = MODE_RESOLUTION.mode;
 const LIVE_TRADING_ENABLED = TRADING_MODE === "LIVE";
 const PAPER_TRADING_ENABLED = TRADING_MODE === "PAPER";
+const DEMO_TRADING_ENABLED = TRADING_MODE === "DEMO";
+const LIVE_BUY_CONFIRMATION_CONFIGURED = process.env.LIVE_BUY_CONFIRMATION === "I_UNDERSTAND_LIVE_BUY_ORDERS";
+const DEMO_EXECUTION_ARMED = process.env.DEMO_EXECUTION_ARMED === "true";
+const LIVE_BUY_MAX_ORDER_USD = liveBuyMaxOrderUsd(process.env.LIVE_BUY_MAX_ORDER_USD);
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 
 // v10.10.1 — L'environnement du portefeuille est explicite.
@@ -191,7 +193,7 @@ const ETORO_ENV_FROM_ENV = String(process.env.ETORO_ACCOUNT_ENV || "REAL")
   .toUpperCase();
 const ETORO_ACCOUNT_ENV = LIVE_TRADING_ENABLED
   ? "REAL"
-  : (["REAL", "DEMO"].includes(ETORO_ENV_FROM_ENV) ? ETORO_ENV_FROM_ENV : "REAL");
+  : (DEMO_TRADING_ENABLED ? "DEMO" : (["REAL", "DEMO"].includes(ETORO_ENV_FROM_ENV) ? ETORO_ENV_FROM_ENV : "REAL"));
 const LIVE_EXECUTION_ARMED = process.env.LIVE_EXECUTION_ARMED === "true";
 const LIVE_PORTFOLIO_PREFLIGHT_ENABLED =
   process.env.LIVE_PORTFOLIO_PREFLIGHT_ENABLED !== "false";
@@ -207,6 +209,7 @@ const ETORO_PORTFOLIO_CONTEXT = ["AUTO", "AGENT", "ACCOUNT"].includes(
 const ETORO_EXPECTED_PORTFOLIO_ID = String(
   process.env.ETORO_EXPECTED_PORTFOLIO_ID || ""
 ).trim();
+const ETORO_EXPECTED_DEMO_PORTFOLIO_ID = String(process.env.ETORO_EXPECTED_DEMO_PORTFOLIO_ID || "").trim();
 const ETORO_EXPECTED_AGENT_PORTFOLIO_ID = String(
   process.env.ETORO_EXPECTED_AGENT_PORTFOLIO_ID || ETORO_EXPECTED_PORTFOLIO_ID || ""
 ).trim();
@@ -1422,6 +1425,7 @@ const WATCHLIST = {
   PANW: 9422,
   CRWD: 9419
 };
+const TRADE_ALLOWED_ASSETS = new Set(resolveTradeAllowlist(WATCHLIST, process.env));\nconst TRADE_ALLOWED_CATEGORIES = new Set(resolveAllowedCategories(process.env));\nconst TRADE_EXCLUSION_REASONS = parseExclusionReasons(process.env);
 
 const CRYPTO_ASSETS = new Set(["BTC", "ETH", "SOL"]);
 const MARKET_TIME_ZONE = "America/New_York";
@@ -4030,7 +4034,7 @@ function getEtoroPortfolioEndpoint(environment = ETORO_ACCOUNT_ENV) {
   return `https://public-api.etoro.com/api/v1/trading/info/${normalized.toLowerCase()}/pnl`;
 }
 
-function validatePortfolioResponse(portfolioResponse, { requireReal = false } = {}) {
+function validatePortfolioResponse(portfolioResponse, { requireReal = false, requireDemo = false } = {}) {
   const errors = [];
   const environment = String(portfolioResponse?.accountEnvironment || "UNKNOWN").toUpperCase();
   const clientPortfolio = portfolioResponse?.data?.clientPortfolio;
@@ -4042,6 +4046,7 @@ function validatePortfolioResponse(portfolioResponse, { requireReal = false } = 
   if (!portfolioResponse?.ok) errors.push(`HTTP_${portfolioResponse?.status ?? "UNKNOWN"}`);
   if (!clientPortfolio || typeof clientPortfolio !== "object") errors.push("CLIENT_PORTFOLIO_MISSING");
   if (requireReal && environment !== "REAL") errors.push(`EXPECTED_REAL_GOT_${environment}`);
+  if (requireDemo && environment !== "DEMO") errors.push(`EXPECTED_DEMO_GOT_${environment}`);
   if (requireReal && clientPortfolio?.paperMode) errors.push("PAPER_PORTFOLIO_NOT_ALLOWED_IN_LIVE");
   if (ageSeconds === null || !Number.isFinite(ageSeconds)) errors.push("PORTFOLIO_TIMESTAMP_MISSING");
   if (Number.isFinite(ageSeconds) && ageSeconds > LIVE_PORTFOLIO_MAX_AGE_SECONDS) errors.push("PORTFOLIO_SNAPSHOT_TOO_OLD");
@@ -4293,8 +4298,11 @@ async function verifyRealPortfolioBeforeExecution({ asset, side, amount = 0 } = 
     return {
       ok: false,
       reason: "LIVE_EXECUTION_ARMED n'est pas égal à true",
-      action: "Garder le bot en OBSERVE/PAPER tant que les contrôles ne sont pas validés."
+      action: "Garder le bot en OFF/SHADOW tant que les contrôles ne sont pas validés."
     };
+  }
+  if (String(side || "").toUpperCase() === "BUY" && !liveBuyReady(process.env)) {
+    return { ok: false, reason: "LIVE_BUY_CONFIRMATION_REQUIRED", action: "Activer séparément LIVE_BUY_CONFIRMATION après validation." };
   }
 
   const portfolio = await getPortfolio({ environment: "REAL" });
@@ -5912,8 +5920,10 @@ async function verifyPortfolioAfterExecution({
   apiAccepted = true,
   trigger = "post-order"
 } = {}) {
-  if (!LIVE_TRADING_ENABLED) {
-    return { checked: false, status: EXECUTION_STATUS.UNCERTAIN, reason: "Hors LIVE" };
+  const verificationMode = LIVE_TRADING_ENABLED ? "LIVE" : (DEMO_TRADING_ENABLED ? "DEMO" : null);
+  const verificationEnvironment = verificationMode === "LIVE" ? "REAL" : "DEMO";
+  if (!verificationMode) {
+    return { checked: false, status: EXECUTION_STATUS.UNCERTAIN, reason: "Hors LIVE/DEMO" };
   }
   if (!EXECUTION_VERIFIER_ENABLED) {
     return {
@@ -5930,8 +5940,8 @@ async function verifyPortfolioAfterExecution({
     const waitMs = attempt === 1 ? LIVE_POST_TRADE_VERIFY_DELAY_MS : EXECUTION_VERIFY_RETRY_DELAY_MS;
     if (waitMs > 0) await sleep(waitMs);
     try {
-      const portfolio = await getPortfolio({ environment: "REAL" });
-      const validation = validatePortfolioResponse(portfolio, { requireReal: true });
+      const portfolio = await getPortfolio({ environment: verificationEnvironment });
+      const validation = validatePortfolioResponse(portfolio, { requireReal: verificationEnvironment === "REAL", requireDemo: verificationEnvironment === "DEMO" });
       if (!validation.ok) {
         invalidPortfolioCount += 1;
         checks.push({ attempt, time: nowIso(), validation, error: "PORTFOLIO_VALIDATION_FAILED" });
@@ -6031,15 +6041,17 @@ async function verifyPortfolioAfterExecution({
 async function reconcileExecutionIntents({ trigger = "manual", limit = EXECUTION_RECONCILE_MAX_PER_RUN } = {}) {
   pruneOrderIntents();
   const startedAt = Date.now();
+  const reconciliationMode = LIVE_TRADING_ENABLED ? "LIVE" : (DEMO_TRADING_ENABLED ? "DEMO" : null);
+  const reconciliationEnvironment = reconciliationMode === "LIVE" ? "REAL" : "DEMO";
   const candidates = Object.values(runtimeState.orderIntents || {})
     .map(migrateOrderIntent)
-    .filter((intent) => intent.mode === "LIVE" && isActiveExecutionStatus(intent.status))
+    .filter((intent) => reconciliationMode && intent.mode === reconciliationMode && isActiveExecutionStatus(intent.status))
     .slice(0, Math.max(1, Number(limit || EXECUTION_RECONCILE_MAX_PER_RUN)));
 
-  if (!LIVE_TRADING_ENABLED || !EXECUTION_VERIFIER_ENABLED || candidates.length === 0) {
+  if (!reconciliationMode || !EXECUTION_VERIFIER_ENABLED || candidates.length === 0) {
     const result = {
       time: nowIso(), trigger, skipped: true,
-      reason: !LIVE_TRADING_ENABLED ? "Hors LIVE" : !EXECUTION_VERIFIER_ENABLED ? "Verifier désactivé" : "Aucun intent actif",
+      reason: !reconciliationMode ? "Hors LIVE/DEMO" : !EXECUTION_VERIFIER_ENABLED ? "Verifier désactivé" : "Aucun intent actif",
       candidates: candidates.length,
       durationMs: Date.now() - startedAt
     };
@@ -6049,9 +6061,9 @@ async function reconcileExecutionIntents({ trigger = "manual", limit = EXECUTION
 
   const results = [];
   try {
-    const portfolio = await getPortfolio({ environment: "REAL" });
-    const validation = validatePortfolioResponse(portfolio, { requireReal: true });
-    if (!validation.ok) throw new Error(`Portefeuille REAL invalide: ${validation.errors.join(", ")}`);
+    const portfolio = await getPortfolio({ environment: reconciliationEnvironment });
+    const validation = validatePortfolioResponse(portfolio, { requireReal: reconciliationEnvironment === "REAL", requireDemo: reconciliationEnvironment === "DEMO" });
+    if (!validation.ok) throw new Error(`Portefeuille ${reconciliationEnvironment} invalide: ${validation.errors.join(", ")}`);
 
     for (const intent of candidates) {
       const afterSnapshot = buildAssetExecutionSnapshot(portfolio, intent.asset);
@@ -6186,10 +6198,20 @@ function envConfiguration() {
   };
   return {
     version: VERSION,
-    tradingMode: TRADING_MODE,
+    tradingMode: TRADING_MODE_LABEL,
+    internalTradingMode: TRADING_MODE,
+    tradingModeInvalid: MODE_RESOLUTION.invalid,
     liveTradingEnabled: LIVE_TRADING_ENABLED,
     paperTradingEnabled: PAPER_TRADING_ENABLED,
+    demoTradingEnabled: DEMO_TRADING_ENABLED,
     liveExecutionArmed: LIVE_EXECUTION_ARMED,
+    liveBuyConfirmationConfigured: LIVE_BUY_CONFIRMATION_CONFIGURED,
+    liveBuyMaximumOrderUsd: LIVE_BUY_MAX_ORDER_USD,
+    demoExecutionArmed: DEMO_EXECUTION_ARMED,
+    allowedTradeAssets: [...TRADE_ALLOWED_ASSETS],
+    allowedTradeCategories: [...TRADE_ALLOWED_CATEGORIES],
+    tradeExclusionReasons: TRADE_EXCLUSION_REASONS,
+    expectedDemoPortfolioIdConfigured: Boolean(ETORO_EXPECTED_DEMO_PORTFOLIO_ID),
     etoroAccountEnvironment: ETORO_ACCOUNT_ENV,
     etoroPortfolioEndpoint: getEtoroPortfolioEndpoint(ETORO_ACCOUNT_ENV),
     livePortfolioPreflightEnabled: LIVE_PORTFOLIO_PREFLIGHT_ENABLED,
@@ -13159,7 +13181,7 @@ function sanitizeDecision(decision) {
     disagreement_summary: String(decision?.disagreement_summary || "").slice(0, 300)
   };
 
-  if (clean.asset !== "NONE" && !WATCHLIST[clean.asset]) {
+  if (clean.decision === "BUY" && clean.asset !== "NONE" && (!WATCHLIST[clean.asset] || !TRADE_ALLOWED_ASSETS.has(clean.asset) || !TRADE_ALLOWED_CATEGORIES.has(classifyAsset(clean.asset, ASSET_RULES[clean.asset])))) {
     clean.asset = "NONE";
     clean.decision = "HOLD";
     clean.reason = "Actif non autorisé";
@@ -13219,7 +13241,7 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
     return hold(`ExecutionVerifier bloque tout nouvel ordre: ${unresolvedLiveIntents.length} intent(s) LIVE à réconcilier`);
   }
   if (d.risk_check !== "passed") return hold("Risk check IA non validé");
-  if (!WATCHLIST[d.asset]) return hold("Actif hors watchlist");
+  if (!WATCHLIST[d.asset] || !TRADE_ALLOWED_ASSETS.has(d.asset)) return hold("Actif absent de la liste d'achat autorisée ou explicitement exclu");
   if (agents.healthAgent?.circuitBreakerOpen) return hold(`Circuit breaker ouvert: ${agents.healthAgent.reasons.join(", ")}`);
 
   const marketCheck = isMarketRateTradable(marketData, d.asset);
@@ -13264,7 +13286,10 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
     // Le plafond de phase sert de budget de base déterministe. Les multiplicateurs
     // techniques, macro, conseil et risque réduisent ensuite ce budget; ils ne peuvent
     // jamais l'augmenter au-delà de la phase courante.
-    const requestedAllocationUsd = progressiveOrderPolicy.maximumOrderUsd;
+    const requestedAllocationUsd = Math.min(
+      progressiveOrderPolicy.maximumOrderUsd,
+      (LIVE_TRADING_ENABLED || DEMO_TRADING_ENABLED) ? LIVE_BUY_MAX_ORDER_USD : progressiveOrderPolicy.maximumOrderUsd
+    );
     const allocationGuard = allocationCheckForBuy(d.asset, summary, requestedAllocationUsd);
     if (PORTFOLIO_ALLOCATION_MODE === "enforced" && !allocationGuard.ok) return hold(allocationGuard.reason);
     const category = rules.category;
@@ -13309,7 +13334,9 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
       riskSell: riskSellMultiplier
     });
     const rawDynamicAmount = roundNumber(baseDynamicAmount * sizing.combinedMultiplier, 2);
-    let dynamicAmount = rawDynamicAmount;
+    let dynamicAmount = (LIVE_TRADING_ENABLED || DEMO_TRADING_ENABLED)
+      ? Math.min(rawDynamicAmount, LIVE_BUY_MAX_ORDER_USD)
+      : rawDynamicAmount;
     let minimumOrderFloor = null;
 
     const minimumExecutableVirtualOrderUsd = Number(progressiveOrderPolicy.minimumExecutableVirtualOrderUsd || MIN_ORDER_USD);
@@ -13395,10 +13422,109 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
   return hold("Décision invalide");
 }
 
+async function executeDemoBuy(asset, amount) {
+  if (!demoBuyReady(process.env)) return { skipped: true, mode: "DEMO", reason: "Mode DEMO bloqué : armer explicitement DEMO_EXECUTION_ARMED et utiliser des identifiants de compte DEMO." };
+  const instrumentId = WATCHLIST[asset];
+  const safeAmount = Number(amount || 0);
+  if (!instrumentId || !Number.isFinite(safeAmount) || safeAmount < MIN_ORDER_USD || safeAmount > LIVE_BUY_MAX_ORDER_USD) {
+    return { skipped: true, mode: "DEMO", reason: "Actif ou montant DEMO invalide/hors plafond." };
+  }
+  const portfolio = await getPortfolio({ environment: "DEMO" });
+  const validation = validatePortfolioResponse(portfolio, { requireDemo: true });
+  if (!validation.ok) return { skipped: true, mode: "DEMO", reason: "Portefeuille DEMO invalide.", validation };
+  const demoPortfolioId = extractPortfolioIdentifier(portfolio);
+  if (!ETORO_EXPECTED_DEMO_PORTFOLIO_ID || demoPortfolioId !== ETORO_EXPECTED_DEMO_PORTFOLIO_ID) {
+    return { skipped: true, mode: "DEMO", reason: "Identité du portefeuille DEMO non confirmée.", identityVerified: false };
+  }
+  const summary = extractPortfolioSummary(portfolio);
+  if (hasOpenPosition(portfolio, asset) || hasOpenOrder(portfolio, asset) || summary.uniquePositionsCount >= MAX_OPEN_POSITIONS) {
+    return { skipped: true, mode: "DEMO", reason: "Position existante, ordre en attente ou limite de positions atteinte." };
+  }
+  const executionMarketData = await getMarketRates();
+  const marketCheck = isMarketRateTradable(executionMarketData, asset);
+  const policy = evaluateBuyPolicy({
+    mode: "DEMO", demoArmed: DEMO_EXECUTION_ARMED, accountEnvironment: ETORO_ACCOUNT_ENV,
+    asset, category: classifyAsset(asset, ASSET_RULES[asset]), allowedAssets: [...TRADE_ALLOWED_ASSETS], allowedCategories: [...TRADE_ALLOWED_CATEGORIES],
+    amount: safeAmount, maxOrderUsd: LIVE_BUY_MAX_ORDER_USD, minOrderUsd: MIN_ORDER_USD,
+    quoteFresh: marketCheck.ok, availableCash: validation.availableCash,
+    minimumCashReserve: Math.max(10, Number(summary.totalTrackedValue || 0) * 0.10),
+    currentPositionCount: summary.uniquePositionsCount, maxPositions: MAX_OPEN_POSITIONS,
+    duplicateOrPending: summary.ordersForOpenCount > 0
+  });
+  if (!policy.allowed) return { skipped: true, mode: "DEMO", reason: policy.blockers.join(","), policy };
+  const beforeSnapshot = buildAssetExecutionSnapshot(portfolio, asset);
+  const intentResult = createOrderIntent("BUY", asset, safeAmount, {
+    beforeSnapshot, preflightValidation: validation,
+    marketRateAtIntent: { mid: marketCheck.rate?.mid ?? null, bid: marketCheck.rate?.bid ?? null,
+      ask: marketCheck.rate?.ask ?? null, spreadPct: marketCheck.rate?.spreadPct ?? null,
+      date: marketCheck.rate?.date ?? null }
+  });
+  if (!intentResult.ok) return { skipped: true, mode: "DEMO", status: EXECUTION_STATUS.DUPLICATE_BLOCKED,
+    reason: "Intent DEMO actif ou incertain déjà présent sur cet actif", existingIntent: intentResult.existing };
+  const intent = intentResult.intent;
+  const headers = etoroHeaders();
+  updateOrderIntentStatus(intent.id, EXECUTION_STATUS.SENT, {
+    requestId: headers["x-request-id"], sentAt: nowIso(), note: "Requête BUY envoyée une seule fois au compte eToro DEMO"
+  });
+  try {
+    const { response, data } = await fetchJsonWithRetry(
+      "https://public-api.etoro.com/api/v2/trading/execution/demo/orders",
+      { method: "POST", headers, body: JSON.stringify({
+        action: "open", transaction: "buy", instrumentId, orderType: "mkt",
+        amount: safeAmount, orderCurrency: "usd", leverage: 1
+      }) },
+      { label: `eToro DEMO BUY ${asset}`, retries: 0 }
+    );
+    const compactResponse = compactEtoroExecutionResponse(data);
+    const businessAcknowledged = hasExecutionBusinessAcknowledgement(compactResponse);
+    if (!response.ok) {
+      updateOrderIntentStatus(intent.id, EXECUTION_STATUS.REJECTED, {
+        httpStatus: response.status, response: compactResponse, requestId: headers["x-request-id"],
+        rejectedAt: nowIso(), note: "Requête DEMO refusée par eToro"
+      });
+      return { ok: false, confirmed: false, mode: "DEMO", status: response.status,
+        verification_status: EXECUTION_STATUS.REJECTED, asset, amount: safeAmount, intentId: intent.id,
+        requestId: headers["x-request-id"], data: compactResponse };
+    }
+    updateOrderIntentStatus(intent.id, businessAcknowledged ? EXECUTION_STATUS.ACCEPTED : EXECUTION_STATUS.NOT_FOUND, {
+      httpStatus: response.status, response: compactResponse, businessAcknowledged,
+      requestId: headers["x-request-id"], acceptedAt: businessAcknowledged ? nowIso() : null,
+      note: businessAcknowledged ? "Accusé DEMO reçu; confirmation du portefeuille en cours" : "HTTP 2xx sans preuve métier; effet DEMO à vérifier"
+    });
+    const verification = await verifyPortfolioAfterExecution({
+      asset, side: "BUY", beforeSnapshot, intentId: intent.id,
+      apiAccepted: businessAcknowledged, trigger: "demo-buy-post-order"
+    });
+    updateOrderIntentStatus(intent.id, verification.status, {
+      verificationAttempts: verification.attempts, verificationEvidence: verification.evidence,
+      afterSnapshot: verification.afterSnapshot, verificationRecordId: verification.recordId,
+      confirmedAt: verification.confirmed ? nowIso() : null, note: verification.note
+    });
+    if (businessAcknowledged || verification.observed) setCooldown(asset);
+    addExecutionHistory({ type: "BUY", asset, amount: safeAmount, instrumentId, mode: "DEMO",
+      intentId: intent.id, requestId: headers["x-request-id"], verificationStatus: verification.status,
+      confirmed: verification.confirmed });
+    return { status: response.status, ok: Boolean(businessAcknowledged || verification.confirmed),
+      businessAcknowledged, confirmed: verification.confirmed, verification_status: verification.status,
+      type: "BUY", mode: "DEMO", asset, instrumentId, amount: safeAmount,
+      intentId: intent.id, requestId: headers["x-request-id"], verification, data: compactResponse };
+  } catch (error) {
+    updateOrderIntentStatus(intent.id, EXECUTION_STATUS.UNCERTAIN, {
+      error: error.message, requestId: headers["x-request-id"], note: "Issue réseau/API DEMO inconnue; ordre non renvoyé"
+    });
+    return { ok: false, confirmed: false, uncertain: true, mode: "DEMO", asset, intentId: intent.id,
+      requestId: headers["x-request-id"], error: error.message, action: "Ne pas répéter automatiquement; réconcilier le portefeuille DEMO." };
+  }
+}
+
 async function executeBuy(asset, amount, marketData = null) {
-  if (TRADING_MODE === "OBSERVE") return { skipped: true, mode: "OBSERVE", reason: "Mode OBSERVE : aucune exécution" };
+  if (TRADING_MODE === "OBSERVE") return { skipped: true, mode: "OFF", reason: "Mode OFF : aucune exécution" };
   if (TRADING_MODE === "PAPER") return executePaperBuy(asset, Number(amount), marketData);
+  if (DEMO_TRADING_ENABLED) return executeDemoBuy(asset, amount);
   if (!LIVE_TRADING_ENABLED) return { skipped: true, reason: "Trading LIVE non activé" };
+  if (!liveBuyReady(process.env)) {
+    return { skipped: true, mode: "LIVE", reason: "LIVE bloqué : il faut TRADING_MODE=LIVE, LIVE_EXECUTION_ARMED=true et LIVE_BUY_CONFIRMATION=I_UNDERSTAND_LIVE_BUY_ORDERS." };
+  }
   if (!LIVE_EXECUTION_ARMED) {
     return { skipped: true, mode: "LIVE", reason: "LIVE non armé: ajoute LIVE_EXECUTION_ARMED=true uniquement après validation complète" };
   }
@@ -13420,6 +13546,22 @@ async function executeBuy(asset, amount, marketData = null) {
   const marketCheck = isMarketRateTradable(executionMarketData, asset);
   if (!marketCheck.ok) {
     return { skipped: true, mode: "LIVE", reason: `Préflight prix: ${marketCheck.reason}`, marketCheck };
+  }
+  const livePolicy = evaluateBuyPolicy({
+    mode: TRADING_MODE_LABEL, armed: LIVE_EXECUTION_ARMED,
+    confirmation: process.env.LIVE_BUY_CONFIRMATION || "",
+    asset, category: classifyAsset(asset, ASSET_RULES[asset]),
+    allowedAssets: [...TRADE_ALLOWED_ASSETS], allowedCategories: [...TRADE_ALLOWED_CATEGORIES], amount: safeAmount,
+    maxOrderUsd: LIVE_BUY_MAX_ORDER_USD, minOrderUsd: MIN_ORDER_USD,
+    quoteFresh: true, availableCash: preflight.validation?.availableCash,
+    minimumCashReserve: Math.max(10, Number(preflight.summary?.totalTrackedValue || 0) * 0.10),
+    currentPositionCount: preflight.summary?.uniquePositionsCount,
+    maxPositions: MAX_OPEN_POSITIONS,
+    duplicateOrPending: Number(preflight.summary?.ordersForOpenCount || 0) > 0
+  });
+  if (!livePolicy.allowed) {
+    addAudit("LIVE_BUY_POLICY_BLOCKED", { asset, blockers: livePolicy.blockers });
+    return { skipped: true, mode: "LIVE", reason: livePolicy.blockers.join(","), policy: livePolicy };
   }
 
   const beforeSnapshot = buildAssetExecutionSnapshot(preflight.portfolio, asset);
@@ -14192,6 +14334,10 @@ function buildDecisionDiagnostics(context, decisionRaw, control) {
 }
 
 async function scanMarket(source = "manual-scan") {
+  if (TRADING_MODE === "OBSERVE") return {
+    version: VERSION, source, trading_mode: "OFF", skipped: true,
+    executionAttempted: false, reason: "Mode OFF : aucune décision ni aucun ordre."
+  };
   if (runtimeState.scanRunning) return { version: VERSION, skipped: true, reason: "Un scan est déjà en cours" };
   const duplicateGuard = automaticRunDedupCheck("scan", source);
   if (duplicateGuard.skipped) {
@@ -17417,9 +17563,20 @@ app.get("/auto-trading-check", requireSecret, (req, res) => {
   if (!BOT_SECRET) missingEnvironment.push("BOT_SECRET");
 
   if (!ENABLE_INTERNAL_TRADE_CRON) warnings.push("Cron interne de scan désactivé : un cron externe doit appeler /scan.");
-  if (TRADING_MODE === "OBSERVE") blockers.push("TRADING_MODE=OBSERVE interdit toute exécution.");
-  if (TRADING_MODE === "PAPER") warnings.push("TRADING_MODE=PAPER : les décisions sont automatiques mais aucun ordre réel n'est envoyé.");
+  if (MODE_RESOLUTION.invalid) blockers.push("TRADING_MODE invalide : mode OFF appliqué par sécurité.");
+  if (MODE_RESOLUTION.legacyAutoTradeIgnored) warnings.push("AUTO_TRADE / ALLOW_LEGACY_AUTO_TRADE ignorés : seul TRADING_MODE explicite peut autoriser l'exécution.");
+  if (TRADING_MODE === "OBSERVE") blockers.push("TRADING_MODE=OFF interdit toute exécution.");
+  if (TRADING_MODE === "PAPER") warnings.push("TRADING_MODE=SHADOW : décisions et portefeuille virtuel, aucun ordre broker envoyé.");
+  if (DEMO_TRADING_ENABLED && !DEMO_EXECUTION_ARMED) blockers.push("DEMO_EXECUTION_ARMED=false : aucun ordre DEMO eToro ne peut être envoyé.");
+  if (DEMO_TRADING_ENABLED && !ETORO_EXPECTED_DEMO_PORTFOLIO_ID) blockers.push("ETORO_EXPECTED_DEMO_PORTFOLIO_ID absent : identité DEMO non validée.");
+  if (DEMO_TRADING_ENABLED && TRADE_ALLOWED_ASSETS.size === 0) blockers.push("TRADE_ALLOWED_ASSETS vide : aucun instrument n'est autorisé à l'achat.");
+  if (DEMO_TRADING_ENABLED && TRADE_ALLOWED_CATEGORIES.size === 0) blockers.push("TRADE_ALLOWED_CATEGORIES vide : aucune catégorie n'est autorisée à l'achat.");
+  if (DEMO_TRADING_ENABLED && String(process.env.ETORO_ACCOUNT_ENV || "").toUpperCase() !== "DEMO") blockers.push("ETORO_ACCOUNT_ENV doit être DEMO pour toute exécution DEMO.");
   if (TRADING_MODE === "LIVE" && !LIVE_EXECUTION_ARMED) blockers.push("LIVE_EXECUTION_ARMED=false : aucun ordre réel ne peut être envoyé.");
+  if (TRADING_MODE === "LIVE" && !LIVE_BUY_CONFIRMATION_CONFIGURED) blockers.push("LIVE_BUY_CONFIRMATION absent ou invalide : les achats LIVE restent bloqués.");
+  if (TRADING_MODE === "LIVE" && TRADE_ALLOWED_ASSETS.size === 0) blockers.push("TRADE_ALLOWED_ASSETS vide : aucun instrument n'est autorisé à l'achat.");
+  if (TRADING_MODE === "LIVE" && TRADE_ALLOWED_CATEGORIES.size === 0) blockers.push("TRADE_ALLOWED_CATEGORIES vide : aucune catégorie n'est autorisée à l'achat.");
+  if (TRADING_MODE === "LIVE" && LIVE_BUY_MAX_ORDER_USD > 10) blockers.push("Le plafond LIVE d'achat dépasse le plafond initial de 10 USD.");
   if (TRADING_MODE === "LIVE" && !EXECUTION_VERIFIER_ENABLED) blockers.push("ExecutionVerifier désactivé en mode LIVE.");
   if (TRADING_MODE === "LIVE" && LIVE_PORTFOLIO_IDENTITY_REQUIRED && !runtimeState.livePortfolioIdentity) {
     blockers.push("Identité du portefeuille REAL non confirmée via /portfolio-identity-confirm.");
@@ -17439,7 +17596,7 @@ app.get("/auto-trading-check", requireSecret, (req, res) => {
   if (REAL_COPY_MINIMUM_SIZING_ENABLED && !process.env.REAL_COPY_CAPITAL_AMOUNT && REAL_COPY_CAPITAL_USD_OVERRIDE <= 0) {
     warnings.push(`Capital copié par défaut utilisé (${REAL_COPY_CAPITAL_AMOUNT} ${REAL_COPY_CAPITAL_CURRENCY}). Mets-le à jour après tout ajout ou retrait de fonds.`);
   }
-  if (TRADING_MODE === "LIVE" && missingEnvironment.length > 0) {
+  if ((TRADING_MODE === "LIVE" || DEMO_TRADING_ENABLED) && missingEnvironment.length > 0) {
     blockers.push(`Variables indispensables absentes : ${missingEnvironment.join(", ")}.`);
   } else if (missingEnvironment.length > 0) {
     warnings.push(`Variables absentes : ${missingEnvironment.join(", ")}.`);
@@ -17470,6 +17627,8 @@ app.get("/auto-trading-check", requireSecret, (req, res) => {
   const liveExecutionConfigured = Boolean(
     TRADING_MODE === "LIVE" &&
     LIVE_EXECUTION_ARMED &&
+    LIVE_BUY_CONFIRMATION_CONFIGURED &&
+    LIVE_BUY_MAX_ORDER_USD <= 10 &&
     EXECUTION_VERIFIER_ENABLED &&
     (!LIVE_PORTFOLIO_IDENTITY_REQUIRED || runtimeState.livePortfolioIdentity) &&
     missingEnvironment.length === 0 &&
@@ -17479,9 +17638,14 @@ app.get("/auto-trading-check", requireSecret, (req, res) => {
   res.json({
     version: VERSION,
     time: nowIso(),
-    tradingMode: TRADING_MODE,
+    tradingMode: TRADING_MODE_LABEL,
+    internalTradingMode: TRADING_MODE,
     automaticScanAvailable,
     liveExecutionArmed: LIVE_EXECUTION_ARMED,
+    liveBuyConfirmationConfigured: LIVE_BUY_CONFIRMATION_CONFIGURED,
+    liveBuyMaximumOrderUsd: LIVE_BUY_MAX_ORDER_USD,
+    demoExecutionArmed: DEMO_EXECUTION_ARMED,
+    demoExecutionConfigured: Boolean(DEMO_TRADING_ENABLED && DEMO_EXECUTION_ARMED && ETORO_ACCOUNT_ENV === "DEMO"),
     liveExecutionConfigured,
     readyForAutomaticDecisionCycle: blockers.length === 0,
     realBuySellProven: provenExecution,
@@ -19129,6 +19293,65 @@ app.get("/risk-status", requireSecret, async (req, res) => {
       healthAgent: context.foundationAgents.healthAgent
     });
   } catch (error) { res.status(500).json({ version: VERSION, error: error.message }); }
+});
+
+app.get("/portfolio-universe-status", requireSecret, async (_req, res) => {
+  try {
+    const rawCandidates = String(process.env.ANALYSIS_ONLY_CANDIDATES_JSON || "[]");
+    let extraCandidates = [];
+    try {
+      const parsed = JSON.parse(rawCandidates);
+      if (Array.isArray(parsed)) extraCandidates = parsed;
+    } catch { /* malformed optional analysis data stays unavailable */ }
+    const universe = buildUniverse(WATCHLIST, ASSET_RULES, extraCandidates).map((item) => ({
+      ...item,
+      tradable: Boolean(item.tradable && TRADE_ALLOWED_ASSETS.has(item.symbol) && TRADE_ALLOWED_CATEGORIES.has(item.category)),
+      status: item.tradable && (!TRADE_ALLOWED_ASSETS.has(item.symbol) || !TRADE_ALLOWED_CATEGORIES.has(item.category))
+        ? (TRADE_EXCLUSION_REASONS[item.symbol] || (!TRADE_ALLOWED_ASSETS.has(item.symbol) ? "NOT_IN_EXPLICIT_TRADE_ALLOWLIST" : "CATEGORY_NOT_ALLOWLISTED"))
+        : item.status
+    }));
+    const portfolio = await getPortfolio({ environment: "REAL" });
+    const validation = validatePortfolioResponse(portfolio, { requireReal: true });
+    if (!validation.ok) return res.status(503).json({
+      version: VERSION, executionAttempted: false, dataStatus: "REAL_PORTFOLIO_UNAVAILABLE",
+      validation, universe, tradeAllowlist: [...TRADE_ALLOWED_ASSETS]
+    });
+    const summary = extractPortfolioSummary(portfolio);
+    const exposure = analyzeLookThroughExposure({ positions: summary.openPositions, compositions: [] });
+    const candidateOverlap = universe.map((item) => ({
+      symbol: item.symbol,
+      directValue: exposure.direct[item.symbol] || 0,
+      indirectValue: exposure.indirect[item.symbol] || 0,
+      overlapDetected: Boolean((exposure.direct[item.symbol] || 0) + (exposure.indirect[item.symbol] || 0) > 0),
+      indirectCoverage: exposure.coverage
+    }));
+    res.json({
+      version: VERSION, time: nowIso(), executionAttempted: false,
+      universe: {
+        total: universe.length,
+        byCategory: Object.fromEntries(["ETF", "STOCK", "CRYPTO", "SMART_PORTFOLIO", "UNCLASSIFIED"].map((category) =>
+          [category, universe.filter((item) => item.category === category)])),
+        tradeAllowlist: [...TRADE_ALLOWED_ASSETS],
+        exclusions: Object.keys(WATCHLIST).filter((asset) => !TRADE_ALLOWED_ASSETS.has(asset) || !TRADE_ALLOWED_CATEGORIES.has(classifyAsset(asset, ASSET_RULES[asset]))).map((asset) => ({ asset, reason: TRADE_EXCLUSION_REASONS[asset] || (!TRADE_ALLOWED_ASSETS.has(asset) ? "NOT_IN_EXPLICIT_TRADE_ALLOWLIST" : "CATEGORY_NOT_ALLOWLISTED") })),
+        analysisOnly: universe.filter((item) => !item.tradable)
+      },
+      directExposure: exposure.direct,
+      combinedExposure: exposure.combined,
+      candidateOverlap,
+      lookThrough: {
+        status: "INCOMPLETE",
+        unavailable: "No verified official eToro endpoint for Smart Portfolio and ETF constituent snapshots is configured.",
+        knownOfficialCompositions: exposure.knownOfficialCompositions
+      },
+      smartPortfolioTrading: {
+        status: "NOT_TRADEABLE_VIA_CURRENT_API",
+        ordersAllowed: false,
+        componentCopyEnabled: false
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ version: VERSION, executionAttempted: false, error: "PORTFOLIO_UNIVERSE_ANALYSIS_FAILED" });
+  }
 });
 
 app.get("/data-sources", requireSecret, (req, res) => {
