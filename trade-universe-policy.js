@@ -72,7 +72,17 @@ function resolveTradeAllowlist(watchlist = {}, env = {}) {
   const known = new Set(Object.keys(watchlist).map((asset) => asset.toUpperCase()));
   const configured = String(env.TRADE_ALLOWED_ASSETS || '').trim();
   const requested = configured ? configured.split(',').map((value) => value.trim().toUpperCase()).filter(Boolean) : [];
-  const denied = new Set(String(env.TRADE_EXCLUDED_ASSETS || '').split(',').map((value) => value.trim().toUpperCase()).filter(Boolean));
+  let reasonExclusions = {};
+  if (String(env.TRADE_EXCLUSIONS_JSON || '').trim()) {
+    try {
+      reasonExclusions = JSON.parse(String(env.TRADE_EXCLUSIONS_JSON));
+      if (!reasonExclusions || typeof reasonExclusions !== 'object' || Array.isArray(reasonExclusions)) return [];
+    } catch { return []; }
+  }
+  const denied = new Set([
+    ...String(env.TRADE_EXCLUDED_ASSETS || '').split(',').map((value) => value.trim().toUpperCase()).filter(Boolean),
+    ...Object.keys(reasonExclusions).map((asset) => asset.trim().toUpperCase())
+  ]);
   return [...new Set(requested)].filter((asset) => known.has(asset) && !denied.has(asset)).sort();
 }
 
