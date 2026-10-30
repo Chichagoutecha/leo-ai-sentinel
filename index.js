@@ -136,6 +136,8 @@ const { randomUUID, createHash, timingSafeEqual } = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { marketSourceAudit, decisionMarketEvidence } = require('./market-source-audit');
+const { createTraderObserver } = require('./etoro-trader-observer');
+const { emptyState: emptyTraderObserverState, compactObserverState } = require('./trader-observer');
 const { resolveTradingMode, liveBuyReady, demoBuyReady, liveBuyMaxOrderUsd, classifyAsset, buildUniverse, resolveTradeAllowlist, resolveAllowedCategories, parseExclusionReasons, analyzeLookThroughExposure, evaluateBuyPolicy } = require('./trade-universe-policy');
 const { ENDPOINT: SEC_BLACKROCK_ENDPOINT, REFRESH_INTERVAL_MS: SEC_REFRESH_INTERVAL_MS,
   normalizeBlackRockFilings, institutionalWatchStatus } = require('./sec-institutional-watch');
@@ -1855,6 +1857,7 @@ const runtimeState = {
   },
   lastMarketData: null,
   secInstitutionalWatch: null,
+  traderObserver: emptyTraderObserverState(),
   trendMemory: {},
   equityHistory: [],
   performanceHistory: [],
@@ -2428,7 +2431,8 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
       improvementHistory: (runtimeState.improvementHistory || []).slice(0, STRATEGY_CANDIDATE_HISTORY_LIMIT),
       lastImprovementRun: runtimeState.lastImprovementRun || null,
       lastMarketData: runtimeState.lastMarketData || null,
-      secInstitutionalWatch: runtimeState.secInstitutionalWatch || null
+      secInstitutionalWatch: runtimeState.secInstitutionalWatch || null,
+    traderObserver: compactObserverState(runtimeState.traderObserver)
     };
   }
 
@@ -2515,7 +2519,8 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
     strategyCandidates: (runtimeState.strategyCandidates || []).slice(0, 30),
     improvementHistory: (runtimeState.improvementHistory || []).slice(0, 30),
     lastMarketData: compactLastMarketDataForPersistence(runtimeState.lastMarketData),
-    secInstitutionalWatch: runtimeState.secInstitutionalWatch || null
+    secInstitutionalWatch: runtimeState.secInstitutionalWatch || null,
+    traderObserver: compactObserverState(runtimeState.traderObserver)
   };
 }
 
@@ -2654,6 +2659,7 @@ function fitPersistentStateToBudget(
       savedAt: working.savedAt,
       version: working.version,
       persistenceMode: "UPSTASH_CRITICAL_MINIMAL_V2",
+      traderObserver: compactObserverState(working.traderObserver, 4000),
       automationGuards: working.automationGuards || {},
       cooldownMemory: working.cooldownMemory || {},
       lastDecision: working.lastDecision || null,
@@ -2887,6 +2893,11 @@ function applyPersistentState(state) {
   if (state.lastMarketData) runtimeState.lastMarketData = state.lastMarketData;
   if (state.secInstitutionalWatch && typeof state.secInstitutionalWatch === 'object') {
     runtimeState.secInstitutionalWatch = state.secInstitutionalWatch;
+  }
+
+  if (state.traderObserver?.version === 1 && state.traderObserver.traders &&
+      Array.isArray(state.traderObserver.events) && Array.isArray(state.traderObserver.observations)) {
+    runtimeState.traderObserver = compactObserverState(state.traderObserver);
   }
 
   prunePointInTimeArchive();
@@ -19321,6 +19332,20 @@ app.get("/risk-status", requireSecret, async (req, res) => {
       healthAgent: context.foundationAgents.healthAgent
     });
   } catch (error) { res.status(500).json({ version: VERSION, error: error.message }); }
+});
+
+// Explicit, bounded public-data observation; never connected to decision/execution.
+const traderObserver = createTraderObserver({ env: process.env,
+  getState: () => runtimeState.traderObserver, onChange: scheduleSave });
+app.get("/trader-observer-status", requireSecret, (_req, res) => {
+  res.json({ version: VERSION, ...traderObserver.view() });
+});
+app.post("/trader-observer-refresh", requireSecret, async (req, res) => {
+  if (!req.body || Object.keys(req.body).some(key => key !== "realCID")) {
+    return res.status(400).json({ executionAttempted: false, error: "INVALID_TRADER_REFRESH" });
+  }
+  try { res.json({ version: VERSION, ...await traderObserver.refresh(req.body.realCID) }); }
+  catch { res.status(400).json({ executionAttempted: false, error: "TRADER_NOT_CONFIGURED_OR_CONFIG_INVALID" }); }
 });
 
 app.get("/portfolio-universe-status", requireSecret, async (_req, res) => {
