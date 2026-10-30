@@ -13203,7 +13203,9 @@ function sanitizeDecision(decision) {
     disagreement_summary: String(decision?.disagreement_summary || "").slice(0, 300)
   };
 
-  if (clean.decision === "BUY" && clean.asset !== "NONE" && (!WATCHLIST[clean.asset] || !TRADE_ALLOWED_ASSETS.has(clean.asset) || !TRADE_ALLOWED_CATEGORIES.has(classifyAsset(clean.asset, ASSET_RULES[clean.asset])))) {
+  if (clean.decision === "BUY" && clean.asset !== "NONE" && (!WATCHLIST[clean.asset] ||
+    ((LIVE_TRADING_ENABLED || DEMO_TRADING_ENABLED) && (!TRADE_ALLOWED_ASSETS.has(clean.asset) ||
+      !TRADE_ALLOWED_CATEGORIES.has(classifyAsset(clean.asset, ASSET_RULES[clean.asset])))))) {
     clean.asset = "NONE";
     clean.decision = "HOLD";
     clean.reason = "Actif non autorisé";
@@ -13263,7 +13265,11 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
     return hold(`ExecutionVerifier bloque tout nouvel ordre: ${unresolvedLiveIntents.length} intent(s) LIVE à réconcilier`);
   }
   if (d.risk_check !== "passed") return hold("Risk check IA non validé");
-  if (!WATCHLIST[d.asset] || !TRADE_ALLOWED_ASSETS.has(d.asset)) return hold("Actif absent de la liste d'achat autorisée ou explicitement exclu");
+  if (!WATCHLIST[d.asset]) return hold("Actif absent du registre d'instruments");
+  if ((LIVE_TRADING_ENABLED || DEMO_TRADING_ENABLED) &&
+      (!TRADE_ALLOWED_ASSETS.has(d.asset) || !TRADE_ALLOWED_CATEGORIES.has(classifyAsset(d.asset, ASSET_RULES[d.asset])))) {
+    return hold("Actif ou catégorie absent de la liste explicite d'achat autorisé");
+  }
   if (agents.healthAgent?.circuitBreakerOpen) return hold(`Circuit breaker ouvert: ${agents.healthAgent.reasons.join(", ")}`);
 
   const marketCheck = isMarketRateTradable(marketData, d.asset);
