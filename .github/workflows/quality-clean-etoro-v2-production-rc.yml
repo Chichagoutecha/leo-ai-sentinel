@@ -7,6 +7,8 @@ on:
     paths:
       - 'index.js'
       - 'package.json'
+      - 'trade-universe-policy.js'
+      - 'test-trade-universe-policy.js'
       - 'ai-cost-optimizer.js'
       - 'ai-luna-temperature-compat.js'
       - 'ai-context-optimizer.js'
@@ -69,7 +71,7 @@ jobs:
           git diff --exit-code origin/main...HEAD -- ai-cost-optimizer.js ai-luna-temperature-compat.js production-ai-preflight.js
           grep -Fq 'global.__LEO_EXECUTION_QUALITY_SHADOW__?.recordAiCostEvent?.(payload)' ai-cost-optimizer.js
           grep -Fq 'global.__LEO_AI_COST_OBSERVER_HOOK_READY__ = ENABLED' ai-cost-optimizer.js
-          allowed='^(index\.js|sec-institutional-watch\.js|test-sec-institutional-watch\.js|market-source-audit\.js|test-market-source-audit\.js|ai-cost-optimizer\.js|ai-context-optimizer\.js|ai-context-optimizer-v2\.js|execution-aware-decision-runtime\.js|package\.json|package-lock\.json|decision-outcome-ledger\.js|test-decision-outcome-ledger\.js|etoro-execution-diagnostics\.js|etoro-agent-scope-compat\.js|etoro-acknowledged-no-effect-hotfix\.js|etoro-ucits-execution-bridge\.js|all-in-cost-shadow-agent\.js|hold-opportunity-shadow-agent\.js|test-etoro-execution-diagnostics\.js|test-etoro-agent-scope-compat\.js|test-etoro-acknowledged-no-effect-hotfix\.js|test-etoro-ucits-execution-bridge\.js|test-all-in-cost-shadow-agent\.js|test-hold-opportunity-shadow-agent\.js|test-ai-context-adaptive\.js|test-ai-context-v2\.js|test-execution-aware-decision-runtime\.js|test-lot-aware-risk-sizing\.js|test-real-sell-proof\.js|execution-quality-shadow-agent\.js|test-execution-quality-shadow-agent\.js|test-ai-cost-missing-usage\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
+          allowed='^(index\.js|sec-institutional-watch\.js|test-sec-institutional-watch\.js|market-source-audit\.js|test-market-source-audit\.js|ai-cost-optimizer\.js|ai-context-optimizer\.js|ai-context-optimizer-v2\.js|execution-aware-decision-runtime\.js|package\.json|package-lock\.json|trade-universe-policy\.js|test-trade-universe-policy\.js|decision-outcome-ledger\.js|test-decision-outcome-ledger\.js|etoro-execution-diagnostics\.js|etoro-agent-scope-compat\.js|etoro-acknowledged-no-effect-hotfix\.js|etoro-ucits-execution-bridge\.js|all-in-cost-shadow-agent\.js|hold-opportunity-shadow-agent\.js|test-etoro-execution-diagnostics\.js|test-etoro-agent-scope-compat\.js|test-etoro-acknowledged-no-effect-hotfix\.js|test-etoro-ucits-execution-bridge\.js|test-all-in-cost-shadow-agent\.js|test-hold-opportunity-shadow-agent\.js|test-ai-context-adaptive\.js|test-ai-context-v2\.js|test-execution-aware-decision-runtime\.js|test-lot-aware-risk-sizing\.js|test-real-sell-proof\.js|execution-quality-shadow-agent\.js|test-execution-quality-shadow-agent\.js|test-ai-cost-missing-usage\.js|\.github/workflows/quality-clean-etoro-v2-production-rc\.yml)$'
           unexpected="$(git diff --name-only origin/main...HEAD | grep -Ev "$allowed" || true)"
           if [ -n "$unexpected" ]; then
             echo "Unexpected changed files:"
@@ -83,6 +85,11 @@ jobs:
         run: |
           git fetch origin main --depth=1
           grep -Fq 'const VERSION = "v10.22.30-sec-institutional-watch";' index.js
+          grep -Fq 'api/v2/trading/execution/demo/orders' index.js
+          grep -Fq 'LIVE_BUY_CONFIRMATION' index.js
+          grep -Fq 'NOT_TRADEABLE_VIA_CURRENT_API' index.js
+          grep -Fq 'LIVE_BUY_CONFIRMATION' trade-universe-policy.js
+          grep -Fq 'resolveAllowedCategories' trade-universe-policy.js
           grep -Fq 'const UCITS_OVERLAP_SCAN_SCHEDULE =' index.js
           grep -Fq 'process.env.UCITS_OVERLAP_SCAN_SCHEDULE || "45 14 * * 1-5"' index.js
           grep -Fq 'SCAN UCITS OVERLAP START:' index.js
