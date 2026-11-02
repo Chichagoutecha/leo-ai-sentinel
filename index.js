@@ -136,6 +136,10 @@ const { randomUUID, createHash, timingSafeEqual } = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { marketSourceAudit, decisionMarketEvidence } = require('./market-source-audit');
+const { createTraderObserver } = require('./etoro-trader-observer');
+const { emptyState: emptyTraderObserverState, compactObserverState } = require('./trader-observer');
+const { buildTraderExposureView, validateProposal: validateExposureProposal, previewProposal: previewExposureProposal } = require('./trader-exposure-link');
+const { createEligibilityClient, createEligibilityRegistry } = require('./etoro-instrument-eligibility');
 const { resolveTradingMode, liveBuyReady, demoBuyReady, liveBuyMaxOrderUsd, classifyAsset, buildUniverse, resolveTradeAllowlist, resolveAllowedCategories, parseExclusionReasons, analyzeLookThroughExposure, evaluateBuyPolicy } = require('./trade-universe-policy');
 const { ENDPOINT: SEC_BLACKROCK_ENDPOINT, REFRESH_INTERVAL_MS: SEC_REFRESH_INTERVAL_MS,
   normalizeBlackRockFilings, institutionalWatchStatus } = require('./sec-institutional-watch');
@@ -1491,6 +1495,8 @@ for (const candidate of CONFIGURED_UNIVERSE_CANDIDATES) {
 const TRADE_ALLOWED_ASSETS = new Set(resolveTradeAllowlist(WATCHLIST, process.env));
 const TRADE_ALLOWED_CATEGORIES = new Set(resolveAllowedCategories(process.env));
 const TRADE_EXCLUSION_REASONS = parseExclusionReasons(process.env);
+// Informational registry only. No background refresh or execution integration.
+const instrumentEligibilityRegistry = createEligibilityRegistry({ client: createEligibilityClient({ env: process.env }) });
 
 const STARTER_PRIORITY = [
   "SPY",
@@ -1855,6 +1861,8 @@ const runtimeState = {
   },
   lastMarketData: null,
   secInstitutionalWatch: null,
+  traderObserver: emptyTraderObserverState(),
+  exposureProposalTraces: [],
   trendMemory: {},
   equityHistory: [],
   performanceHistory: [],
@@ -2428,7 +2436,9 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
       improvementHistory: (runtimeState.improvementHistory || []).slice(0, STRATEGY_CANDIDATE_HISTORY_LIMIT),
       lastImprovementRun: runtimeState.lastImprovementRun || null,
       lastMarketData: runtimeState.lastMarketData || null,
-      secInstitutionalWatch: runtimeState.secInstitutionalWatch || null
+      secInstitutionalWatch: runtimeState.secInstitutionalWatch || null,
+    traderObserver: compactObserverState(runtimeState.traderObserver),
+      exposureProposalTraces: (runtimeState.exposureProposalTraces || []).slice(-20)
     };
   }
 
@@ -2515,7 +2525,9 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
     strategyCandidates: (runtimeState.strategyCandidates || []).slice(0, 30),
     improvementHistory: (runtimeState.improvementHistory || []).slice(0, 30),
     lastMarketData: compactLastMarketDataForPersistence(runtimeState.lastMarketData),
-    secInstitutionalWatch: runtimeState.secInstitutionalWatch || null
+    secInstitutionalWatch: runtimeState.secInstitutionalWatch || null,
+    traderObserver: compactObserverState(runtimeState.traderObserver),
+      exposureProposalTraces: (runtimeState.exposureProposalTraces || []).slice(-20)
   };
 }
 
@@ -2654,6 +2666,8 @@ function fitPersistentStateToBudget(
       savedAt: working.savedAt,
       version: working.version,
       persistenceMode: "UPSTASH_CRITICAL_MINIMAL_V2",
+      traderObserver: compactObserverState(working.traderObserver, 4000),
+      exposureProposalTraces: (working.exposureProposalTraces || []).slice(-5),
       automationGuards: working.automationGuards || {},
       cooldownMemory: working.cooldownMemory || {},
       lastDecision: working.lastDecision || null,
@@ -2888,6 +2902,14 @@ function applyPersistentState(state) {
   if (state.secInstitutionalWatch && typeof state.secInstitutionalWatch === 'object') {
     runtimeState.secInstitutionalWatch = state.secInstitutionalWatch;
   }
+
+  if (state.traderObserver?.version === 1 && state.traderObserver.traders &&
+      Array.isArray(state.traderObserver.events) && Array.isArray(state.traderObserver.observations)) {
+    runtimeState.traderObserver = compactObserverState(state.traderObserver);
+  }
+
+  if (Array.isArray(state.exposureProposalTraces)) runtimeState.exposureProposalTraces = state.exposureProposalTraces
+    .filter(r => r && typeof r.proposalId === "string" && /^[a-f0-9-]{36}$/.test(r.proposalId) && Array.isArray(r.traderSources)).slice(-20);
 
   prunePointInTimeArchive();
   ensureStrategyRegistry();
@@ -19323,6 +19345,65 @@ app.get("/risk-status", requireSecret, async (req, res) => {
   } catch (error) { res.status(500).json({ version: VERSION, error: error.message }); }
 });
 
+// Explicit, bounded public-data observation; never connected to decision/execution.
+const traderObserver = createTraderObserver({ env: process.env,
+  getState: () => runtimeState.traderObserver, onChange: scheduleSave });
+app.get("/trader-observer-status", requireSecret, (_req, res) => {
+  res.json({ version: VERSION, ...traderObserver.view() });
+});
+app.post("/trader-observer-refresh", requireSecret, async (req, res) => {
+  if (!req.body || Object.keys(req.body).some(key => key !== "realCID")) {
+    return res.status(400).json({ executionAttempted: false, error: "INVALID_TRADER_REFRESH" });
+  }
+  try { res.json({ version: VERSION, ...await traderObserver.refresh(req.body.realCID) }); }
+  catch { res.status(400).json({ executionAttempted: false, error: "TRADER_NOT_CONFIGURED_OR_CONFIG_INVALID" }); }
+});
+// Explicit human-initiated information query; this is not an order endpoint.
+app.post("/instrument-eligibility-refresh", requireSecret, async (req, res) => {
+  try {
+    const result = await instrumentEligibilityRegistry.refresh(req.body);
+    res.json({ version: VERSION, executionAttempted: false, informationalOnly: true, result });
+  } catch {
+    res.status(400).json({ executionAttempted: false, error: "INVALID_ELIGIBILITY_REQUEST" });
+  }
+});
+app.get("/instrument-eligibility-status", requireSecret, (_req, res) => {
+  const universe = buildUniverse(WATCHLIST, ASSET_RULES, CONFIGURED_UNIVERSE_CANDIDATES);
+  res.json({ version: VERSION, executionAttempted: false, informationalOnly: true,
+    instruments: universe.map(item => ({ symbol: item.symbol, instrumentId: item.instrumentId,
+      eligibility: instrumentEligibilityRegistry.inspect({ symbol: item.symbol, instrumentId: item.instrumentId,
+        category: item.category, allowedAssets: [...TRADE_ALLOWED_ASSETS], allowedCategories: [...TRADE_ALLOWED_CATEGORIES] }) })) });
+});
+
+function currentTraderExposureView(portfolio) {
+  return buildTraderExposureView({ portfolioResponse: portfolio, observerView: traderObserver.view(),
+    intents: Object.values(runtimeState.orderIntents || {}), proposals: runtimeState.exposureProposalTraces || [],
+    universe: buildUniverse(WATCHLIST, ASSET_RULES, CONFIGURED_UNIVERSE_CANDIDATES) });
+}
+app.get("/trader-exposure-proposals", requireSecret, (_req, res) => {
+  res.json({ version: VERSION, readOnly: true, executionAttempted: false, proposals: runtimeState.exposureProposalTraces || [] });
+});
+app.post("/trader-exposure-proposal-preview", requireSecret, async (req, res) => {
+  let draft;
+  try { draft = validateExposureProposal(req.body); }
+  catch { return res.status(400).json({ executionAttempted: false, error: "INVALID_EXPOSURE_PROPOSAL" }); }
+  try {
+    // One existing read is necessary for a current marginal preview; no market/order call.
+    const portfolio = await getPortfolio({ environment: "REAL" });
+    if (!validatePortfolioResponse(portfolio, { requireReal: true }).ok) return res.status(503).json({ executionAttempted: false, error: "REAL_PORTFOLIO_UNAVAILABLE" });
+    const view = currentTraderExposureView(portfolio);
+    const instrumentRow = buildUniverse(WATCHLIST, ASSET_RULES, CONFIGURED_UNIVERSE_CANDIDATES).find(r => r.instrumentId === draft.instrumentId);
+    const result = previewExposureProposal(draft, view, { observerState: runtimeState.traderObserver,
+      observerView: traderObserver.view(), eligibility: instrumentEligibilityRegistry.inspect({ instrumentId: draft.instrumentId,
+        symbol: instrumentRow?.symbol, category: instrumentRow?.category, allowedAssets: [...TRADE_ALLOWED_ASSETS], allowedCategories: [...TRADE_ALLOWED_CATEGORIES], portfolioFresh: view.owned.fresh }),
+      policy: { maxOrderUsd: LIVE_BUY_MAX_ORDER_USD } });
+    runtimeState.exposureProposalTraces = [...(runtimeState.exposureProposalTraces || []), { ...result.trace,
+      previewStatus: result.status, marginal: result.marginal, problems: result.problems }].slice(-20);
+    scheduleSave();
+    res.json({ version: VERSION, ...result });
+  } catch { res.status(500).json({ executionAttempted: false, error: "EXPOSURE_PREVIEW_UNAVAILABLE" }); }
+});
+
 app.get("/portfolio-universe-status", requireSecret, async (_req, res) => {
   try {
     const rawCandidates = String(process.env.ANALYSIS_ONLY_CANDIDATES_JSON || "[]");
@@ -19345,12 +19426,21 @@ app.get("/portfolio-universe-status", requireSecret, async (_req, res) => {
       validation, universe, tradeAllowlist: [...TRADE_ALLOWED_ASSETS]
     });
     const summary = extractPortfolioSummary(portfolio);
-    const exposure = analyzeLookThroughExposure({ positions: summary.openPositions, compositions: [] });
+    const traderExposure = currentTraderExposureView(portfolio);
+    const exposure = analyzeLookThroughExposure({
+      positions: traderExposure.owned.rows.map(row => ({ asset: row.asset, instrumentId: row.instrumentId,
+        positionId: row.positionId, category: row.category, estimatedValue: row.estimatedValueUsd })),
+      compositions: [], valuationCurrency: "USD", cash: summary.availableCash
+    });
+    if (traderExposure.owned.coverage !== "COMPLETE") { exposure.coverage = traderExposure.owned.coverage; exposure.combined = null; }
     const candidateOverlap = universe.map((item) => ({
       symbol: item.symbol,
-      directValue: exposure.direct[item.symbol] || 0,
-      indirectValue: exposure.indirect[item.symbol] || 0,
-      overlapDetected: Boolean((exposure.direct[item.symbol] || 0) + (exposure.indirect[item.symbol] || 0) > 0),
+      directValue: traderExposure.owned.direct.knownValuesByInstrument[item.instrumentId] ?? null,
+      nativeCopyValue: traderExposure.owned.nativeCopies.knownValuesByInstrument[item.instrumentId] ?? null,
+      observedTraderIds: traderExposure.observedOnly.instruments.find(r => r.instrumentId === item.instrumentId)?.observedTraderIds || [],
+      indirectValue: exposure.indirect?.[item.symbol] ?? null,
+      overlapDetected: exposure.overlaps.some(overlap => overlap.instrument === item.symbol)
+        ? true : exposure.coverage === "COMPLETE" ? false : null,
       indirectCoverage: exposure.coverage
     }));
     res.json({
@@ -19363,13 +19453,22 @@ app.get("/portfolio-universe-status", requireSecret, async (_req, res) => {
         exclusions: Object.keys(WATCHLIST).filter((asset) => !TRADE_ALLOWED_ASSETS.has(asset) || !TRADE_ALLOWED_CATEGORIES.has(classifyAsset(asset, ASSET_RULES[asset]))).map((asset) => ({ asset, reason: TRADE_EXCLUSION_REASONS[asset] || (!TRADE_ALLOWED_ASSETS.has(asset) ? "NOT_IN_EXPLICIT_TRADE_ALLOWLIST" : "CATEGORY_NOT_ALLOWLISTED") })),
         analysisOnly: universe.filter((item) => !item.tradable)
       },
-      directExposure: exposure.direct,
+      directExposure: traderExposure.owned.direct.knownValuesByAsset,
+      directExposureStatus: traderExposure.owned.coverage,
+      nativeCopyExposure: traderExposure.owned.nativeCopies.knownValuesByAsset,
+      ownershipAndTraderExposure: traderExposure,
       combinedExposure: exposure.combined,
       candidateOverlap,
       lookThrough: {
-        status: "INCOMPLETE",
-        unavailable: "No verified official eToro endpoint for Smart Portfolio and ETF constituent snapshots is configured.",
-        knownOfficialCompositions: exposure.knownOfficialCompositions
+        ...exposure,
+        ownershipBasis: "DIRECT_INSTRUMENT_VALUES_INCLUDE_COPY_CHILDREN;_SEE_OWNERSHIP_VIEW_FOR_DIRECT_VS_NATIVE_COPY",
+        status: exposure.coverage,
+        sources: {
+          positions: { source: "EXISTING_ETORO_REAL_PORTFOLIO", fetchedAt: portfolio.fetchedAt,
+            valuation: "INVESTED_AMOUNT_PLUS_REPORTED_PROFIT", currencyBasis: "EXISTING_USD_ACCOUNTING_CONVENTION" },
+          compositions: { status: "UNAVAILABLE", reason: "NO_DOCUMENTED_ACCESSIBLE_CONSTITUENT_SOURCE_CONFIGURED" },
+          taxonomy: { status: "UNAVAILABLE", reason: "NO_VERIFIED_SECTOR_ISSUER_GEOGRAPHY_OR_CURRENCY_METADATA" }
+        }
       },
       smartPortfolioTrading: {
         status: "NOT_TRADEABLE_VIA_CURRENT_API",
