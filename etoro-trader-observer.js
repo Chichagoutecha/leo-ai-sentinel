@@ -105,7 +105,7 @@ function createTraderObserver({ env = process.env, client, clock = Date.now, get
       const finalIdentity = finalProfile.data ? model.resolveIdentity(finalProfile.data, trader, identity) : null;
       if (finalIdentity?.status !== 'AVAILABLE' || finalIdentity.username !== identity.username || client.context().generation !== context.generation) return fail('IDENTITY_OR_CONTEXT_CHANGED_DURING_COLLECTION');
       const unavailable = result => ({ status: 'UNAVAILABLE', reason: result.reason, positions: [], complete: false, effectiveAt: null, missingFields: ['response'], pagination: result.pagination });
-      const snapshot = { realCID, identity, collectedAt: new Date(clock()).toISOString(), collectionStartedAt: startedAt,
+      const snapshot = { realCID, identity, collectedAt: new Date(clock()).toISOString(), receivedAt: new Date(clock()).toISOString(), collectionStartedAt: startedAt,
         effectiveAt: null, delaySeconds: null, context,
         portfolio: results.portfolio.data ? model.normalizePortfolio(results.portfolio.data) : unavailable(results.portfolio),
         performance: results.performance.data ? model.normalizePerformance(results.performance.data) : unavailable(results.performance),

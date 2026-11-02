@@ -114,6 +114,7 @@ function ingest(state, snapshot) {
   const correction = Boolean(previousObservation);
   const emit = event => {
     const row = { ...event, traderId: snapshot.realCID, gcid: snapshot.identity.gcid, observedAt: snapshot.collectedAt,
+      receivedAt: snapshot.receivedAt || snapshot.collectedAt,
       effectiveAt: null, observationId, beforeObservationId: state.traders[snapshot.realCID]?.comparisonBaselineObservationId || state.traders[snapshot.realCID]?.observationId || null,
       source: snapshot.sources.portfolio, transactionProven: false, corrected: correction, late: Boolean(late) };
     row.id = digest(row);
@@ -133,7 +134,7 @@ function ingest(state, snapshot) {
     }
     state.traders[snapshot.realCID] = entry;
   }
-  state.observations.push({ id: observationId, realCID: snapshot.realCID, collectedAt: snapshot.collectedAt, late: Boolean(late), corrects: previousObservation?.id || null });
+  state.observations.push({ id: observationId, realCID: snapshot.realCID, collectedAt: snapshot.collectedAt, receivedAt: snapshot.receivedAt || snapshot.collectedAt, late: Boolean(late), corrects: previousObservation?.id || null });
   if (state.events.length > 100 || state.observations.length > 100) state.historyTruncated = true;
   state.events = state.events.slice(-100); state.observations = state.observations.slice(-100);
   return true;
