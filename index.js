@@ -142,6 +142,7 @@ const { buildTraderExposureView, validateProposal: validateExposureProposal, pre
 const { createEligibilityClient, createEligibilityRegistry } = require('./etoro-instrument-eligibility');
 const { resolveTradingMode, liveBuyReady, demoBuyReady, liveBuyMaxOrderUsd, classifyAsset, buildUniverse, resolveTradeAllowlist, resolveAllowedCategories, parseExclusionReasons, analyzeLookThroughExposure, evaluateBuyPolicy } = require('./trade-universe-policy');
 const { buildPaperShadowScorecard } = require('./paper-shadow-accounting');
+const traderAdvisory = require('./trader-advisory-policy');
 const { ENDPOINT: SEC_BLACKROCK_ENDPOINT, REFRESH_INTERVAL_MS: SEC_REFRESH_INTERVAL_MS,
   normalizeBlackRockFilings, institutionalWatchStatus } = require('./sec-institutional-watch');
 
@@ -1866,6 +1867,7 @@ const runtimeState = {
   secInstitutionalWatch: null,
   traderObserver: emptyTraderObserverState(),
   exposureProposalTraces: [],
+  traderAdvisoryState: traderAdvisory.initialState(),
   trendMemory: {},
   equityHistory: [],
   performanceHistory: [],
@@ -2447,6 +2449,7 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
       lastMarketData: runtimeState.lastMarketData || null,
       secInstitutionalWatch: runtimeState.secInstitutionalWatch || null,
     traderObserver: compactObserverState(runtimeState.traderObserver),
+      traderAdvisoryState: traderAdvisory.compactState(runtimeState.traderAdvisoryState),
       exposureProposalTraces: (runtimeState.exposureProposalTraces || []).slice(-20)
     };
   }
@@ -2536,6 +2539,7 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
     lastMarketData: compactLastMarketDataForPersistence(runtimeState.lastMarketData),
     secInstitutionalWatch: runtimeState.secInstitutionalWatch || null,
     traderObserver: compactObserverState(runtimeState.traderObserver),
+      traderAdvisoryState: traderAdvisory.compactState(runtimeState.traderAdvisoryState),
       exposureProposalTraces: (runtimeState.exposureProposalTraces || []).slice(-20)
   };
 }
@@ -2690,6 +2694,7 @@ function fitPersistentStateToBudget(
       version: working.version,
       persistenceMode: "UPSTASH_CRITICAL_MINIMAL_V2",
       traderObserver: compactObserverState(working.traderObserver, 4000),
+      traderAdvisoryState: traderAdvisory.compactState(working.traderAdvisoryState, 4000),
       exposureProposalTraces: (working.exposureProposalTraces || []).slice(-5),
       automationGuards: working.automationGuards || {},
       cooldownMemory: working.cooldownMemory || {},
@@ -2926,6 +2931,7 @@ function applyPersistentState(state) {
   if (Array.isArray(state.improvementHistory)) runtimeState.improvementHistory = state.improvementHistory.slice(0, STRATEGY_CANDIDATE_HISTORY_LIMIT);
   if (state.lastImprovementRun && typeof state.lastImprovementRun === "object") runtimeState.lastImprovementRun = state.lastImprovementRun;
   if (state.lastMarketData) runtimeState.lastMarketData = state.lastMarketData;
+  if (state.traderAdvisoryState?.version === 1 && state.traderAdvisoryState.roster && Array.isArray(state.traderAdvisoryState.history)) runtimeState.traderAdvisoryState = traderAdvisory.compactState(state.traderAdvisoryState);
   if (state.secInstitutionalWatch && typeof state.secInstitutionalWatch === 'object') {
     runtimeState.secInstitutionalWatch = state.secInstitutionalWatch;
   }
@@ -19661,11 +19667,59 @@ app.get("/instrument-eligibility-status", requireSecret, (_req, res) => {
         category: item.category, allowedAssets: [...TRADE_ALLOWED_ASSETS], allowedCategories: [...TRADE_ALLOWED_CATEGORIES] }) })) });
 });
 
+let cachedTraderExposure = null;
+let cachedTraderExposureIntents = null;
+let lastTraderAdvisoryReport = null;
 function currentTraderExposureView(portfolio) {
-  return buildTraderExposureView({ portfolioResponse: portfolio, observerView: traderObserver.view(),
+  cachedTraderExposure = buildTraderExposureView({ portfolioResponse: portfolio, observerView: traderObserver.view(),
     intents: Object.values(runtimeState.orderIntents || {}), proposals: runtimeState.exposureProposalTraces || [],
     universe: buildUniverse(WATCHLIST, ASSET_RULES, CONFIGURED_UNIVERSE_CANDIDATES) });
+  cachedTraderExposureIntents = JSON.stringify(runtimeState.orderIntents || {});
+  return cachedTraderExposure;
 }
+// Explicit cache-only evaluation; never invoked by the scan or execution path.
+app.get("/trader-advisory-status", requireSecret, (_req, res) => {
+  res.json({ version: traderAdvisory.VERSION, executionAllowed: false, providerCalls: 0,
+    report: lastTraderAdvisoryReport, selectionHistory: runtimeState.traderAdvisoryState,
+    exposureCacheAvailable: Boolean(cachedTraderExposure) });
+});
+app.post("/trader-advisory-evaluate", requireSecret, (req, res) => {
+  if (!req.body || typeof req.body !== "object" || Array.isArray(req.body) || Object.keys(req.body).length) return res.status(400).json({ error: "EMPTY_BODY_REQUIRED", executionAllowed: false });
+  try {
+    const overrides = JSON.parse(process.env.TRADER_ADVISORY_POLICY_JSON || "{}");
+    const log = runtimeState.lastDecision, decision = log?.riskController?.finalDecision || log?.decision;
+    const universe = buildUniverse(WATCHLIST, ASSET_RULES, CONFIGURED_UNIVERSE_CANDIDATES);
+    const row = universe.find(r => r.symbol === decision?.asset);
+    const ideas = row && ["BUY", "SELL"].includes(decision?.decision) ? [{ instrumentId: row.instrumentId,
+      side: decision.decision, amountUsd: decision.amount_usd, asOf: log.time,
+      ownAnalysisApproved: log?.riskController?.approved === true, hardVeto: log?.riskController?.approved === false, alreadyHandled: Boolean(log.execution),
+      referencePrice: null, positionId: null, exitExplicit: false }] : [];
+    // Cached decisions do not retain a verified entry reference price or exact SELL position:
+    // keep them unknown instead of using today's quote as historical evidence.
+    const quotes = {};
+    for (const item of universe) {
+      const q = runtimeState.lastMarketData?.normalized?.ratesByAsset?.[item.symbol];
+      if (q) quotes[item.instrumentId] = { instrumentId: item.instrumentId, mid: q.mid, asOf: q.date, currency: "USD" };
+    }
+    // Existing cost shadow events do not bind side, size and account context sufficiently.
+    // Do not import its autonomous preload or treat a known cost floor as a full estimate.
+    const result = traderAdvisory.evaluate({ state: runtimeState.traderAdvisoryState,
+      observerView: traderObserver.view(), observerState: runtimeState.traderObserver,
+      exposure: cachedTraderExposureIntents === JSON.stringify(runtimeState.orderIntents || {}) ? cachedTraderExposure : null,
+      ideas, quotes, costs: {}, eligibility: {}, overrides, now: Date.now() });
+    runtimeState.traderAdvisoryState = traderAdvisory.compactState(result.state);
+    lastTraderAdvisoryReport = { ...result.report, historyTruncated: runtimeState.traderAdvisoryState.historyTruncated,
+      runtimeEvidence: { costAdapter: "UNAVAILABLE_NO_BOUND_SIDE_SIZE_ACCOUNT_ESTIMATE",
+        decisionReferencePrice: "NOT_RETAINED", exactSellPosition: "NOT_RETAINED",
+        eligibilityCache: ideas.map(idea => {
+          const item = universe.find(r => r.instrumentId === idea.instrumentId);
+          return { instrumentId: idea.instrumentId, evidence: instrumentEligibilityRegistry.inspect({ instrumentId: idea.instrumentId,
+            symbol: item?.symbol, category: item?.category, allowedAssets: [...TRADE_ALLOWED_ASSETS], allowedCategories: [...TRADE_ALLOWED_CATEGORIES] }) };
+        }) } };
+    scheduleSave();
+    res.json(lastTraderAdvisoryReport);
+  } catch { res.status(400).json({ error: "ADVISORY_CONFIG_OR_STATE_UNAVAILABLE", executionAllowed: false }); }
+});
 app.get("/trader-exposure-proposals", requireSecret, (_req, res) => {
   res.json({ version: VERSION, readOnly: true, executionAttempted: false, proposals: runtimeState.exposureProposalTraces || [] });
 });
