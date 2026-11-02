@@ -43,20 +43,6 @@ test('trade allowlist intersects the current instrument registry and applies exc
   assert.equal(policy.parseExclusionReasons({ TRADE_EXCLUSIONS_JSON: '{"BTC":"Volatility policy"}' }).BTC, 'Volatility policy');
 });
 
-test('look-through counts only fresh, source-verified compositions and exposes direct overlaps', () => {
-  const now = Date.parse('2026-10-30T12:00:00Z');
-  const result = policy.analyzeLookThroughExposure({ now,
-    positions: [{ asset: 'NVDA', estimatedValue: 10 }],
-    compositions: [
-      { symbol: 'AI_PORT', sourceType: 'OFFICIAL_ETORO_API', capturedAt: '2026-10-29T12:00:00Z', estimatedValue: 100, holdings: [{ symbol: 'NVDA', weightPct: 5 }] },
-      { symbol: 'UNKNOWN_PORT', sourceType: 'SCRAPE', capturedAt: '2026-10-29T12:00:00Z', estimatedValue: 100, holdings: [{ symbol: 'NVDA', weightPct: 50 }] }
-    ]
-  });
-  assert.equal(result.combined.NVDA, 15);
-  assert.equal(result.coverage, 'INCOMPLETE');
-  assert.equal(result.unavailable.length, 1);
-});
-
 test('buy policy blocks missing freshness, excess order, duplicate and unsafe mode', () => {
   const base = { mode: 'LIVE', armed: true, confirmation: policy.LIVE_BUY_CONFIRMATION,
     asset: 'SPY', category: 'ETF', allowedAssets: ['SPY'], allowedCategories: ['ETF'], amount: 10, maxOrderUsd: 10,

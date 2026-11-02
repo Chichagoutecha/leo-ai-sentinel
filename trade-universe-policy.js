@@ -99,50 +99,9 @@ function parseExclusionReasons(env = {}) {
   } catch { return {}; }
 }
 
-function analyzeLookThroughExposure({ positions = [], compositions = [], now = Date.now(), maxAgeDays = 7 } = {}) {
-  const direct = {};
-  for (const position of Array.isArray(positions) ? positions : []) {
-    const symbol = String(position?.asset || position?.symbol || '').trim().toUpperCase();
-    const value = Number(position?.estimatedValue ?? position?.value ?? position?.amount);
-    if (symbol && Number.isFinite(value) && value >= 0) direct[symbol] = (direct[symbol] || 0) + value;
-  }
-  const indirect = {};
-  const usable = [];
-  const unavailable = [];
-  for (const composition of Array.isArray(compositions) ? compositions : []) {
-    const captured = Date.parse(composition?.capturedAt || '');
-    const ageDays = Number.isFinite(captured) ? (now - captured) / 86400000 : null;
-    if (composition?.sourceType !== 'OFFICIAL_ETORO_API' || !Array.isArray(composition?.holdings) ||
-        ageDays === null || ageDays < 0 || ageDays > maxAgeDays) {
-      unavailable.push({ portfolio: composition?.symbol || null, reason: 'SOURCE_OR_COMPOSITION_UNVERIFIED_OR_STALE' });
-      continue;
-    }
-    usable.push(composition.symbol || null);
-    const portfolioValue = Number(composition.estimatedValue ?? composition.value);
-    if (!Number.isFinite(portfolioValue) || portfolioValue < 0) {
-      unavailable.push({ portfolio: composition.symbol || null, reason: 'PORTFOLIO_VALUE_UNKNOWN' });
-      continue;
-    }
-    for (const holding of composition.holdings) {
-      const symbol = String(holding?.symbol || '').trim().toUpperCase();
-      const weight = Number(holding?.weightPct);
-      if (!symbol || !Number.isFinite(weight) || weight < 0 || weight > 100) continue;
-      indirect[symbol] = (indirect[symbol] || 0) + portfolioValue * weight / 100;
-    }
-  }
-  const symbols = [...new Set([...Object.keys(direct), ...Object.keys(indirect)])].sort();
-  if (!Array.isArray(compositions) || compositions.length === 0) {
-    unavailable.push({ portfolio: null, reason: 'LOOK_THROUGH_COMPOSITIONS_NOT_CONFIGURED' });
-  }
-  return {
-    direct,
-    indirect,
-    combined: Object.fromEntries(symbols.map((symbol) => [symbol, Math.round(((direct[symbol] || 0) + (indirect[symbol] || 0)) * 1e6) / 1e6])),
-    knownOfficialCompositions: usable,
-    unavailable,
-    coverage: unavailable.length ? 'INCOMPLETE' : 'COMPLETE',
-    caveat: unavailable.length ? 'Unknown or stale basket holdings are not counted as diversification.' : null
-  };
+// Pure read-only accounting; constituent acquisition is deliberately not implemented.
+function analyzeLookThroughExposure(options = {}) {
+  return require('./portfolio-exposure-view').analyzeExposure(options);
 }
 
 function evaluateBuyPolicy({ mode, armed = false, confirmation = '', demoArmed = false,
