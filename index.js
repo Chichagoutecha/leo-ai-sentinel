@@ -142,6 +142,9 @@ const { buildTraderExposureView, validateProposal: validateExposureProposal, pre
 const { createEligibilityClient, createEligibilityRegistry } = require('./etoro-instrument-eligibility');
 const { resolveTradingMode, liveBuyReady, demoBuyReady, liveBuyMaxOrderUsd, classifyAsset, buildUniverse, resolveTradeAllowlist, resolveAllowedCategories, parseExclusionReasons, analyzeLookThroughExposure, evaluateBuyPolicy } = require('./trade-universe-policy');
 const { buildPaperShadowScorecard } = require('./paper-shadow-accounting');
+const traderAdvisory = require('./trader-advisory-policy');
+const { virtualFill } = require('./paper-shadow-execution');
+const traderShadow = require('./trader-shadow-experiment');
 const { ENDPOINT: SEC_BLACKROCK_ENDPOINT, REFRESH_INTERVAL_MS: SEC_REFRESH_INTERVAL_MS,
   normalizeBlackRockFilings, institutionalWatchStatus } = require('./sec-institutional-watch');
 
@@ -1866,6 +1869,8 @@ const runtimeState = {
   secInstitutionalWatch: null,
   traderObserver: emptyTraderObserverState(),
   exposureProposalTraces: [],
+  traderAdvisoryState: traderAdvisory.initialState(),
+  traderShadowExperiment: traderShadow.emptyState(),
   trendMemory: {},
   equityHistory: [],
   performanceHistory: [],
@@ -2447,6 +2452,8 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
       lastMarketData: runtimeState.lastMarketData || null,
       secInstitutionalWatch: runtimeState.secInstitutionalWatch || null,
     traderObserver: compactObserverState(runtimeState.traderObserver),
+      traderAdvisoryState: traderAdvisory.compactState(runtimeState.traderAdvisoryState),
+      traderShadowExperiment: traderShadow.compact(runtimeState.traderShadowExperiment),
       exposureProposalTraces: (runtimeState.exposureProposalTraces || []).slice(-20)
     };
   }
@@ -2536,6 +2543,8 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
     lastMarketData: compactLastMarketDataForPersistence(runtimeState.lastMarketData),
     secInstitutionalWatch: runtimeState.secInstitutionalWatch || null,
     traderObserver: compactObserverState(runtimeState.traderObserver),
+      traderAdvisoryState: traderAdvisory.compactState(runtimeState.traderAdvisoryState),
+      traderShadowExperiment: traderShadow.compact(runtimeState.traderShadowExperiment),
       exposureProposalTraces: (runtimeState.exposureProposalTraces || []).slice(-20)
   };
 }
@@ -2690,6 +2699,8 @@ function fitPersistentStateToBudget(
       version: working.version,
       persistenceMode: "UPSTASH_CRITICAL_MINIMAL_V2",
       traderObserver: compactObserverState(working.traderObserver, 4000),
+      traderAdvisoryState: traderAdvisory.compactState(working.traderAdvisoryState, 4000),
+      traderShadowExperiment: traderShadow.compact(working.traderShadowExperiment, 6000),
       exposureProposalTraces: (working.exposureProposalTraces || []).slice(-5),
       automationGuards: working.automationGuards || {},
       cooldownMemory: working.cooldownMemory || {},
@@ -2926,6 +2937,8 @@ function applyPersistentState(state) {
   if (Array.isArray(state.improvementHistory)) runtimeState.improvementHistory = state.improvementHistory.slice(0, STRATEGY_CANDIDATE_HISTORY_LIMIT);
   if (state.lastImprovementRun && typeof state.lastImprovementRun === "object") runtimeState.lastImprovementRun = state.lastImprovementRun;
   if (state.lastMarketData) runtimeState.lastMarketData = state.lastMarketData;
+  if (state.traderShadowExperiment?.version === 1 && state.traderShadowExperiment.phases && Array.isArray(state.traderShadowExperiment.records)) runtimeState.traderShadowExperiment = traderShadow.compact(state.traderShadowExperiment);
+  if (state.traderAdvisoryState?.version === 1 && state.traderAdvisoryState.roster && Array.isArray(state.traderAdvisoryState.history)) runtimeState.traderAdvisoryState = traderAdvisory.compactState(state.traderAdvisoryState);
   if (state.secInstitutionalWatch && typeof state.secInstitutionalWatch === 'object') {
     runtimeState.secInstitutionalWatch = state.secInstitutionalWatch;
   }
@@ -8866,75 +8879,40 @@ function recordPaperCashFlow({ type, amount, idempotencyKey } = {}) {
     paper.snapshotHistoryComplete = false;
   }
   scheduleSave();
-  return { ok: true, duplicate: false, flow, executionAttempted: false };
+  let pairedExperimentFlow = { status: "NO_ACTIVE_SHADOW_EXPERIMENT" };
+  try {
+    const paired = traderShadow.applyFlow({ state: runtimeState.traderShadowExperiment, mode: "SHADOW", now: eventTime,
+      flow: { id: flow.id, type: flow.type, amount: flow.amount, currency: flow.currency },
+      quotes: runtimeState.lastMarketData?.normalized?.ratesByAsset || {} });
+    runtimeState.traderShadowExperiment = traderShadow.compact(paired.state);
+    pairedExperimentFlow = { status: paired.status };
+  } catch {
+    runtimeState.traderShadowExperiment.flowCoverageIncomplete = true;
+    for (const pair of Object.values(runtimeState.traderShadowExperiment.phases || {})) for (const arm of ["strategy", "baseline"]) pair[arm].cashFlowHistoryComplete = false;
+    pairedExperimentFlow = { status: "PAIRED_FLOW_UNAVAILABLE" };
+  }
+  return { ok: true, duplicate: false, flow, pairedExperimentFlow, executionAttempted: false };
 }
 
-function executePaperBuy(asset, amount, marketData) {
-  const paper = runtimeState.paperPortfolio;
-  const rate = getMarketRateForAsset(marketData, asset);
+function executePaperOrder(asset, side, amount, marketData) {
   const marketCheck = isMarketRateTradable(marketData, asset);
-  const expectedPrice = Number(rate?.ask ?? rate?.mid);
-  const price = paperExecutionPrice(rate, "BUY");
-  if (!paper || !Number.isFinite(price) || price <= 0) return { ok: false, skipped: true, reason: "Prix papier invalide", executionAttempted: false };
   if (!marketCheck.ok) return { ok: false, skipped: true, reason: `Simulation bloquée: ${marketCheck.reason}`, reasonCode: marketCheck.code, executionAttempted: false };
-  if (paper.positions[asset]) return { ok: false, skipped: true, reason: `Position papier déjà ouverte sur ${asset}` };
-  const notional = Math.max(0, Number(amount));
-  const fee = notional * PAPER_FEE_PCT / 100;
-  const totalCost = notional + fee;
-  if (paper.cash < totalCost) return { ok: false, skipped: true, reason: "Cash papier insuffisant" };
-  const units = notional / price;
-  const slippageCost = Number.isFinite(expectedPrice) ? Math.max(0, (price - expectedPrice) * units) : 0;
-  paper.cash -= totalCost;
-  paper.feesPaid += fee;
-  paper.slippageCost = Number(paper.slippageCost || 0) + slippageCost;
-  paper.positions[asset] = {
-    asset, units, averageEntryPrice: price, costBasis: totalCost,
-    grossNotional: notional, currentPrice: price, currentValue: notional, unrealizedPnl: -fee,
-    peakPrice: price, origin: "paper-order", openedAt: nowIso()
-  };
-  const order = { id: randomUUID(), time: nowIso(), type: "BUY", asset, amount: notional, expectedPrice, price, units, fee, slippageBps: PAPER_SLIPPAGE_BPS, slippageCost };
-  paper.orders.unshift(order); paper.orders = paper.orders.slice(0, PAPER_LEDGER_LIMIT);
-  addExecutionHistory({ type: "BUY", asset, amount: notional, price, mode: "PAPER", orderId: order.id });
-  addAudit("PAPER_BUY_EXECUTED", order);
-  scheduleSave();
-  return { ok: true, status: 200, simulated: true, mode: "PAPER", ...order };
-}
-
-function executePaperSell(asset, marketData) {
-  const paper = runtimeState.paperPortfolio;
-  const position = paper?.positions?.[asset];
-  const rate = getMarketRateForAsset(marketData, asset);
-  const marketCheck = isMarketRateTradable(marketData, asset);
-  const expectedPrice = Number(rate?.bid ?? rate?.mid);
-  const price = paperExecutionPrice(rate, "SELL");
-  if (!paper || !position) return { ok: false, skipped: true, reason: `Aucune position papier sur ${asset}` };
-  if (!Number.isFinite(price) || price <= 0) return { ok: false, skipped: true, reason: "Prix papier invalide" };
-  if (!marketCheck.ok) return { ok: false, skipped: true, reason: `Simulation bloquée: ${marketCheck.reason}`, reasonCode: marketCheck.code, executionAttempted: false };
-  const proceedsBeforeFee = position.units * price;
-  const fee = proceedsBeforeFee * PAPER_FEE_PCT / 100;
-  const proceeds = proceedsBeforeFee - fee;
-  const pnl = proceeds - position.costBasis;
-  const slippageCost = Number.isFinite(expectedPrice) ? Math.max(0, (expectedPrice - price) * position.units) : 0;
-  paper.cash += proceeds;
-  paper.realizedPnl += pnl;
-  paper.feesPaid += fee;
-  paper.slippageCost = Number(paper.slippageCost || 0) + slippageCost;
-  delete paper.positions[asset];
-  const order = { id: randomUUID(), time: nowIso(), type: "SELL", asset, proceeds, expectedPrice, price, units: position.units, fee, pnl, slippageBps: PAPER_SLIPPAGE_BPS, slippageCost };
-  paper.orders.unshift(order); paper.orders = paper.orders.slice(0, PAPER_LEDGER_LIMIT);
-  paper.closedTrades = paper.closedTrades || [];
-  paper.closedTrades.unshift({
-    id: order.id, asset, openedAt: position.openedAt, closedAt: order.time,
-    entryPrice: position.averageEntryPrice, exitPrice: price, costBasis: position.costBasis,
-    proceeds, pnl, returnPct: position.costBasis > 0 ? pnl / position.costBasis * 100 : null,
-    totalFees: fee, slippageCost
+  const filled = virtualFill(runtimeState.paperPortfolio, { asset, side, amount }, getMarketRateForAsset(marketData, asset), {
+    now: Date.now(), orderId: randomUUID(), feePct: PAPER_FEE_PCT, slippageBps: PAPER_SLIPPAGE_BPS, tradable: marketCheck.ok
   });
-  paper.closedTrades = paper.closedTrades.slice(0, PAPER_LEDGER_LIMIT);
-  addExecutionHistory({ type: "SELL", asset, amount: proceeds, price, mode: "PAPER", orderId: order.id });
-  addAudit("PAPER_SELL_EXECUTED", order);
-  scheduleSave();
-  return { ok: true, status: 200, simulated: true, mode: "PAPER", ...order };
+  if (filled.result.ok) {
+    runtimeState.paperPortfolio = filled.paper;
+    filled.paper.orders = filled.paper.orders.slice(0, PAPER_LEDGER_LIMIT);
+    filled.paper.closedTrades = filled.paper.closedTrades.slice(0, PAPER_LEDGER_LIMIT);
+    const order = filled.result;
+    addExecutionHistory({ type: side, asset, amount: amount ?? order.proceeds, price: order.price, mode: "PAPER", orderId: order.id });
+    addAudit(side === "BUY" ? "PAPER_BUY_EXECUTED" : "PAPER_SELL_EXECUTED", order);
+    scheduleSave();
+  }
+  return filled.result;
 }
+function executePaperBuy(asset, amount, marketData) { return executePaperOrder(asset, "BUY", amount, marketData); }
+function executePaperSell(asset, marketData) { return executePaperOrder(asset, "SELL", null, marketData); }
 
 function dailyLastSnapshots(snapshots) {
   const byDay = new Map();
@@ -14644,6 +14622,58 @@ function buildDecisionDiagnostics(context, decisionRaw, control) {
   };
 }
 
+function recordTraderShadowScan(context, decisionRaw, control, aiDecisionCost, cycleId, cutoff = Date.now()) {
+  if (!PAPER_TRADING_ENABLED) return { status: "SHADOW_REQUIRED", brokerCalls: 0 };
+  try {
+    const universe = buildUniverse(WATCHLIST, ASSET_RULES, CONFIGURED_UNIVERSE_CANDIDATES);
+    const observerView = traderObserver.view();
+    const exposure = buildTraderExposureView({ portfolioResponse: context.realPortfolio, observerView,
+      intents: Object.values(runtimeState.orderIntents || {}), universe, now: cutoff });
+    const item = universe.find(r => r.symbol === decisionRaw?.asset);
+    const cached = instrumentEligibilityRegistry.inspect({ instrumentId: item?.instrumentId, symbol: item?.symbol,
+      category: item?.category, allowedAssets: [...TRADE_ALLOWED_ASSETS], allowedCategories: [...TRADE_ALLOWED_CATEGORIES] });
+    // Configuration is not a verified same-account, side/size/product permission.
+    const eligibility = item ? { [item.instrumentId]: { instrumentId: item.instrumentId, side: decisionRaw.decision,
+      asOf: cached.fetchedAt, technicalStatus: cached.technicalEligibility, leoPolicyAllowed: cached.leoAuthorization === "AUTHORIZED_BY_CALLER_POLICY",
+      technicalEligible: null, currency: cached.currency, contextBinding: "UNVERIFIED", minimumUsd: null, maximumUsd: null } } : {};
+    const result = traderShadow.runCycle({ state: runtimeState.traderShadowExperiment, now: cutoff, cycleId, mode: "SHADOW",
+      rawDecision: decisionRaw, control, universe, template: { ...runtimeState.paperPortfolio,
+        seedCoverage: { ...runtimeState.paperPortfolio?.seedCoverage, complete: runtimeState.paperPortfolio?.seedCoverage?.complete === true &&
+          (!runtimeState.paperPortfolio?.seedFromReal || exposure.owned.coverage === "COMPLETE" && exposure.owned.unreconstructedRisk.length === 0) } },
+      observerView, observerState: runtimeState.traderObserver, advisorySeed: runtimeState.traderAdvisoryState, quotes: context.marketSummary?.ratesByAsset || {},
+      eligibility, costs: item ? { [item.instrumentId]: { instrumentId: item.instrumentId, side: decisionRaw.decision,
+        amountUsd: control.finalDecision?.amount_usd ?? null, asOf: null, currency: "USD", coverage: "UNAVAILABLE_NOT_BOUND",
+        allInCostPct: null, contextBinding: "UNVERIFIED", estimatedFeePct: PAPER_FEE_PCT, estimatedSlippageBps: PAPER_SLIPPAGE_BPS } } : {}, constraintsEvidence: null,
+      realExposure: { coverage: exposure.owned.coverage, fetchedAt: context.realPortfolio?.fetchedAt,
+        pendingStatus: exposure.pending.status, knownUnreconstructedRiskCount: exposure.owned.unreconstructedRisk.length,
+        knownUnresolvedPositionRowsCount: exposure.owned.unknownPositions.length },
+      pendingComplete: exposure.pending.status === "COMPLETE_KNOWN_BUY_UPPER_BOUND" && exposure.pending.orders.length === 0,
+      extraAiCostUsd: typeof aiDecisionCost?.totalCostUsd === "number" ? aiDecisionCost.totalCostUsd : null,
+      advisoryOverrides: JSON.parse(process.env.TRADER_ADVISORY_POLICY_JSON || "{}"),
+      experimentOverrides: JSON.parse(process.env.TRADER_SHADOW_PROTOCOL_JSON || "{}"),
+      assumptions: { feePct: PAPER_FEE_PCT, slippageBps: PAPER_SLIPPAGE_BPS, benchmarkAsset: PAPER_BENCHMARK_ASSET, benchmarkCurrency: PAPER_BENCHMARK_CURRENCY } });
+    runtimeState.traderShadowExperiment = traderShadow.compact(result.state);
+    scheduleSave();
+    return { status: result.status, phase: result.phase || null, recordId: result.recordId || null, executionAllowed: false, brokerCalls: 0 };
+  } catch {
+    runtimeState.traderShadowExperiment.failedCycles = Number(runtimeState.traderShadowExperiment.failedCycles || 0) + 1;
+    scheduleSave();
+    return { status: "SHADOW_EXPERIMENT_INPUT_UNAVAILABLE", executionAllowed: false, brokerCalls: 0 };
+  }
+}
+async function executeControlledDecision(control, marketData) {
+  if (!control?.approved) return { skipped: true, executionAttempted: false, reason: "RISK_VETO" };
+  const d = control.finalDecision;
+  // SHADOW never dispatches into a broker-capable executor, including SELL.
+  if (PAPER_TRADING_ENABLED) {
+    if (d.decision === "BUY") return executePaperBuy(d.asset, d.amount_usd, marketData);
+    if (d.decision === "SELL") return executePaperSell(d.asset, marketData);
+    return { skipped: true, executionAttempted: false, reason: "HOLD" };
+  }
+  if (d.decision === "BUY") return executeBuy(d.asset, d.amount_usd, marketData);
+  if (d.decision === "SELL") return executeSell(d.asset, marketData);
+  return { skipped: true, executionAttempted: false, reason: "HOLD" };
+}
 async function scanMarket(source = "manual-scan") {
   if (TRADING_MODE === "OBSERVE") return {
     version: VERSION, source, trading_mode: "OFF", skipped: true,
@@ -14792,6 +14822,8 @@ async function scanMarket(source = "manual-scan") {
     }
 
     const control = riskController(decisionRaw, context.decisionPortfolio, context.marketData, context.trendSummary, context.foundationAgents);
+    const traderShadowMeasurement = PAPER_TRADING_ENABLED
+      ? recordTraderShadowScan(context, decisionRaw, control, aiDecisionCost, randomUUID()) : null;
     const marketEvidence = decisionMarketEvidence(String(control.finalDecision.asset || 'NONE').toUpperCase(),
       context.marketSummary, context.dataIntegrityAgent, Date.now(), MAX_RATE_AGE_MINUTES);
     let execution = { skipped: true, mode: TRADING_MODE, reason: "Aucun ordre exécuté" };
@@ -14809,9 +14841,9 @@ async function scanMarket(source = "manual-scan") {
         }, operation)
       : operation();
     if (control.approved && control.finalDecision.decision === "BUY") {
-      execution = await observeDecision(() => executeBuy(control.finalDecision.asset, control.finalDecision.amount_usd, context.marketData));
+      execution = await observeDecision(() => executeControlledDecision(control, context.marketData));
     } else if (control.approved && control.finalDecision.decision === "SELL") {
-      execution = await observeDecision(() => executeSell(control.finalDecision.asset, context.marketData));
+      execution = await observeDecision(() => executeControlledDecision(control, context.marketData));
     }
 
     if (PAPER_TRADING_ENABLED) {
@@ -14838,6 +14870,7 @@ async function scanMarket(source = "manual-scan") {
       macroCreditRegimeAgent: context.macroCreditRegimeAgent,
       riskSellIntelligenceAgent: context.riskSellIntelligenceAgent,
       portfolioSummary: context.portfolioSummary,
+      traderShadowMeasurement,
       decisionAgentRaw: decisionRaw,
       riskController: control,
       decision: control.finalDecision,
@@ -14848,7 +14881,7 @@ async function scanMarket(source = "manual-scan") {
     };
     addLog({
       source, event: "SCAN_COMPLETED", tradingMode: TRADING_MODE,
-      decision: control.finalDecision, decision_raw: decisionRaw,
+      decision: control.finalDecision, decision_raw: decisionRaw, traderShadowMeasurement,
       decisionDiagnostics,
       marketEvidence,
       risk_reason: control.reason, execution,
@@ -19661,11 +19694,66 @@ app.get("/instrument-eligibility-status", requireSecret, (_req, res) => {
         category: item.category, allowedAssets: [...TRADE_ALLOWED_ASSETS], allowedCategories: [...TRADE_ALLOWED_CATEGORIES] }) })) });
 });
 
+let cachedTraderExposure = null;
+let cachedTraderExposureIntents = null;
+let lastTraderAdvisoryReport = null;
 function currentTraderExposureView(portfolio) {
-  return buildTraderExposureView({ portfolioResponse: portfolio, observerView: traderObserver.view(),
+  cachedTraderExposure = buildTraderExposureView({ portfolioResponse: portfolio, observerView: traderObserver.view(),
     intents: Object.values(runtimeState.orderIntents || {}), proposals: runtimeState.exposureProposalTraces || [],
     universe: buildUniverse(WATCHLIST, ASSET_RULES, CONFIGURED_UNIVERSE_CANDIDATES) });
+  cachedTraderExposureIntents = JSON.stringify(runtimeState.orderIntents || {});
+  return cachedTraderExposure;
 }
+// Explicit cache-only evaluation; never invoked by the scan or execution path.
+app.get("/trader-shadow-status", requireSecret, (_req, res) => {
+  res.json(traderShadow.report(runtimeState.traderShadowExperiment));
+});
+app.get("/trader-shadow-decisions", requireSecret, (_req, res) => {
+  res.json({ virtualOnly: true, executionAllowed: false, historyTruncated: runtimeState.traderShadowExperiment.historyTruncated,
+    records: runtimeState.traderShadowExperiment.records });
+});
+app.get("/trader-advisory-status", requireSecret, (_req, res) => {
+  res.json({ version: traderAdvisory.VERSION, executionAllowed: false, providerCalls: 0,
+    report: lastTraderAdvisoryReport, selectionHistory: runtimeState.traderAdvisoryState,
+    exposureCacheAvailable: Boolean(cachedTraderExposure) });
+});
+app.post("/trader-advisory-evaluate", requireSecret, (req, res) => {
+  if (!req.body || typeof req.body !== "object" || Array.isArray(req.body) || Object.keys(req.body).length) return res.status(400).json({ error: "EMPTY_BODY_REQUIRED", executionAllowed: false });
+  try {
+    const overrides = JSON.parse(process.env.TRADER_ADVISORY_POLICY_JSON || "{}");
+    const log = runtimeState.lastDecision, decision = log?.riskController?.finalDecision || log?.decision;
+    const universe = buildUniverse(WATCHLIST, ASSET_RULES, CONFIGURED_UNIVERSE_CANDIDATES);
+    const row = universe.find(r => r.symbol === decision?.asset);
+    const ideas = row && ["BUY", "SELL"].includes(decision?.decision) ? [{ instrumentId: row.instrumentId,
+      side: decision.decision, amountUsd: decision.amount_usd, asOf: log.time,
+      ownAnalysisApproved: log?.riskController?.approved === true, hardVeto: log?.riskController?.approved === false, alreadyHandled: Boolean(log.execution),
+      referencePrice: null, positionId: null, exitExplicit: false }] : [];
+    // Cached decisions do not retain a verified entry reference price or exact SELL position:
+    // keep them unknown instead of using today's quote as historical evidence.
+    const quotes = {};
+    for (const item of universe) {
+      const q = runtimeState.lastMarketData?.normalized?.ratesByAsset?.[item.symbol];
+      if (q) quotes[item.instrumentId] = { instrumentId: item.instrumentId, mid: q.mid, asOf: q.date, currency: "USD" };
+    }
+    // Existing cost shadow events do not bind side, size and account context sufficiently.
+    // Do not import its autonomous preload or treat a known cost floor as a full estimate.
+    const result = traderAdvisory.evaluate({ state: runtimeState.traderAdvisoryState,
+      observerView: traderObserver.view(), observerState: runtimeState.traderObserver,
+      exposure: cachedTraderExposureIntents === JSON.stringify(runtimeState.orderIntents || {}) ? cachedTraderExposure : null,
+      ideas, quotes, costs: {}, eligibility: {}, overrides, now: Date.now() });
+    runtimeState.traderAdvisoryState = traderAdvisory.compactState(result.state);
+    lastTraderAdvisoryReport = { ...result.report, historyTruncated: runtimeState.traderAdvisoryState.historyTruncated,
+      runtimeEvidence: { costAdapter: "UNAVAILABLE_NO_BOUND_SIDE_SIZE_ACCOUNT_ESTIMATE",
+        decisionReferencePrice: "NOT_RETAINED", exactSellPosition: "NOT_RETAINED",
+        eligibilityCache: ideas.map(idea => {
+          const item = universe.find(r => r.instrumentId === idea.instrumentId);
+          return { instrumentId: idea.instrumentId, evidence: instrumentEligibilityRegistry.inspect({ instrumentId: idea.instrumentId,
+            symbol: item?.symbol, category: item?.category, allowedAssets: [...TRADE_ALLOWED_ASSETS], allowedCategories: [...TRADE_ALLOWED_CATEGORIES] }) };
+        }) } };
+    scheduleSave();
+    res.json(lastTraderAdvisoryReport);
+  } catch { res.status(400).json({ error: "ADVISORY_CONFIG_OR_STATE_UNAVAILABLE", executionAllowed: false }); }
+});
 app.get("/trader-exposure-proposals", requireSecret, (_req, res) => {
   res.json({ version: VERSION, readOnly: true, executionAttempted: false, proposals: runtimeState.exposureProposalTraces || [] });
 });
@@ -20635,6 +20723,8 @@ module.exports = {
   executePaperSell,
   executeBuy,
   recordPaperDecision,
+  recordTraderShadowScan,
+  executeControlledDecision,
   recordPaperCashFlow,
   ensurePaperPortfolio,
   markPaperPortfolio,
