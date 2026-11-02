@@ -3,7 +3,7 @@
 ## Version examinée et intégration
 
 Base examinée : `main` au commit `d247ce5b72c0eee7832494146bda6e202d51c3a1`.
-Les PR #72 (expositions), #74 (éligibilité) et #75 (observateur) étaient ouvertes, non fusionnées. Cette branche réunit leurs travaux pour rendre la liaison testable ; elle ne les déclare pas fusionnées sur main. La PR #71 SHADOW n'est pas intégrée par cette modification.
+Les PR #72 (expositions), #74 (éligibilité) et #75 (observateur) étaient ouvertes, non fusionnées lors de la création de cette branche. À la demande de fusion, les travaux #71 SHADOW et #73 diagnostic de lecture ont également été intégrés. La résolution conserve tous les scripts de test et les catégories distinctes ; aucun statut de fusion sur main n'est supposé par le calculateur.
 
 ## Sources et périmètre
 
