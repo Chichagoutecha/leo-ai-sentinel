@@ -1,0 +1,495 @@
+{
+  "schemaVersion": 1,
+  "kind": "OFFLINE_SYNTHETIC_REHEARSAL",
+  "fixtureTime": "2026-11-02T12:00:00.000Z",
+  "conclusion": "BLOCKED",
+  "realNetworkCalls": 0,
+  "realBrokerAccess": "NOT_TESTED",
+  "realProductionShadowResults": "UNAVAILABLE",
+  "tokenBinding": "TOKEN_BINDING_UNVERIFIED",
+  "scenarios": [
+    {
+      "name": "missing_credentials",
+      "status": "PASS_MOCK",
+      "statusObserved": "NOT_TESTED",
+      "authenticatedRequests": 0
+    },
+    {
+      "name": "official_read_adapter_mock",
+      "status": "PASS_MOCK",
+      "simulatedReads": 5,
+      "portfolioCoverage": "PARTIAL",
+      "transactionHistory": "UNAVAILABLE",
+      "dashboardExtraReads": 0
+    },
+    {
+      "name": "observer_exposure_policy_shadow",
+      "status": "PASS_MOCK",
+      "decision": "BUY",
+      "virtualOnly": true,
+      "executionAttempted": false,
+      "qualification": "RELAXED_SYNTHETIC_DESIGN_ONLY"
+    },
+    {
+      "name": "normal_executor_adapter_mock_round_trip",
+      "status": "PASS_MOCK",
+      "simulatedAdapterCalls": 3,
+      "sides": [
+        "BUY",
+        "BUY",
+        "SELL"
+      ],
+      "durableReservations": true,
+      "entriesDisabledBeforeExit": true,
+      "limitation": "Bridge evidence and normal executor are simulated separately; this is not a production activation or a full start-preload integration proof."
+    },
+    {
+      "name": "lost_quote",
+      "status": "PASS_MOCK",
+      "decision": "HOLD",
+      "earlierDecisionsUnchanged": true
+    },
+    {
+      "name": "unknown_costs",
+      "status": "PASS_MOCK",
+      "decision": "HOLD",
+      "earlierDecisionsUnchanged": true
+    },
+    {
+      "name": "late_signal",
+      "status": "PASS_MOCK",
+      "decision": "HOLD",
+      "earlierDecisionsUnchanged": true
+    },
+    {
+      "name": "opposing_source",
+      "status": "PASS_MOCK",
+      "decision": "HOLD",
+      "earlierDecisionsUnchanged": true
+    },
+    {
+      "name": "trader_becomes_private_simulated_403",
+      "status": "PASS_MOCK",
+      "decision": "HOLD",
+      "privacyProven": false,
+      "reason": "FORBIDDEN_PRIVACY_UNPROVEN",
+      "automaticLiquidation": false
+    },
+    {
+      "name": "price_drift",
+      "status": "PASS_MOCK",
+      "decision": "VETOED",
+      "simulatedAdapterCalls": 0
+    },
+    {
+      "name": "stale_quote",
+      "status": "PASS_MOCK",
+      "decision": "VETOED",
+      "simulatedAdapterCalls": 0
+    },
+    {
+      "name": "lost_identity",
+      "status": "PASS_MOCK",
+      "decision": "VETOED",
+      "simulatedAdapterCalls": 0
+    },
+    {
+      "name": "unknown_pending",
+      "status": "PASS_MOCK",
+      "decision": "VETOED",
+      "simulatedAdapterCalls": 0
+    },
+    {
+      "name": "broker_rejected_restart",
+      "status": "PASS_MOCK",
+      "decision": "REJECTED",
+      "automaticResendsAfterRestart": 0
+    },
+    {
+      "name": "broker_network_restart",
+      "status": "PASS_MOCK",
+      "decision": "NEEDS_RECONCILIATION",
+      "automaticResendsAfterRestart": 0
+    },
+    {
+      "name": "broker_ack_restart",
+      "status": "PASS_MOCK",
+      "decision": "NEEDS_RECONCILIATION",
+      "automaticResendsAfterRestart": 0
+    },
+    {
+      "name": "broker_ambiguous_restart",
+      "status": "PASS_MOCK",
+      "decision": "NEEDS_RECONCILIATION",
+      "automaticResendsAfterRestart": 0
+    },
+    {
+      "name": "partial_buy_without_order_finality",
+      "status": "BLOCKER_REPRODUCED",
+      "requestedUsd": 10,
+      "observedUnits": 0.4,
+      "quoteUsd": 10,
+      "statusObserved": "CONFIRMED",
+      "required": "Track partial quantity and broker order terminal state; reserve remaining commitment; prohibit new sends while unresolved."
+    },
+    {
+      "name": "partial_reduction",
+      "status": "PASS_MOCK",
+      "decision": "VETOED",
+      "replacementFullSale": false
+    },
+    {
+      "name": "full_exit_over_cap",
+      "status": "BLOCKER_REPRODUCED",
+      "decision": "VETOED",
+      "requiresApprovedExitPolicy": true
+    },
+    {
+      "name": "bridge_stop",
+      "status": "PASS_MOCK",
+      "simulatedAdapterCalls": 0,
+      "scope": "TRADER_BRIDGE_ONLY",
+      "stopsOtherOrderPaths": "NOT_PROVEN"
+    }
+  ],
+  "designSimulation": {
+    "retainedDecisions": 2,
+    "phase": "DESIGN",
+    "durationSeconds": 120,
+    "virtualOnly": true,
+    "evaluationSampleSufficient": false,
+    "report": {
+      "version": "trader-shadow-v1",
+      "virtualOnly": true,
+      "executionAllowed": false,
+      "protocol": {
+        "version": "trader-shadow-v1",
+        "registeredAt": "2026-11-02T12:00:00.000Z",
+        "designUntil": "2026-11-03T12:00:00.000Z",
+        "evaluationUntil": "2026-11-13T12:00:00.000Z",
+        "spec": {
+          "experiment": {
+            "designDays": 1,
+            "evaluationDays": 10,
+            "minimumEvaluationDays": 3,
+            "minimumDecisions": 2,
+            "minimumFullClosures": 1,
+            "maxRecords": 120
+          },
+          "advisory": {
+            "version": "trader-context-v1",
+            "minHistoryMonths": 12,
+            "observationMaxAgeMs": 1800000,
+            "decisionMaxAgeMs": 1800000,
+            "quoteMaxAgeMs": 300000,
+            "qualifyingObservations": 1,
+            "probationDays": 0.001,
+            "suspensionExitDays": 30,
+            "reentryDays": 14,
+            "maxDecisionPriceDriftPct": 2,
+            "maxCostPct": 1,
+            "maxOrderUsd": 10,
+            "maxInstrumentWeightPct": 15,
+            "minCashReservePct": 20,
+            "reductionFraction": 0.25,
+            "maxHistory": 120
+          },
+          "assumptions": {
+            "feePct": 0.1,
+            "slippageBps": 1,
+            "benchmarkAsset": "SPY",
+            "benchmarkCurrency": "USD"
+          }
+        },
+        "specId": "38a9a9e9df9dbf3713e2d24ecfba894f72e9cde2dd51b07dd3d5441921804548",
+        "criteria": [
+          "PAIRED_FLOW_ADJUSTED_RETURN_DIFFERENCE",
+          "DRAWDOWN",
+          "VOLATILITY",
+          "TURNOVER_AND_COSTS",
+          "COVERAGE",
+          "MINIMUM_DECISIONS_AND_FULL_CLOSURES"
+        ],
+        "statisticalClaim": "DESCRIPTIVE_ONLY_NO_SIGNIFICANCE_OR_FUTURE_PERFORMANCE_CLAIM"
+      },
+      "phases": {
+        "DESIGN": {
+          "startAt": "2026-11-02T12:00:00.000Z",
+          "lastAt": "2026-11-02T12:02:00.000Z",
+          "durationDays": 0.001388888888888889,
+          "decisions": 2,
+          "differingDecisions": 1,
+          "completeCommonDecisionCount": 2,
+          "fullClosures": {
+            "strategy": 0,
+            "baseline": 0
+          },
+          "reductions": {
+            "strategy": 0,
+            "baseline": 0
+          },
+          "strategy": {
+            "status": "INCOMPLETE_COVERAGE",
+            "virtualOnly": true,
+            "notRealReturns": true,
+            "currency": "USD",
+            "period": {
+              "from": "2026-11-02T12:00:00.000Z",
+              "to": "2026-11-02T12:02:00.000Z",
+              "snapshotsInRetainedWindow": 1,
+              "retainedSnapshotWindowFrom": "2026-11-02T12:02:00.000Z",
+              "snapshotHistoryComplete": true
+            },
+            "return": {
+              "rawTotalReturnPct": null,
+              "flowAdjusted": {
+                "status": "APPROXIMATE",
+                "method": "MODIFIED_DIETZ",
+                "returnPct": -0.001,
+                "startTime": "2026-11-02T12:00:00.000Z",
+                "endTime": "2026-11-02T12:02:00.000Z",
+                "startEquity": 1100,
+                "endEquity": 1099.989,
+                "netExternalFlows": 0,
+                "flowCount": 0,
+                "note": "Approximation ajustée des flux; elle ne prouve pas une performance future."
+              },
+              "benchmark": {
+                "asset": "SPY",
+                "returnPct": 0,
+                "returnType": "PRICE_RETURN_ONLY",
+                "currency": "USD",
+                "currencySource": "FROZEN_PROTOCOL",
+                "windowMatchesPortfolio": true,
+                "priceStatus": "FRESH",
+                "status": "AVAILABLE"
+              }
+            },
+            "risk": {
+              "status": "UNAVAILABLE",
+              "method": null,
+              "maxDrawdownPct": null,
+              "annualizedVolatilityPct": null,
+              "observations": 1,
+              "reason": "INSUFFICIENT_DAILY_OBSERVATIONS",
+              "legacyUnadjusted": {
+                "maxDrawdownPct": null,
+                "annualizedVolatilityPct": null,
+                "sharpe": null,
+                "sortino": null,
+                "label": "NON_AJUSTE_DES_FLUX_HISTORIQUES"
+              }
+            },
+            "activity": {
+              "cashFlows": {
+                "deposits": 0,
+                "withdrawals": 0,
+                "depositCount": 0,
+                "withdrawalCount": 0,
+                "currency": "USD",
+                "status": "RECORDED_LEDGER"
+              },
+              "ordersInRetainedWindow": 1,
+              "turnoverNotional": 10,
+              "turnoverPctOfAverageEquity": 0.9091,
+              "decisionsInRetainedWindow": 2,
+              "vetoedDecisions": 1
+            },
+            "costs": {
+              "simulated": {
+                "estimatedFees": 0.01,
+                "estimatedSlippage": 0.000999900009998446,
+                "feeRatePctAssumption": 0.1,
+                "slippageBpsPerSideAssumption": 1,
+                "basis": "CONFIGURED_SIMULATION_ASSUMPTIONS"
+              },
+              "observedBrokerFees": null,
+              "estimatedCosts": {
+                "fees": 0.01,
+                "slippage": 0.000999900009998446,
+                "basis": "CONFIGURED_SIMULATION_ASSUMPTIONS"
+              },
+              "measuredBrokerCosts": null,
+              "unknown": [
+                "BROKER_FEES_NOT_OBSERVED_IN_SHADOW",
+                "FX_COSTS",
+                "TAXES",
+                "MARKET_IMPACT",
+                "INFRASTRUCTURE_AND_PROVIDER_COSTS"
+              ]
+            },
+            "dataCoverage": {
+              "completeValuations": 1,
+              "incompleteValuations": 0,
+              "missingPriceAssets": [],
+              "stalePriceAssets": [],
+              "marketClosedAssets": [],
+              "cashFlowHistoryComplete": true,
+              "snapshotHistoryComplete": true,
+              "seedCoverageComplete": true,
+              "benchmarkCurrencyMatches": true,
+              "status": "INCOMPLETE"
+            },
+            "limitations": [
+              "Simulation hypothétique; exécutions, frais et glissement peuvent différer du marché réel.",
+              "Le benchmark utilise ici un rendement de prix, sans dividendes, sauf source documentée différente.",
+              "Les coûts externes non observés restent inconnus; aucun indicateur ne prédit les rendements futurs."
+            ]
+          },
+          "baseline": {
+            "status": "INCOMPLETE_COVERAGE",
+            "virtualOnly": true,
+            "notRealReturns": true,
+            "currency": "USD",
+            "period": {
+              "from": "2026-11-02T12:00:00.000Z",
+              "to": "2026-11-02T12:02:00.000Z",
+              "snapshotsInRetainedWindow": 1,
+              "retainedSnapshotWindowFrom": "2026-11-02T12:02:00.000Z",
+              "snapshotHistoryComplete": true
+            },
+            "return": {
+              "rawTotalReturnPct": null,
+              "flowAdjusted": {
+                "status": "APPROXIMATE",
+                "method": "MODIFIED_DIETZ",
+                "returnPct": -0.002,
+                "startTime": "2026-11-02T12:00:00.000Z",
+                "endTime": "2026-11-02T12:02:00.000Z",
+                "startEquity": 1100,
+                "endEquity": 1099.978,
+                "netExternalFlows": 0,
+                "flowCount": 0,
+                "note": "Approximation ajustée des flux; elle ne prouve pas une performance future."
+              },
+              "benchmark": {
+                "asset": "SPY",
+                "returnPct": 0,
+                "returnType": "PRICE_RETURN_ONLY",
+                "currency": "USD",
+                "currencySource": "FROZEN_PROTOCOL",
+                "windowMatchesPortfolio": true,
+                "priceStatus": "FRESH",
+                "status": "AVAILABLE"
+              }
+            },
+            "risk": {
+              "status": "UNAVAILABLE",
+              "method": null,
+              "maxDrawdownPct": null,
+              "annualizedVolatilityPct": null,
+              "observations": 1,
+              "reason": "INSUFFICIENT_DAILY_OBSERVATIONS",
+              "legacyUnadjusted": {
+                "maxDrawdownPct": null,
+                "annualizedVolatilityPct": null,
+                "sharpe": null,
+                "sortino": null,
+                "label": "NON_AJUSTE_DES_FLUX_HISTORIQUES"
+              }
+            },
+            "activity": {
+              "cashFlows": {
+                "deposits": 0,
+                "withdrawals": 0,
+                "depositCount": 0,
+                "withdrawalCount": 0,
+                "currency": "USD",
+                "status": "RECORDED_LEDGER"
+              },
+              "ordersInRetainedWindow": 2,
+              "turnoverNotional": 20,
+              "turnoverPctOfAverageEquity": 1.818218,
+              "decisionsInRetainedWindow": 2,
+              "vetoedDecisions": 0
+            },
+            "costs": {
+              "simulated": {
+                "estimatedFees": 0.02,
+                "estimatedSlippage": 0.001999800019996892,
+                "feeRatePctAssumption": 0.1,
+                "slippageBpsPerSideAssumption": 1,
+                "basis": "CONFIGURED_SIMULATION_ASSUMPTIONS"
+              },
+              "observedBrokerFees": null,
+              "estimatedCosts": {
+                "fees": 0.02,
+                "slippage": 0.001999800019996892,
+                "basis": "CONFIGURED_SIMULATION_ASSUMPTIONS"
+              },
+              "measuredBrokerCosts": null,
+              "unknown": [
+                "BROKER_FEES_NOT_OBSERVED_IN_SHADOW",
+                "FX_COSTS",
+                "TAXES",
+                "MARKET_IMPACT",
+                "INFRASTRUCTURE_AND_PROVIDER_COSTS"
+              ]
+            },
+            "dataCoverage": {
+              "completeValuations": 1,
+              "incompleteValuations": 0,
+              "missingPriceAssets": [],
+              "stalePriceAssets": [],
+              "marketClosedAssets": [],
+              "cashFlowHistoryComplete": true,
+              "snapshotHistoryComplete": true,
+              "seedCoverageComplete": true,
+              "benchmarkCurrencyMatches": true,
+              "status": "INCOMPLETE"
+            },
+            "limitations": [
+              "Simulation hypothétique; exécutions, frais et glissement peuvent différer du marché réel.",
+              "Le benchmark utilise ici un rendement de prix, sans dividendes, sauf source documentée différente.",
+              "Les coûts externes non observés restent inconnus; aucun indicateur ne prédit les rendements futurs."
+            ]
+          },
+          "comparison": {
+            "status": "UNAVAILABLE_RELIABLE_COMPARISON",
+            "reasons": [
+              "DESIGN_PERIOD_NOT_OUT_OF_SAMPLE",
+              "INSUFFICIENT_FULL_CLOSURES",
+              "VALUATION_FLOW_OR_SAMPLE_COVERAGE_INCOMPLETE"
+            ],
+            "flowAdjustedDifferencePct": null,
+            "basis": "PAIRED_SHARED_LEO_IDEAS_NOT_INDEPENDENT_AI_FEEDBACK_OR_CAUSAL_ALPHA",
+            "significance": "NOT_ESTIMATED"
+          }
+        }
+      },
+      "retainedRecords": 2,
+      "historyTruncated": false,
+      "disabledReason": null,
+      "failedCycles": 0,
+      "invalidProtocolAttempts": 0,
+      "additionalCalls": {
+        "provider": 0,
+        "ai": 0,
+        "brokerExecution": 0
+      },
+      "additionalProviderCostUsd": 0,
+      "additionalAiCostUsd": 0,
+      "additionalInfrastructureCostUsd": null,
+      "upstreamObserverCallsAndCost": {
+        "knownReadResponses": 10,
+        "coverage": "PARTIAL_CURRENT_SUMMARIES_ONLY",
+        "causalAdditionalCalls": null,
+        "costUsd": null
+      },
+      "storageCalls": "SHARED_DEBOUNCED_PERSISTENCE_NOT_SEPARATELY_ATTRIBUTED",
+      "limitations": [
+        "CONDITIONAL_SHARED_ANALYSIS_AND_RISK_CONTEXT",
+        "PUBLIC_POSITIONS_NOT_TRANSACTIONS",
+        "UNKNOWN_REAL_COSTS_NOT_ZERO",
+        "BOUNDED_RETENTION_REQUIRES_ARCHIVE",
+        "VIRTUAL_RESULTS_NOT_FUTURE_PERFORMANCE_PROOF"
+      ]
+    }
+  },
+  "limitations": [
+    "All identities, prices, permissions and fills are simulated.",
+    "No production runtime or start preloads were started.",
+    "No profitability or broker access conclusion follows from these tests.",
+    "No global execution stop is implemented by the bridge route."
+  ]
+}
