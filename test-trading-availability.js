@@ -69,7 +69,7 @@ test('a local quote veto does not quarantine another instrument, and review does
   assert.ok(b.preflight(state, p, e, f.settings(), f.NOW).includes('QUOTE_STALE_OR_INVALID'));
   const other = { ...f.buy('other'), instrumentId: 2, asset: 'OTHER' }, oe = f.evidence(other);
   oe.instrument = { asset: 'OTHER', instrumentId: 2, allowed: true }; oe.quote.instrumentId = 2;
-  oe.cost.instrumentId = 2; oe.eligibility.instrumentId = 2; oe.risk.instrumentId = 2;
+  oe.closeTerms.instrumentId = 2; oe.cost.instrumentId = 2; oe.eligibility.instrumentId = 2; oe.risk.instrumentId = 2;
   state.operations[p.proposalId] = { status: 'VETOED', proposal: p };
   assert.deepEqual(b.preflight(state, other, oe, f.settings(), f.NOW), []);
   assert.equal(state.queue.length, 0);
@@ -123,7 +123,7 @@ test('normal buy policy exposes structured reasons without changing its allow de
   for (const d of p.blockerDetails) assert.notEqual(d.code, 'UNCLASSIFIED_VETO');
   assert.equal(p.blockerDetails.find(d => d.code === 'DUPLICATE_OR_PENDING_ORDER').reviewRequired, true);
 });
-test('cache-only trader evaluation errors leave a separately approved normal SELL possible; dispatch errors never become no-send', async () => {
+test('cache-only trader evaluation errors remain distinct from dispatch uncertainty', async () => {
   const block = source.slice(source.indexOf('async function processTraderExecution('), source.indexOf('async function executeControlledDecision('));
   let drains = 0;
   const sandbox = { tradingAvailability: availability, runtimeState: { traderExecutionBridge: { managed: {} } }, traderExecutionContext: null, evaluateAutomaticTraderProposals() { throw Error('SECRET_NO_OUTPUT'); },
@@ -154,7 +154,7 @@ test('automatic managed SELL preserves historical source provenance without cons
   assert.deepEqual(candidate.traderSources, state.managed['101'].traderSources);
   assert.equal(candidate.quantityMode, 'FULL_POSITION'); assert.equal(candidate.decision, 'ADVISORY_REVIEW_ONLY');
   const incomplete = { ...exitEvidence(), sourceProof: null, exposure: null };
-  incomplete.risk.proposalId = candidate.proposalId; incomplete.release.policyId = candidate.policyId;
+  incomplete.closeTerms.proposalId = candidate.proposalId; incomplete.risk.proposalId = candidate.proposalId; incomplete.release.policyId = candidate.policyId;
   assert.deepEqual(b.preflight(state, candidate, incomplete, f.settings(), f.NOW), []);
   sandbox.currentTraderExposureView = () => ({ owned: { rows: [] } });
   assert.equal(sandbox.evaluateAutomaticTraderProposals(context, control, f.NOW).candidateUnavailable, true);

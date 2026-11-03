@@ -14,11 +14,14 @@ function row(units = 1, id = '101') { return { asset: 'AAPL', positionId: id, in
 function evidence(p, positions = []) { return { mode: 'LIVE', armed: true, buyArmed: true, accountRef: 'fixture-account', identityVerified: true, tokenBindingVerified: true,
   release: { status: 'APPROVED_CHRONOLOGICAL_EVALUATION', policyVersion: p.policyVersion, policyId: p.policyId, accountRef: 'fixture-account', environment: 'REAL', sampleStatus: 'SUFFICIENT', liveAccountReviewed: true, approvedAt: at, evaluationEndAt: at },
   asOf: at, portfolioComplete: true, pendingComplete: true, positions, uncertainOrPending: false,
-  instrument: { asset: 'AAPL', instrumentId: 1, allowed: true }, quote: { instrumentId: 1, currency: 'USD', bid: 10, ask: 10, asOf: at },
+  instrument: { asset: 'AAPL', instrumentId: 1, allowed: true }, quote: { instrumentId: 1, currency: 'USD', bid: 10, ask: 10, asOf: at, tradable: true },
+  closeTerms: { proposalId: p.proposalId, accountRef: 'fixture-account', instrumentId: p.instrumentId, asOf: at, currency: 'USD',
+    settlementType: 'Underlying', leverage: 1, fullCloseAllowed: true, minimumUsd: 1, maximumUsd: 100, minimumUnits: 0.01, maximumUnits: 10,
+    costCoverage: 'COMPLETE_ESTIMATE', maximumCostUsd: 0.1, entryAmountUsd: p.amountUsd, projectedMinUnits: 0.98, projectedMaxUnits: 1.03, positionId: p.positionId, units: p.units },
   eligibility: { instrumentId: 1, side: p.side, allowed: true, accountRef: 'fixture-account', currency: 'USD', leverage: 1, settlementType: 'Underlying', minimumUsd: 1, maximumUsd: 100, asOf: at },
   cost: { instrumentId: 1, side: p.side, accountRef: 'fixture-account', coverage: 'COMPLETE_ESTIMATE', totalUsd: 0.1, amountUsd: p.amountUsd, units: p.units, asOf: at },
   risk: { approved: true, side: p.side, instrumentId: 1, proposalId: p.proposalId, amountUsd: p.amountUsd, positionId: p.side === 'SELL' ? String(p.positionId) : null, units: p.units, asOf: at },
-  limits: { cadenceAllowed: true, dailyAllowed: true, singleWriterVerified: true },
+  limits: { exitSlotAfterEntry: true, cadenceAllowed: true, dailyAllowed: true, singleWriterVerified: true },
   exposure: { coverage: 'COMPLETE', afterWithinLimits: true, proposalId: p.proposalId, amountUsd: p.amountUsd, units: p.units, asOf: at },
   sourceProof: { status: 'CURRENT_REFERENCES_VERIFIED', proposalId: p.proposalId, opposed: false, asOf: at }, cashUsd: 1000, reserveUsd: 200 }; }
 function harness({ state = initialized(), positions = [], configure = settings(), mutate = () => {}, outcome = 'CONFIRMED', save = () => true } = {}) {
@@ -212,6 +215,11 @@ test('real executor functions in an isolated VM use the existing BUY/close contr
     vm.createContext(sandbox); vm.runInContext(functions, sandbox);
     const options = { ...(strategy ? { strategyExecution: { operationId: 'proposal-1', proposalId: 'proposal-1', accountRef: 'fixture-account' } } : {}), expectedPositionId: '101', expectedUnits: 1 };
     const r = side === 'BUY' ? await sandbox.executeBuy('AAPL', 10, null, options) : await sandbox.executeSell('AAPL', null, options);
+    if (!strategy) {
+      assert.equal(r.reason, 'MANAGED_EXECUTION_REQUIRED');
+      assert.equal(requests.length, 0);
+      continue;
+    }
     assert.equal(intents['intent-test'].proposalId, strategy ? 'proposal-1' : undefined);
     if (scenario === 'PERSISTENCE') { assert.equal(requests.length, 0); assert.equal(r.confirmed, false); continue; }
     assert.equal(requests.length, 1); assert.equal(requests[0].method, 'POST');

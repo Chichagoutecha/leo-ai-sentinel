@@ -13810,6 +13810,7 @@ async function executeBuy(asset, amount, marketData = null, options = {}) {
   if (TRADING_MODE === "PAPER") return executePaperBuy(asset, Number(amount), marketData);
   if (DEMO_TRADING_ENABLED) return executeDemoBuy(asset, amount);
   if (!LIVE_TRADING_ENABLED) return { skipped: true, reason: "Trading LIVE non activé" };
+  if (!options.strategyExecution) return { skipped: true, executionAttempted: false, reason: "MANAGED_EXECUTION_REQUIRED" };
   if (!liveBuyReady(process.env)) {
     return { skipped: true, mode: "LIVE", reason: "LIVE bloqué : il faut TRADING_MODE=LIVE, LIVE_EXECUTION_ARMED=true et LIVE_BUY_CONFIRMATION=I_UNDERSTAND_LIVE_BUY_ORDERS." };
   }
@@ -13890,9 +13891,6 @@ async function executeBuy(asset, amount, marketData = null, options = {}) {
       updateOrderIntentStatus(intent.id, EXECUTION_STATUS.UNCERTAIN, { note: "STRATEGY_DURABILITY_OR_STOP_BEFORE_SEND" });
       return { skipped: true, uncertain: true, confirmed: false, intentId: intent.id, executionAttempted: false, reason: "STRATEGY_DURABILITY_OR_STOP_BEFORE_SEND" };
     }
-  } else if (!await persistOrderIntentBeforeSend(runtimeState.orderIntents[intent.id])) {
-    updateOrderIntentStatus(intent.id, EXECUTION_STATUS.UNCERTAIN, { note: "DURABILITY_FAILED_BEFORE_SEND" });
-    return { skipped: true, confirmed: false, uncertain: true, executionAttempted: false, intentId: intent.id, reason: "DURABILITY_FAILED_BEFORE_SEND" };
   }
 
   try {
@@ -14060,6 +14058,8 @@ async function executeSell(asset, marketData = null, options = {}) {
   if (TRADING_MODE === "OBSERVE") return { skipped: true, mode: "OBSERVE", reason: "Mode OBSERVE : aucune exécution" };
   if (TRADING_MODE === "PAPER") return executePaperSell(asset, marketData);
   if (!LIVE_TRADING_ENABLED) return { skipped: true, reason: "Trading LIVE non activé" };
+  if (!options.strategyExecution) return { skipped: true, executionAttempted: false, reason: "MANAGED_EXECUTION_REQUIRED",
+    escalation: { action: "OPERATOR_REVIEW", reasons: ["MANAGED_EXECUTION_REQUIRED"], automaticRetry: false, alternativeLiquidation: false } };
   if (!LIVE_EXECUTION_ARMED) {
     return { skipped: true, mode: "LIVE", reason: "LIVE non armé: ajoute LIVE_EXECUTION_ARMED=true uniquement après validation complète" };
   }
@@ -14071,9 +14071,8 @@ async function executeSell(asset, marketData = null, options = {}) {
   }
 
   const portfolio = preflight.portfolio;
-  const position = options.expectedPositionId !== undefined
-    ? (getClientPortfolio(portfolio).positions || []).find(p => String(getPositionId(p)) === String(options.expectedPositionId) && getInstrumentIdFromPosition(p) === WATCHLIST[asset])
-    : findOpenPosition(portfolio, asset);
+  const position = (getClientPortfolio(portfolio).positions || []).find(p =>
+    String(getPositionId(p)) === String(options.expectedPositionId) && getInstrumentIdFromPosition(p) === WATCHLIST[asset]);
   if (!position) return { skipped: true, reason: `Aucune position REAL ouverte pour ${asset}` };
   const positionId = getPositionId(position);
   const instrumentId = WATCHLIST[asset];
@@ -14142,9 +14141,6 @@ async function executeSell(asset, marketData = null, options = {}) {
       updateOrderIntentStatus(intent.id, EXECUTION_STATUS.UNCERTAIN, { note: "STRATEGY_DURABILITY_OR_STOP_BEFORE_SEND" });
       return { skipped: true, uncertain: true, confirmed: false, intentId: intent.id, executionAttempted: false, reason: "STRATEGY_DURABILITY_OR_STOP_BEFORE_SEND" };
     }
-  } else if (!await persistOrderIntentBeforeSend(runtimeState.orderIntents[intent.id])) {
-    updateOrderIntentStatus(intent.id, EXECUTION_STATUS.UNCERTAIN, { note: "DURABILITY_FAILED_BEFORE_SEND" });
-    return { skipped: true, confirmed: false, uncertain: true, executionAttempted: false, intentId: intent.id, reason: "DURABILITY_FAILED_BEFORE_SEND" };
   }
 
   try {
@@ -14705,7 +14701,7 @@ function traderExecutionSettings() {
   return { enabled: process.env.TRADER_EXECUTION_ENABLED === "true", confirmation: process.env.TRADER_EXECUTION_CONFIRMATION || "",
     entriesEnabled: process.env.TRADER_EXECUTION_ENTRIES_ENABLED === "true" && traderExecutionContext?.protectiveExitPending !== true,
     exitsEnabled: process.env.TRADER_EXECUTION_EXITS_ENABLED === "true", emergencyStop: process.env.TRADER_EXECUTION_EMERGENCY_STOP === "true",
-    maxOrderUsd: LIVE_BUY_MAX_ORDER_USD, maxExitNotionalUsd: Number(process.env.TRADER_EXECUTION_MAX_EXIT_NOTIONAL_USD || LIVE_BUY_MAX_ORDER_USD), maxCostUsd: Number(process.env.TRADER_EXECUTION_MAX_COST_USD || 0) };
+    maxOrderUsd: LIVE_BUY_MAX_ORDER_USD, maxExitNotionalUsd: Number(process.env.TRADER_EXECUTION_MAX_EXIT_NOTIONAL_USD || 0), maxCostUsd: Number(process.env.TRADER_EXECUTION_MAX_COST_USD || 0) };
 }
 async function persistTraderExecution() {
   runtimeState.traderExecutionBridge = traderExecution.compact(runtimeState.traderExecutionBridge);
@@ -14796,7 +14792,9 @@ function prepareTraderExecutionEvidence(p, context) {
     positions: view.owned.rows, portfolioComplete: view.owned.coverage === "COMPLETE", pendingComplete: view.pending.status === "COMPLETE_KNOWN_BUY_UPPER_BOUND",
     uncertainOrPending: view.pending.orders.length > 0 || Object.values(runtimeState.orderIntents || {}).some(i => isActiveExecutionStatus(i.status)),
     instrument: { instrumentId: row?.instrumentId, asset: row?.symbol, allowed: TRADE_ALLOWED_ASSETS.has(p.asset) && TRADE_ALLOWED_CATEGORIES.has(row?.category) },
-    quote: { instrumentId: p.instrumentId, asOf: q?.date, currency: "USD", bid: q?.bid, ask: q?.ask },
+    quote: { instrumentId: p.instrumentId, asOf: q?.date, currency: "USD", bid: q?.bid, ask: q?.ask,
+      tradable: isMarketRateTradable({ normalized: { ratesByAsset: { [p.asset]: q } } }, p.asset).ok },
+    closeTerms: context?.traderExecutionCloseEvidence?.[p.proposalId] || null,
     eligibility: { instrumentId: p.instrumentId, side: p.side, asOf: cached.fetchedAt, allowed: cached.technicalEligibility === "ALLOWED_CONFIGURATION",
       accountRef, currency: cached.currency, leverage: 1, settlementType: "Underlying", minimumUsd: normalizedEligibility?.minimumUsd ?? null, maximumUsd: normalizedEligibility?.maximumUsd ?? null },
     cost: context?.traderExecutionCosts?.[p.proposalId] || context?.traderAdvisoryCostEvidence?.[p.instrumentId] || null,
@@ -14806,7 +14804,8 @@ function prepareTraderExecutionEvidence(p, context) {
       proposalId: p.proposalId, amountUsd: p.amountUsd, units: p.units, asOf: new Date(now).toISOString() },
     risk: { approved: risk.approved && risk.finalDecision.decision === p.side && risk.finalDecision.asset === p.asset, instrumentId: p.instrumentId, side: p.side,
       amountUsd: risk.finalDecision.amount_usd, proposalId: p.proposalId, positionId: p.side === "SELL" ? String(p.positionId) : null, units: p.units, asOf: new Date(now).toISOString() },
-    limits: { cadenceAllowed: stats.hoursSinceLastExecution === null || stats.hoursSinceLastExecution >= MIN_HOURS_BETWEEN_EXECUTIONS,
+    limits: { exitSlotAfterEntry: stats.total + 1 < MAX_EXECUTED_ORDERS_24H && stats.sells < MAX_SELLS_24H,
+      cadenceAllowed: stats.hoursSinceLastExecution === null || stats.hoursSinceLastExecution >= MIN_HOURS_BETWEEN_EXECUTIONS,
       dailyAllowed: stats.total < MAX_EXECUTED_ORDERS_24H && (p.side === "BUY" ? stats.buys < MAX_BUYS_24H : stats.sells < MAX_SELLS_24H), singleWriterVerified: false },
     sourceProof: { status: sourceProof && !preview.problems.includes("TRADER_SOURCE_UNVERIFIED_OR_STALE") ? "CURRENT_REFERENCES_VERIFIED" : "UNAVAILABLE", opposed: p.side === "BUY" && p.traderSources.some(ref => traderObserver.view().traders.find(t => t.realCID === ref.traderId)?.snapshot?.portfolio?.positions?.some(row => row.instrumentId === p.instrumentId && (row.isBuy !== true || row.leverage !== 1))), proposalId: p.proposalId, asOf: new Date(now).toISOString() } };
 }
@@ -14846,13 +14845,13 @@ async function processTraderExecution(context, control) {
     let evaluation;
     try { evaluation = evaluateAutomaticTraderProposals(context, control); }
     catch {
-      // Evaluation is cache-only and cannot submit. An error here must not consume
-      // a separately approved normal SELL. Never catch dispatch errors as a no-send.
+      // Evaluation is cache-only. Dispatch errors must retain uncertainty.
       return { status: "TRADER_LAYER_UNAVAILABLE", executionAttempted: false,
         managedExitProposed: control?.finalDecision?.decision === "SELL" && Object.values(runtimeState.traderExecutionBridge.managed).some(r => r.asset === control.finalDecision.asset && r.status === "VERIFIED_MANAGED"),
         vetoDetails: [tradingAvailability.describeVeto("TRADER_LAYER_UNAVAILABLE", { side: control?.finalDecision?.decision })] };
     }
     if (evaluation?.candidateUnavailable) return { status: "MANAGED_CLOSE_CANDIDATE_UNAVAILABLE", managedExitProposed: true, executionAttempted: false,
+      escalation: { action: "OPERATOR_REVIEW", reasons: ["EXACT_MANAGED_FULL_POSITION_SCOPE_UNVERIFIED"], automaticRetry: false, alternativeLiquidation: false },
       vetoDetails: [tradingAvailability.describeVeto("EXACT_MANAGED_FULL_POSITION_SCOPE_UNVERIFIED", { side: "SELL" })] };
     return { ...await traderExecutionController.drain(), managedExitProposed: evaluation?.managedExitProposed === true };
   } finally { traderExecutionContext = null; }
@@ -19908,7 +19907,7 @@ app.get("/trader-execution-status", requireSecret, (_req, res) => {
   const state = runtimeState.traderExecutionBridge;
   res.json({ version: traderExecution.VERSION, enabled: traderExecutionSettings().enabled, emergencyStop: state.emergencyStop,
     recoveryRequired: state.recoveryRequired, disabledReason: state.disabledReason, queued: state.queue.length,
-    operations: Object.values(state.operations).map(o => ({ proposalId: o.proposal.proposalId, side: o.proposal.side, status: o.status, intentId: o.intentId || null, vetoes: o.vetoes || [], vetoDetails: (o.vetoes || []).map(code => tradingAvailability.describeVeto(code, o.proposal)), availabilityNotes: (o.availabilityNotes || []).map(code => tradingAvailability.describeVeto(code, o.proposal)) })),
+    operations: Object.values(state.operations).map(o => ({ proposalId: o.proposal.proposalId, side: o.proposal.side, status: o.status, intentId: o.intentId || null, vetoes: o.vetoes || [], vetoDetails: (o.vetoes || []).map(code => tradingAvailability.describeVeto(code, o.proposal)), availabilityNotes: (o.availabilityNotes || []).map(code => tradingAvailability.describeVeto(code, o.proposal)), escalation: traderExecution.exitEscalation(o) })),
     managedPositionCount: Object.keys(state.managed).length, readiness: "BLOCKED_UNTIL_ACCOUNT_TOKEN_RELEASE_COST_EXPOSURE_AND_SINGLE_WRITER_PROOFS", partialClose: "BLOCKED_NOT_RELIABLY_SUPPORTED" });
 });
 app.post("/trader-execution-stop", requireSecret, async (req, res) => {

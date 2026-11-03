@@ -104,7 +104,8 @@ async function rehearse() {
   reductions.queue({ ...f.sell(), units: 0.25, quantityMode: 'UNITS' });
   assert.ok((await reductions.controller.drain()).vetoes.includes('PARTIAL_CLOSE_NOT_RELIABLY_SUPPORTED'));
   record('partial_reduction', { decision: 'VETOED', replacementFullSale: false });
-  const capped = f.harness({ configure: { ...f.settings(), maxExitNotionalUsd: 5 } }); capped.queue(f.buy()); await capped.controller.drain(); capped.queue(f.sell());
+  const capped = f.harness(); capped.queue(f.buy()); await capped.controller.drain();
+  capped.config = { ...f.settings(), maxExitNotionalUsd: 5 }; capped.queue(f.sell());
   assert.ok((await capped.controller.drain()).vetoes.includes('FULL_EXIT_EXCEEDS_ORDER_CAP_PARTIAL_CLOSE_UNSUPPORTED'));
   record('full_exit_over_cap', { decision: 'VETOED', requiresApprovedExitPolicy: true }, 'BLOCKER_REPRODUCED');
   const stopped = f.initialized(); stopped.emergencyStop = true;

@@ -3,6 +3,7 @@
 const { digest } = require('./trader-observer');
 const { describeVeto } = require('./trading-availability');
 const finality = require('./etoro-order-finality');
+const { assessClose, escalation } = require('./managed-exit-policy');
 const VERSION = 'trader-execution-v1';
 const finite = n => typeof n === 'number' && Number.isFinite(n);
 const safeId = s => typeof s === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(s);
@@ -93,9 +94,8 @@ function preflight(state, p, e, settings, now) {
     if (p.quantityMode !== 'FULL_POSITION') vetoes.push('PARTIAL_CLOSE_NOT_RELIABLY_SUPPORTED');
     if (target.length !== 1 || !managed || managed.status !== 'VERIFIED_MANAGED' || managed.accountRef !== e.accountRef || managed.instrumentId !== p.instrumentId || target[0]?.ownership !== 'DIRECT' || target[0]?.isBuy !== true || target[0]?.leverage !== 1 || target[0]?.settlementType !== 'Underlying' || target[0]?.units !== p.units || managed.units !== p.units || managed.externalMutation === true) vetoes.push('EXACT_MANAGED_FULL_POSITION_SCOPE_UNVERIFIED');
     if (cost?.units !== p.units || e?.risk?.positionId !== String(p.positionId) || e?.risk?.units !== p.units || e?.exposure?.units !== undefined && e.exposure.units !== p.units || e?.exposure?.proposalId !== undefined && e.exposure.proposalId !== p.proposalId) vetoes.push('SELL_SIZE_EVIDENCE_MISMATCH');
-    const cap = settings.maxExitNotionalUsd ?? settings.maxOrderUsd;
-    if (!finite(cap) || !finite(quote?.bid) || p.units * quote.bid > cap) vetoes.push('FULL_EXIT_EXCEEDS_ORDER_CAP_PARTIAL_CLOSE_UNSUPPORTED');
   }
+  vetoes.push(...assessClose(p, e, settings, now).reasons);
   return [...new Set(vetoes)].sort();
 }
 function guardExecutor(state, metadata, positions, accountRef, now) {
@@ -166,12 +166,13 @@ function createController({ getState, setState, persist, evidence, executeNormal
       if (vetoes.length) {
         const vetoDetails = vetoes.map(code => describeVeto(code, p));
         const next = structuredClone(getState()); next.operations[p.proposalId] = { proposal: p, status: 'VETOED', vetoes, accountRef: e?.accountRef || null, updatedAt: new Date(clock()).toISOString() };
-        setState(next); await persist(); return { status: 'VETOED', proposalId: p.proposalId, vetoes, vetoDetails, executionAttempted: false };
+        setState(next); await persist(); return { status: 'VETOED', proposalId: p.proposalId, vetoes, vetoDetails,
+          ...(p.side === 'SELL' ? { escalation: escalation(vetoes) } : {}), executionAttempted: false };
       }
       const next = structuredClone(getState());
       next.operations[p.proposalId] = { proposal: p, status: 'RESERVED', accountRef: e.accountRef, reservedAt: new Date(clock()).toISOString(),
         finalDecision: { side: p.side, instrumentId: p.instrumentId, amountUsd: p.amountUsd ?? null, positionId: p.positionId || null, units: p.units ?? null },
-        checks: { portfolio: e.asOf, quote: e.quote.asOf, eligibility: e.eligibility.asOf, cost: e.cost.asOf, risk: e.risk.asOf,
+        checks: { portfolio: e.asOf, quote: e.quote.asOf, eligibility: e.eligibility.asOf, cost: e.cost.asOf, risk: e.risk.asOf, closeTerms: e.closeTerms.asOf,
           ...(p.side === 'BUY' ? { exposure: e.exposure.asOf, source: e.sourceProof.asOf } : {}) },
         evidenceAtApproval: { quote: { bid: e.quote.bid, ask: e.quote.ask, asOf: e.quote.asOf },
           cost: { totalUsd: e.cost.totalUsd, amountUsd: e.cost.amountUsd ?? null, units: e.cost.units ?? null, coverage: e.cost.coverage },
@@ -186,22 +187,28 @@ function createController({ getState, setState, persist, evidence, executeNormal
       if (!getState().operations[p.proposalId] || getState().disabledReason || !again.enabled || again.emergencyStop || getState().emergencyStop) { if (getState().operations[p.proposalId]) getState().operations[p.proposalId].status = 'VETOED'; await persist(); return { status: 'EMERGENCY_STOP', vetoDetails: [describeVeto('EMERGENCY_STOP', p)], executionAttempted: false }; }
       const withoutSelf = { ...getState(), operations: Object.fromEntries(Object.entries(getState().operations).filter(([id]) => id !== p.proposalId)) };
       const recheck = preflight(withoutSelf, p, e, again, clock());
-      if (recheck.length) { const vetoDetails = recheck.map(code => describeVeto(code, p)); getState().operations[p.proposalId].status = 'VETOED'; getState().operations[p.proposalId].vetoes = recheck; await persist(); return { status: 'VETOED', vetoes: recheck, vetoDetails, executionAttempted: false }; }
+      if (recheck.length) { const vetoDetails = recheck.map(code => describeVeto(code, p)); getState().operations[p.proposalId].status = 'VETOED'; getState().operations[p.proposalId].vetoes = recheck; await persist(); return { status: 'VETOED', vetoes: recheck, vetoDetails,
+          ...(p.side === 'SELL' ? { escalation: escalation(recheck) } : {}), executionAttempted: false }; }
       let result;
       try { result = await executeNormal(p, { operationId: p.proposalId, proposalId: p.proposalId, accountRef: e.accountRef }); }
       catch { result = { confirmed: false, uncertain: true }; }
       applyResult(getState(), p.proposalId, result, clock());
       if (await persist() !== true) { getState().operations[p.proposalId].status = 'NEEDS_RECONCILIATION'; getState().emergencyStop = true; }
       return { status: getState().operations[p.proposalId].status, proposalId: p.proposalId, intentId: getState().operations[p.proposalId].intentId || null,
-        adapterInvoked: true, executionAttempted: result?.executionAttempted !== false && !(result?.skipped && !result?.intentId) };
+        adapterInvoked: true, ...(p.side === 'SELL' && getState().operations[p.proposalId].status !== 'CONFIRMED'
+          ? { escalation: exitEscalation(getState().operations[p.proposalId]) } : {}), executionAttempted: result?.executionAttempted !== false && !(result?.skipped && !result?.intentId) };
     } finally { running = false; }
   }
   return { drain };
 }
 function reconcile(state, id, result, now) { const copy = structuredClone(state); applyResult(copy, id, result, now); return copy; }
+function exitEscalation(operation) {
+  if (operation?.proposal?.side !== 'SELL' || ['RESERVED', 'CONFIRMED'].includes(operation.status)) return null;
+  return escalation(operation.vetoes?.length ? operation.vetoes : [operation.status]);
+}
 function compact(state, maxBytes = 60000) {
   const copy = structuredClone(state || initialState());
   if (Buffer.byteLength(JSON.stringify(copy)) <= maxBytes) return copy;
   return { ...initialState(), emergencyStop: true, disabledReason: 'ARCHIVE_REQUIRED_NO_AUTOMATIC_RESET', accountRef: copy.accountRef || null };
 }
-module.exports = { VERSION, initialState, initializeForContext, managedCloseCandidate, proposal, enqueue, select, preflight, guardExecutor, recover, reconcile, createController, compact };
+module.exports = { VERSION, initialState, initializeForContext, managedCloseCandidate, proposal, enqueue, select, preflight, guardExecutor, recover, reconcile, createController, compact, exitEscalation };
