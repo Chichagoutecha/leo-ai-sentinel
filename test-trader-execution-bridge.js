@@ -187,14 +187,14 @@ test('real executor functions in an isolated VM use the existing BUY/close contr
   const source = require('node:fs').readFileSync(require.resolve('./index'), 'utf8');
   const functions = source.slice(source.indexOf('async function executeBuy('), source.indexOf('async function buildRuntimeContext('));
   const vm = require('node:vm');
-  for (const side of ['BUY', 'SELL']) for (const scenario of ['CONFIRMED', 'NETWORK', 'ACK', 'PERSISTENCE']) for (const strategy of [true, false]) {
+  for (const side of ['BUY', 'SELL']) for (const scenario of ['CONFIRMED', 'NETWORK', 'ACK', 'PERSISTENCE', 'PAUSED']) for (const strategy of [true, false]) {
     const requests = [], events = [], intents = {};
     const positions = side === 'SELL' ? [{ positionId: '999', instrumentId: 1, units: 2 }, { positionId: '101', instrumentId: 1, units: 1 }] : [];
     const snap = () => ({ instrumentId: 1, positionIds: positions.map(r => r.positionId), positionDetails: positions.map(r => ({ positionId: r.positionId, units: r.units })) });
-    const sandbox = { orderFinality: require('./etoro-order-finality'), TRADING_MODE: 'LIVE', TRADING_MODE_LABEL: 'LIVE', DEMO_TRADING_ENABLED: false, LIVE_TRADING_ENABLED: true, LIVE_EXECUTION_ARMED: true,
+    const sandbox = { executionContinuity: require('./execution-continuity'), orderFinality: require('./etoro-order-finality'), TRADING_MODE: 'LIVE', TRADING_MODE_LABEL: 'LIVE', DEMO_TRADING_ENABLED: false, LIVE_TRADING_ENABLED: true, LIVE_EXECUTION_ARMED: true,
       LIVE_PORTFOLIO_PREFLIGHT_ENABLED: true, LIVE_BUY_MAX_ORDER_USD: 10, MIN_ORDER_USD: 1, MAX_OPEN_POSITIONS: 10,
       WATCHLIST: { AAPL: 1 }, ASSET_RULES: { AAPL: {} }, TRADE_ALLOWED_ASSETS: new Set(['AAPL']), TRADE_ALLOWED_CATEGORIES: new Set(['STOCK']),
-      SELL_CLOSE_PROOF_VERSION: 'TEST', EXECUTION_STATUS: { SENT: 'ORDER_SENT', ACCEPTED: 'ORDER_ACCEPTED', NOT_FOUND: 'ORDER_ACCEPTED_NOT_CONFIRMED', CONFIRMED: 'POSITION_CONFIRMED', REJECTED: 'ORDER_REJECTED', UNCERTAIN: 'EXECUTION_UNCERTAIN' },
+      SELL_CLOSE_PROOF_VERSION: 'TEST', EXECUTION_STATUS: { SENT: 'ORDER_SENT', ACCEPTED: 'ORDER_ACCEPTED', NOT_FOUND: 'ORDER_ACCEPTED_NOT_CONFIRMED', CONFIRMED: 'POSITION_CONFIRMED', REJECTED: 'ORDER_REJECTED', NO_EFFECT: 'ORDER_NO_EFFECT', UNCERTAIN: 'EXECUTION_UNCERTAIN' },
       process: { env: {} }, liveBuyReady: () => true, nowIso: () => at, classifyAsset: () => 'STOCK', evaluateBuyPolicy: () => ({ allowed: true }),
       verifyRealPortfolioBeforeExecution: async () => ({ ok: true, portfolio: { positions }, validation: { availableCash: 1000 }, summary: { totalTrackedValue: 1000 }, identity: { ok: true } }),
       getMarketRates: async () => ({}), isMarketRateTradable: () => ({ ok: true, rate: { mid: 10, bid: 10, ask: 10, date: at } }),
@@ -207,7 +207,9 @@ test('real executor functions in an isolated VM use the existing BUY/close contr
       persistOrderIntentBeforeSend: async intent => { assert.ok(intent); events.push('durable-intent'); return scenario !== 'PERSISTENCE'; },
       persistTraderExecution: async () => { events.push('durable-intent'); return scenario !== 'PERSISTENCE'; }, traderExecutionSettings: () => ({ enabled: true }),
       etoroHeaders: () => ({ 'x-request-id': 'test-request' }),
-      fetchJsonWithRetry: async (url, init, opts) => { assert.equal(events.at(-1), 'durable-intent'); assert.equal(opts.retries, 0); requests.push({ url, method: init.method, body: JSON.parse(init.body) });
+      fetchJsonWithRetry: async (url, init, opts) => { assert.equal(events.at(-1), 'durable-intent'); assert.equal(opts.retries, 0); assert.equal(opts.executionIntentId, 'intent-test');
+        if (scenario === 'PAUSED') throw new sandbox.executionContinuity.ExecutionNotSent('EXECUTION_PAUSED');
+        requests.push({ url, method: init.method, body: JSON.parse(init.body) });
         if (scenario === 'NETWORK') throw Error('MOCK_NETWORK'); return { response: { ok: true, status: 200 }, data: { orderId: 'order-test', positionId: '101' } }; },
       compactEtoroExecutionResponse: x => x, hasExecutionBusinessAcknowledgement: () => true,
       verifyPortfolioAfterExecution: async () => ({ confirmed: scenario === 'CONFIRMED', observed: scenario === 'CONFIRMED', status: scenario === 'CONFIRMED' ? 'POSITION_CONFIRMED' : 'ORDER_ACCEPTED_NOT_CONFIRMED', afterSnapshot: { instrumentId: 1, positionDetails: [] }, evidence: [] }),
@@ -217,6 +219,12 @@ test('real executor functions in an isolated VM use the existing BUY/close contr
     const r = side === 'BUY' ? await sandbox.executeBuy('AAPL', 10, null, options) : await sandbox.executeSell('AAPL', null, options);
     if (!strategy) {
       assert.equal(r.reason, 'MANAGED_EXECUTION_REQUIRED');
+      assert.equal(requests.length, 0);
+      continue;
+    }
+    if (scenario === 'PAUSED') {
+      assert.equal(r.executionAttempted, false);
+      assert.equal(intents['intent-test'].status, 'ORDER_NO_EFFECT');
       assert.equal(requests.length, 0);
       continue;
     }

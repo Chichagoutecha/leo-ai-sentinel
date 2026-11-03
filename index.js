@@ -2241,9 +2241,15 @@ async function readJsonResponse(response) {
   }
 }
 
+const executionContinuity = require("./execution-continuity");
+const continuity = executionContinuity.createExecutionContinuity({ command: upstashCommand, stateKey: STATE_KEY });
+const continuityPreloaded = Boolean(require.cache[require.resolve("./execution-continuity-preload")]);
+
 async function upstashCommand(command) {
   const response = await fetch(UPSTASH_REDIS_REST_URL, {
     method: "POST",
+    signal: AbortSignal.timeout(5000),
+    redirect: "error",
     headers: {
       Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
       "Content-Type": "application/json"
@@ -2254,7 +2260,7 @@ async function upstashCommand(command) {
   const data = await readJsonResponse(response);
 
   if (!response.ok || data?.error) {
-    throw new Error(data?.error || `Erreur Upstash ${response.status}`);
+    throw new Error(`UPSTASH_COMMAND_FAILED_${response.status}`);
   }
 
   return data?.result;
@@ -2789,7 +2795,7 @@ function fitPersistentStateToBudget(
 }
 
 function applyPersistentState(state) {
-  if (!state || typeof state !== "object") return false;
+  if (!state || typeof state !== "object" || Array.isArray(state)) return false;
 
   if (state.automationGuards && typeof state.automationGuards === "object") {
     runtimeState.automationGuards = {
@@ -2980,23 +2986,9 @@ async function loadPersistentState() {
     if (hasUpstashMemory()) {
       memoryBackend = "upstash-redis";
 
-      const raw = await upstashCommand(["GET", STATE_KEY]);
-
-      if (raw) {
-        const state = typeof raw === "string" ? safeJsonParse(raw) : raw;
-        const loaded = applyPersistentState(state);
-        lastMemoryLoad = nowIso();
-        console.log(
-          loaded
-            ? `Mémoire persistante chargée depuis Upstash : ${STATE_KEY}`
-            : "Mémoire Upstash trouvée mais illisible"
-        );
-        return loaded;
-      }
-
+      const loaded = await continuity.load(raw => applyPersistentState(safeJsonParse(raw)));
       lastMemoryLoad = nowIso();
-      console.log("Aucune mémoire Upstash existante, démarrage propre.");
-      return false;
+      return loaded;
     }
 
     memoryBackend = "local-json-fallback";
@@ -3079,11 +3071,11 @@ async function savePersistentStateUnlocked() {
       if (lastMemorySaveBytes > UPSTASH_MAX_STATE_BYTES) {
         throw new Error(`État Upstash encore trop volumineux (${lastMemorySaveBytes} > ${UPSTASH_MAX_STATE_BYTES} octets)`);
       }
-      await upstashCommand(["SET", STATE_KEY, payload]);
+      await continuity.save(payload);
     } else {
       memoryBackend = "local-json-fallback";
       fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
-      const tempFile = `${STATE_FILE}.tmp`;
+      const tempFile = `${STATE_FILE}.${process.pid}.tmp`;
       fs.writeFileSync(tempFile, payload, "utf8");
       fs.renameSync(tempFile, STATE_FILE);
     }
@@ -6640,7 +6632,8 @@ function buildHealthAgent() {
 
 async function fetchJsonWithRetry(url, options = {}, config = {}) {
   const label = config.label || "HTTP";
-  const retries = Number.isFinite(Number(config.retries)) ? Number(config.retries) : 0;
+  const read = ["GET", "HEAD"].includes(String(options.method || "GET").toUpperCase());
+  const retries = read ? Math.min(3, Math.max(0, Math.trunc(Number(config.retries) || 0))) : 0;
   const timeoutMs = Number(config.timeoutMs || HTTP_TIMEOUT_MS);
   let lastError = null;
 
@@ -6648,20 +6641,35 @@ async function fetchJsonWithRetry(url, options = {}, config = {}) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(url, { ...options, signal: controller.signal });
+      const init = { ...options, signal: controller.signal };
+      if (config.executionIntentId) {
+        let used = false;
+        init[executionContinuity.permit] = async requestId => {
+          const intent = runtimeState.orderIntents[config.executionIntentId];
+          if (used || !hasUpstashMemory() || !intent || intent.requestId !== requestId ||
+              intent.status !== EXECUTION_STATUS.SENT || runtimeState.traderExecutionBridge.emergencyStop) {
+            return "EXECUTION_PERMISSION_UNAVAILABLE";
+          }
+          used = true;
+          return continuity.grant({ id: intent.id, requestId, side: intent.type });
+        };
+      }
+      const transport = continuityPreloaded ? fetch : executionContinuity.guardExecutionFetch(fetch);
+      const response = await transport(url, init);
       const data = await readJsonResponse(response);
       clearTimeout(timeout);
       const retryable = response.status === 429 || response.status >= 500;
       if (retryable && attempt < retries) {
-        await sleep(ETORO_RETRY_BASE_MS * Math.pow(2, attempt));
+        await sleep(Math.min(5000, ETORO_RETRY_BASE_MS * Math.pow(2, attempt)));
         continue;
       }
       return { response, data, attempts: attempt + 1, label };
     } catch (error) {
       clearTimeout(timeout);
+      if (error instanceof executionContinuity.ExecutionNotSent) throw error;
       lastError = error;
       if (attempt < retries) {
-        await sleep(ETORO_RETRY_BASE_MS * Math.pow(2, attempt));
+        await sleep(Math.min(5000, ETORO_RETRY_BASE_MS * Math.pow(2, attempt)));
         continue;
       }
     }
@@ -13759,7 +13767,7 @@ async function executeDemoBuy(asset, amount) {
         action: "open", transaction: "buy", instrumentId, orderType: "mkt",
         amount: safeAmount, orderCurrency: "usd", leverage: 1
       }) },
-      { label: `eToro DEMO BUY ${asset}`, retries: 0 }
+      { label: `eToro DEMO BUY ${asset}`, retries: 0, executionIntentId: intent.id }
     );
     const compactResponse = compactEtoroExecutionResponse(data);
     const businessAcknowledged = hasExecutionBusinessAcknowledgement(compactResponse);
@@ -13785,6 +13793,7 @@ async function executeDemoBuy(asset, amount) {
     updateOrderIntentStatus(intent.id, verification.status, {
       verificationAttempts: verification.attempts, verificationEvidence: verification.evidence,
       afterSnapshot: verification.afterSnapshot, verificationRecordId: verification.recordId,
+      orderProgress: verification.orderProgress, positionProof: verification.positionProof,
       confirmedAt: verification.confirmed ? nowIso() : null, note: verification.note
     });
     if (businessAcknowledged || verification.observed) setCooldown(asset);
@@ -13796,6 +13805,10 @@ async function executeDemoBuy(asset, amount) {
       type: "BUY", mode: "DEMO", asset, instrumentId, amount: safeAmount,
       intentId: intent.id, requestId: headers["x-request-id"], verification, data: compactResponse };
   } catch (error) {
+    if (error instanceof executionContinuity.ExecutionNotSent) {
+      updateOrderIntentStatus(intent.id, EXECUTION_STATUS.NO_EFFECT, { note: error.message });
+      return { skipped: true, executionAttempted: false, reason: error.message, intentId: intent.id, verification_status: EXECUTION_STATUS.NO_EFFECT };
+    }
     updateOrderIntentStatus(intent.id, EXECUTION_STATUS.UNCERTAIN, {
       error: error.message, requestId: headers["x-request-id"], note: "Issue réseau/API DEMO inconnue; ordre non renvoyé"
     });
@@ -13909,7 +13922,7 @@ async function executeBuy(asset, amount, marketData = null, options = {}) {
           leverage: 1
         })
       },
-      { label: `eToro LIVE BUY ${asset}`, retries: 0 }
+      { label: `eToro LIVE BUY ${asset}`, retries: 0, executionIntentId: intent.id }
     );
 
     const compactResponse = compactEtoroExecutionResponse(data);
@@ -14018,6 +14031,10 @@ async function executeBuy(asset, amount, marketData = null, options = {}) {
       action: verification.confirmed ? null : "Ne pas répéter l'ordre; laisser ExecutionVerifier réconcilier le portefeuille."
     };
   } catch (error) {
+    if (error instanceof executionContinuity.ExecutionNotSent) {
+      updateOrderIntentStatus(intent.id, EXECUTION_STATUS.NO_EFFECT, { note: error.message });
+      return { skipped: true, executionAttempted: false, reason: error.message, intentId: intent.id, verification_status: EXECUTION_STATUS.NO_EFFECT };
+    }
     updateOrderIntentStatus(intent.id, EXECUTION_STATUS.UNCERTAIN, {
       error: error.message,
       requestId: headers["x-request-id"],
@@ -14151,7 +14168,7 @@ async function executeSell(asset, marketData = null, options = {}) {
         headers,
         body: JSON.stringify({ InstrumentId: instrumentId, UnitsToDeduct: null })
       },
-      { label: `eToro LIVE SELL ${asset}`, retries: 0 }
+      { label: `eToro LIVE SELL ${asset}`, retries: 0, executionIntentId: intent.id }
     );
 
     const compactResponse = compactEtoroExecutionResponse(data);
@@ -14262,6 +14279,10 @@ async function executeSell(asset, marketData = null, options = {}) {
       action: verification.confirmed ? null : "Ne pas répéter l'ordre; laisser ExecutionVerifier réconcilier le portefeuille."
     };
   } catch (error) {
+    if (error instanceof executionContinuity.ExecutionNotSent) {
+      updateOrderIntentStatus(intent.id, EXECUTION_STATUS.NO_EFFECT, { note: error.message });
+      return { skipped: true, executionAttempted: false, reason: error.message, intentId: intent.id, verification_status: EXECUTION_STATUS.NO_EFFECT };
+    }
     updateOrderIntentStatus(intent.id, EXECUTION_STATUS.UNCERTAIN, {
       error: error.message,
       requestId: headers["x-request-id"],
@@ -19916,6 +19937,41 @@ app.post("/trader-execution-stop", requireSecret, async (req, res) => {
   const saved = await persistTraderExecution();
   res.status(saved ? 200 : 503).json({ stopped: true, persisted: saved, executionAttempted: false });
 });
+app.get("/execution-continuity", requireSecret, async (_req, res) => {
+  let coordination = null;
+  if (hasUpstashMemory()) {
+    try { coordination = await continuity.status(); } catch { /* degraded observation */ }
+  }
+  const health = buildHealthAgent();
+  const activeOrUncertainIntents = Object.values(runtimeState.orderIntents || {}).filter(i => isActiveExecutionStatus(i.status)).length;
+  res.json({
+    storage: hasUpstashMemory() ? (coordination ? "REDIS_AVAILABLE" : "REDIS_UNAVAILABLE") : "LOCAL_OBSERVATION",
+    persistence: { lastLoad: lastMemoryLoad, lastSave: lastMemorySave, degraded: Boolean(lastMemoryError) },
+    data: { marketAvailable: Boolean(runtimeState.lastMarketData), lastSuccess: health.lastSuccess },
+    activeOrUncertainIntents,
+    coordination,
+    actions: {
+      observe: true,
+      reconcile: "READ_CHECKS_REQUIRED",
+      entryBlockedByCoordination: !coordination?.ownLease || coordination.suspended || coordination.entriesBlocked || coordination.inFlight,
+      closeBlockedByCoordination: !coordination?.ownLease || coordination.suspended || coordination.inFlight,
+      liquidation: "OPERATOR_REVIEW_ONLY"
+    }
+  });
+});
+for (const [path, field] of [["block-entries", "entries"], ["suspend", "suspended"], ["request-liquidation", "liquidation"]]) {
+  app.post(`/execution-continuity/${path}`, requireSecret, async (req, res) => {
+    if (!req.body || Object.keys(req.body).length !== 1 || req.body.confirm !== path) {
+      return res.status(400).json({ error: "EXACT_CONFIRMATION_REQUIRED" });
+    }
+    try {
+      if (hasUpstashMemory() && await continuity.control(field)) {
+        return res.json({ recorded: true, action: path, executionAttempted: false });
+      }
+    } catch { /* the write result may be unknown */ }
+    return res.status(503).json({ error: "CONTROL_NOT_VERIFIED", executionAttempted: false });
+  });
+}
 app.get("/trader-shadow-status", requireSecret, (_req, res) => {
   res.json(traderShadow.report(runtimeState.traderShadowExperiment));
 });

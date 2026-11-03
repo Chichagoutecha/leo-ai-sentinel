@@ -118,6 +118,11 @@ function applyResult(state, id, result, now) {
   if (op.intentId && op.intentId !== result?.intentId || !op.intentId && result?.confirmed === true) { op.status = 'NEEDS_RECONCILIATION'; return; }
   op.intentId = safeId(result?.intentId) ? result.intentId : op.intentId || null;
   op.updatedAt = new Date(now).toISOString();
+  if (result?.executionAttempted === false && result?.verification_status === 'ORDER_NO_EFFECT') {
+    op.status = 'VETOED';
+    op.evidence = { confirmed: false, reason: result.reason };
+    return;
+  }
   const p = op.proposal, before = result?.verification?.beforeSnapshot || op.beforeSnapshot, after = result?.verification?.afterSnapshot;
   const next = result?.orderProgress || result?.verification?.orderProgress || finality.unknown();
   const progress = finality.monotonic(op.orderProgress, next);
