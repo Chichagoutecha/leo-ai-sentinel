@@ -145,6 +145,7 @@ const { buildPaperShadowScorecard } = require('./paper-shadow-accounting');
 const traderAdvisory = require('./trader-advisory-policy');
 const { virtualFill } = require('./paper-shadow-execution');
 const traderShadow = require('./trader-shadow-experiment');
+const traderExecution = require('./trader-execution-bridge');
 const { ENDPOINT: SEC_BLACKROCK_ENDPOINT, REFRESH_INTERVAL_MS: SEC_REFRESH_INTERVAL_MS,
   normalizeBlackRockFilings, institutionalWatchStatus } = require('./sec-institutional-watch');
 
@@ -1871,6 +1872,7 @@ const runtimeState = {
   exposureProposalTraces: [],
   traderAdvisoryState: traderAdvisory.initialState(),
   traderShadowExperiment: traderShadow.emptyState(),
+  traderExecutionBridge: traderExecution.initialState(),
   trendMemory: {},
   equityHistory: [],
   performanceHistory: [],
@@ -2454,6 +2456,7 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
     traderObserver: compactObserverState(runtimeState.traderObserver),
       traderAdvisoryState: traderAdvisory.compactState(runtimeState.traderAdvisoryState),
       traderShadowExperiment: traderShadow.compact(runtimeState.traderShadowExperiment),
+      traderExecutionBridge: traderExecution.compact(runtimeState.traderExecutionBridge),
       exposureProposalTraces: (runtimeState.exposureProposalTraces || []).slice(-20)
     };
   }
@@ -2545,6 +2548,7 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
     traderObserver: compactObserverState(runtimeState.traderObserver),
       traderAdvisoryState: traderAdvisory.compactState(runtimeState.traderAdvisoryState),
       traderShadowExperiment: traderShadow.compact(runtimeState.traderShadowExperiment),
+      traderExecutionBridge: traderExecution.compact(runtimeState.traderExecutionBridge),
       exposureProposalTraces: (runtimeState.exposureProposalTraces || []).slice(-20)
   };
 }
@@ -2701,6 +2705,7 @@ function fitPersistentStateToBudget(
       traderObserver: compactObserverState(working.traderObserver, 4000),
       traderAdvisoryState: traderAdvisory.compactState(working.traderAdvisoryState, 4000),
       traderShadowExperiment: traderShadow.compact(working.traderShadowExperiment, 6000),
+      traderExecutionBridge: traderExecution.compact(working.traderExecutionBridge, 12000),
       exposureProposalTraces: (working.exposureProposalTraces || []).slice(-5),
       automationGuards: working.automationGuards || {},
       cooldownMemory: working.cooldownMemory || {},
@@ -2937,6 +2942,9 @@ function applyPersistentState(state) {
   if (Array.isArray(state.improvementHistory)) runtimeState.improvementHistory = state.improvementHistory.slice(0, STRATEGY_CANDIDATE_HISTORY_LIMIT);
   if (state.lastImprovementRun && typeof state.lastImprovementRun === "object") runtimeState.lastImprovementRun = state.lastImprovementRun;
   if (state.lastMarketData) runtimeState.lastMarketData = state.lastMarketData;
+  if (state.traderExecutionBridge?.version === 1 && state.traderExecutionBridge.operations && state.traderExecutionBridge.managed && Array.isArray(state.traderExecutionBridge.queue)) {
+    runtimeState.traderExecutionBridge = traderExecution.recover(traderExecution.compact(state.traderExecutionBridge));
+  } else runtimeState.traderExecutionBridge = traderExecution.initialState();
   if (state.traderShadowExperiment?.version === 1 && state.traderShadowExperiment.phases && Array.isArray(state.traderShadowExperiment.records)) runtimeState.traderShadowExperiment = traderShadow.compact(state.traderShadowExperiment);
   if (state.traderAdvisoryState?.version === 1 && state.traderAdvisoryState.roster && Array.isArray(state.traderAdvisoryState.history)) runtimeState.traderAdvisoryState = traderAdvisory.compactState(state.traderAdvisoryState);
   if (state.secInstitutionalWatch && typeof state.secInstitutionalWatch === 'object') {
@@ -3006,7 +3014,13 @@ async function loadPersistentState() {
   }
 }
 
-async function savePersistentState() {
+let persistentWriteChain = Promise.resolve();
+function savePersistentState() {
+  const write = persistentWriteChain.then(() => savePersistentStateUnlocked());
+  persistentWriteChain = write.catch(() => false);
+  return write;
+}
+async function savePersistentStateUnlocked() {
   try {
     let state = buildPersistentState({ compact: hasUpstashMemory() });
 
@@ -3044,6 +3058,9 @@ async function savePersistentState() {
       };
     }
 
+    const reserved = Object.entries(runtimeState.traderExecutionBridge?.operations || {}).filter(([, op]) => op.status === "RESERVED");
+    if (reserved.some(([id, op]) => state.traderExecutionBridge?.disabledReason || state.traderExecutionBridge?.operations?.[id]?.proposal?.proposalId !== op.proposal.proposalId ||
+        op.intentId && state.orderIntents?.[op.intentId]?.strategyOperationId !== id)) throw new Error("STRATEGY_RESERVATION_NOT_DURABLE_IN_FITTED_STATE");
     const payload = JSON.stringify(state);
     lastMemorySaveBytes = Buffer.byteLength(payload, "utf8");
 
@@ -6243,6 +6260,7 @@ async function reconcileExecutionIntents({ trigger = "manual", limit = EXECUTION
     results
   };
   runtimeState.lastExecutionReconciliation = reconciliation;
+  reconcileTraderExecutionProofs();
   addAudit("EXECUTION_RECONCILIATION_COMPLETED", reconciliation);
   scheduleSave();
   return reconciliation;
@@ -13806,7 +13824,8 @@ async function executeDemoBuy(asset, amount) {
   }
 }
 
-async function executeBuy(asset, amount, marketData = null) {
+async function executeBuy(asset, amount, marketData = null, options = {}) {
+  if (options.strategyExecution && TRADING_MODE_LABEL !== "LIVE") return { skipped: true, executionAttempted: false, reason: "STRATEGY_LIVE_ONLY" };
   if (TRADING_MODE === "OBSERVE") return { skipped: true, mode: "OFF", reason: "Mode OFF : aucune exécution" };
   if (TRADING_MODE === "PAPER") return executePaperBuy(asset, Number(amount), marketData);
   if (DEMO_TRADING_ENABLED) return executeDemoBuy(asset, amount);
@@ -13853,8 +13872,10 @@ async function executeBuy(asset, amount, marketData = null) {
     return { skipped: true, mode: "LIVE", reason: livePolicy.blockers.join(","), policy: livePolicy };
   }
 
+  if (options.strategyExecution && !guardTraderNormalExecution(options, preflight, executionMarketData, { side: "BUY", asset, amountUsd: safeAmount })) return { skipped: true, executionAttempted: false, reason: "STRATEGY_REVALIDATION_FAILED" };
   const beforeSnapshot = buildAssetExecutionSnapshot(preflight.portfolio, asset);
   const intentResult = createOrderIntent("BUY", asset, safeAmount, {
+    ...(options.strategyExecution ? { proposalId: options.strategyExecution.proposalId, strategyOperationId: options.strategyExecution.operationId } : {}),
     beforeSnapshot,
     preflightValidation: preflight.validation || null,
     marketRateAtIntent: {
@@ -13882,6 +13903,13 @@ async function executeBuy(asset, amount, marketData = null) {
     sentAt: nowIso(),
     note: "Requête BUY envoyée une seule fois à eToro"
   });
+  if (options.strategyExecution) {
+    runtimeState.traderExecutionBridge.operations[options.strategyExecution.operationId].intentId = intent.id;
+    if (!await persistTraderExecution() || runtimeState.traderExecutionBridge.emergencyStop || !traderExecutionSettings().enabled) {
+      updateOrderIntentStatus(intent.id, EXECUTION_STATUS.UNCERTAIN, { note: "STRATEGY_DURABILITY_OR_STOP_BEFORE_SEND" });
+      return { skipped: true, uncertain: true, confirmed: false, intentId: intent.id, executionAttempted: false, reason: "STRATEGY_DURABILITY_OR_STOP_BEFORE_SEND" };
+    }
+  }
 
   try {
     const { response, data } = await fetchJsonWithRetry(
@@ -14039,7 +14067,9 @@ async function executeBuy(asset, amount, marketData = null) {
   }
 }
 
-async function executeSell(asset, marketData = null) {
+async function executeSell(asset, marketData = null, options = {}) {
+  if (options.strategyExecution && TRADING_MODE_LABEL !== "LIVE") return { skipped: true, executionAttempted: false, reason: "STRATEGY_LIVE_ONLY" };
+  if (options.partialUnits !== undefined && options.partialUnits !== null) return { skipped: true, executionAttempted: false, reason: "PARTIAL_CLOSE_NOT_RELIABLY_SUPPORTED" };
   if (TRADING_MODE === "OBSERVE") return { skipped: true, mode: "OBSERVE", reason: "Mode OBSERVE : aucune exécution" };
   if (TRADING_MODE === "PAPER") return executePaperSell(asset, marketData);
   if (!LIVE_TRADING_ENABLED) return { skipped: true, reason: "Trading LIVE non activé" };
@@ -14054,12 +14084,19 @@ async function executeSell(asset, marketData = null) {
   }
 
   const portfolio = preflight.portfolio;
-  const position = findOpenPosition(portfolio, asset);
+  const position = options.expectedPositionId !== undefined
+    ? (getClientPortfolio(portfolio).positions || []).find(p => String(getPositionId(p)) === String(options.expectedPositionId) && getInstrumentIdFromPosition(p) === WATCHLIST[asset])
+    : findOpenPosition(portfolio, asset);
   if (!position) return { skipped: true, reason: `Aucune position REAL ouverte pour ${asset}` };
   const positionId = getPositionId(position);
   const instrumentId = WATCHLIST[asset];
   if (!positionId) return { skipped: true, reason: `positionId introuvable pour ${asset}` };
 
+  if (options.strategyExecution) {
+    if (getFirstNumber(position, ["units", "Units", "amountInUnits", "AmountInUnits"]) !== options.expectedUnits) return { skipped: true, executionAttempted: false, reason: "TARGET_UNITS_CHANGED" };
+    const executionMarketData = await getMarketRates();
+    if (!guardTraderNormalExecution(options, preflight, executionMarketData, { side: "SELL", asset, positionId: String(getPositionId(position)), units: options.expectedUnits })) return { skipped: true, executionAttempted: false, reason: "STRATEGY_REVALIDATION_FAILED" };
+  }
   const beforeSnapshot = buildAssetExecutionSnapshot(portfolio, asset);
   const targetPresentBefore = (beforeSnapshot.positionIds || [])
     .map(String)
@@ -14080,6 +14117,7 @@ async function executeSell(asset, marketData = null) {
     };
   }
   const intentResult = createOrderIntent("SELL", asset, 0, {
+    ...(options.strategyExecution ? { proposalId: options.strategyExecution.proposalId, strategyOperationId: options.strategyExecution.operationId } : {}),
     beforeSnapshot,
     positionId,
     expectedPositionId: positionId,
@@ -14110,6 +14148,13 @@ async function executeSell(asset, marketData = null) {
     sentAt: nowIso(),
     note: "Requête SELL envoyée une seule fois à eToro"
   });
+  if (options.strategyExecution) {
+    runtimeState.traderExecutionBridge.operations[options.strategyExecution.operationId].intentId = intent.id;
+    if (!await persistTraderExecution() || runtimeState.traderExecutionBridge.emergencyStop || !traderExecutionSettings().enabled) {
+      updateOrderIntentStatus(intent.id, EXECUTION_STATUS.UNCERTAIN, { note: "STRATEGY_DURABILITY_OR_STOP_BEFORE_SEND" });
+      return { skipped: true, uncertain: true, confirmed: false, intentId: intent.id, executionAttempted: false, reason: "STRATEGY_DURABILITY_OR_STOP_BEFORE_SEND" };
+    }
+  }
 
   try {
     const { response, data } = await fetchJsonWithRetry(
@@ -14117,7 +14162,7 @@ async function executeSell(asset, marketData = null) {
       {
         method: "POST",
         headers,
-        body: JSON.stringify({ UnitsToDeduct: null })
+        body: JSON.stringify({ InstrumentId: instrumentId, UnitsToDeduct: null })
       },
       { label: `eToro LIVE SELL ${asset}`, retries: 0 }
     );
@@ -14661,6 +14706,138 @@ function recordTraderShadowScan(context, decisionRaw, control, aiDecisionCost, c
     return { status: "SHADOW_EXPERIMENT_INPUT_UNAVAILABLE", executionAllowed: false, brokerCalls: 0 };
   }
 }
+let traderExecutionContext = null;
+function traderExecutionSettings() {
+  return { enabled: process.env.TRADER_EXECUTION_ENABLED === "true", confirmation: process.env.TRADER_EXECUTION_CONFIRMATION || "",
+    entriesEnabled: process.env.TRADER_EXECUTION_ENTRIES_ENABLED === "true" && traderExecutionContext?.protectiveExitPending !== true,
+    exitsEnabled: process.env.TRADER_EXECUTION_EXITS_ENABLED === "true", emergencyStop: process.env.TRADER_EXECUTION_EMERGENCY_STOP === "true",
+    maxOrderUsd: LIVE_BUY_MAX_ORDER_USD, maxExitNotionalUsd: Number(process.env.TRADER_EXECUTION_MAX_EXIT_NOTIONAL_USD || LIVE_BUY_MAX_ORDER_USD), maxCostUsd: Number(process.env.TRADER_EXECUTION_MAX_COST_USD || 0) };
+}
+async function persistTraderExecution() {
+  runtimeState.traderExecutionBridge = traderExecution.compact(runtimeState.traderExecutionBridge);
+  if (runtimeState.traderExecutionBridge.disabledReason) return false;
+  const candidate = buildPersistentState({ compact: hasUpstashMemory() });
+  const fitted = hasUpstashMemory() ? fitPersistentStateToBudget(candidate).state : candidate;
+  if (fitted.traderExecutionBridge?.disabledReason || JSON.stringify(fitted.traderExecutionBridge?.operations) !== JSON.stringify(runtimeState.traderExecutionBridge.operations)) return false;
+  return savePersistentState();
+}
+function enqueueTraderAdvisory(report, leoDecision, decisionTime, referencePrice) {
+  if (!cachedTraderExposure || cachedTraderExposure.owned.scope === "VIRTUAL_EXPERIMENT_ONLY") return;
+  for (const item of report.proposals || []) {
+    if (item.status !== "ADVISORY_REVIEW_ONLY" || !item.draft || !item.preview?.trace?.proposalId) continue;
+    const draft = item.draft, record = buildUniverse(WATCHLIST, ASSET_RULES, CONFIGURED_UNIVERSE_CANDIDATES).find(r => r.instrumentId === draft.instrumentId);
+    const target = cachedTraderExposure.owned.rows.find(r => r.positionId === String(draft.positionId));
+    if (!record) continue;
+    try {
+      const p = { proposalId: item.preview.trace.proposalId, decisionId: createHash("sha256").update(JSON.stringify({ at: decisionTime, instrumentId: draft.instrumentId, side: draft.side })).digest("hex"), policyVersion: report.policy.version, policyId: runtimeState.traderAdvisoryState.policyId, createdAt: report.generatedAt,
+        side: draft.side, asset: record.symbol, instrumentId: draft.instrumentId, traderSources: draft.traderSources,
+        referencePrice, priceDriftLimitPct: report.policy.maxDecisionPriceDriftPct, leoConfidence: typeof leoDecision?.confidence === "number" ? leoDecision.confidence : 0, scope: "REAL_MANAGED_STRATEGY", decision: item.status,
+        ...(draft.side === "BUY" ? { amountUsd: draft.amount } : { positionId: String(draft.positionId), units: draft.units ?? target?.units, quantityMode: draft.quantityMode }) };
+      runtimeState.traderExecutionBridge = traderExecution.enqueue(runtimeState.traderExecutionBridge, p);
+    } catch { /* Unusable provenance/quantity cannot become an order candidate. */ }
+  }
+}
+function evaluateAutomaticTraderProposals(context, control, cutoff = Date.now()) {
+  // Cache-only continuation of this scan's own decision; no second AI/provider call.
+  const decision = control?.finalDecision;
+  const universe = buildUniverse(WATCHLIST, ASSET_RULES, CONFIGURED_UNIVERSE_CANDIDATES);
+  const item = universe.find(r => r.symbol === decision?.asset);
+  const view = currentTraderExposureView(context.realPortfolio);
+  const managedTargets = view.owned.rows.filter(r => r.instrumentId === item?.instrumentId && r.ownership === "DIRECT" &&
+    runtimeState.traderExecutionBridge.managed[r.positionId]?.status === "VERIFIED_MANAGED").sort((a, b) => a.positionId.localeCompare(b.positionId));
+  const target = managedTargets[0];
+  const quote = context.marketSummary?.ratesByAsset?.[decision?.asset];
+  const idea = item && ["BUY", "SELL"].includes(decision?.decision) ? { instrumentId: item.instrumentId, side: decision.decision,
+    amountUsd: decision.amount_usd, asOf: new Date(cutoff).toISOString(), ownAnalysisApproved: control.approved === true,
+    hardVeto: control.approved !== true, referencePrice: quote?.mid ?? null, positionId: target?.positionId,
+    exitExplicit: decision.decision === "SELL" && control.approved === true } : null;
+  const quotes = Object.fromEntries(universe.map(r => { const q = context.marketSummary?.ratesByAsset?.[r.symbol]; return [r.instrumentId, { instrumentId: r.instrumentId, mid: q?.mid ?? null, asOf: q?.date, currency: "USD" }]; }));
+  const result = traderAdvisory.evaluate({ state: runtimeState.traderAdvisoryState, observerView: traderObserver.view(), observerState: runtimeState.traderObserver,
+    ideas: idea ? [idea] : [], exposure: view, quotes, costs: context.traderAdvisoryCostEvidence || {}, eligibility: context.traderAdvisoryEligibilityEvidence || {},
+    sizingEvidence: context.traderExecutionSizingEvidence || null, overrides: JSON.parse(process.env.TRADER_ADVISORY_POLICY_JSON || "{}"), now: cutoff });
+  runtimeState.traderAdvisoryState = traderAdvisory.compactState(result.state); lastTraderAdvisoryReport = result.report;
+  enqueueTraderAdvisory(result.report, decision, new Date(cutoff).toISOString(), quote?.mid); scheduleSave();
+}
+function prepareTraderExecutionEvidence(p, context) {
+  const now = Date.now(), portfolio = context?.realPortfolio;
+  const view = buildTraderExposureView({ portfolioResponse: portfolio, observerView: traderObserver.view(), intents: Object.values(runtimeState.orderIntents || {}),
+    universe: buildUniverse(WATCHLIST, ASSET_RULES, CONFIGURED_UNIVERSE_CANDIDATES), now });
+  const accountRef = extractPortfolioIdentifier(portfolio), row = buildUniverse(WATCHLIST, ASSET_RULES, CONFIGURED_UNIVERSE_CANDIDATES).find(r => r.symbol === p.asset);
+  const q = context?.marketData?.normalized?.ratesByAsset?.[p.asset] || context?.marketSummary?.ratesByAsset?.[p.asset];
+  const risk = riskController({ decision: p.side, asset: p.asset, amount_usd: p.amountUsd || 0, confidence: p.leoConfidence, risk_check: "passed", reason: "TRADER_STRATEGY_REVALIDATION" },
+    portfolio, context?.marketData, context?.trendSummary, context?.foundationAgents);
+  const cached = instrumentEligibilityRegistry.inspect({ instrumentId: p.instrumentId, symbol: p.asset, category: row?.category,
+    allowedAssets: [...TRADE_ALLOWED_ASSETS], allowedCategories: [...TRADE_ALLOWED_CATEGORIES], operation: { action: p.side === "BUY" ? "OPEN" : "CLOSE", partial: false,
+      currency: "USD", settlementType: "Underlying", direction: "LONG", leverage: 1, amount: p.amountUsd } });
+  const preview = previewExposureProposal(p.side === "BUY" ? { instrumentId: p.instrumentId, side: "BUY", currency: "USD", amount: p.amountUsd, traderSources: p.traderSources }
+    : { instrumentId: p.instrumentId, side: "SELL", currency: "USD", positionId: p.positionId, quantityMode: "FULL_POSITION", traderSources: p.traderSources }, view,
+    { observerState: runtimeState.traderObserver, observerView: traderObserver.view(), now, sizingEvidence: context?.traderExecutionSizingEvidence || null,
+      policy: { maxOrderUsd: LIVE_BUY_MAX_ORDER_USD, maxInstrumentWeightPct: MAX_ASSET_WEIGHT_PCT,
+        minimumCashReserveUsd: Math.max(10, Number(extractPortfolioSummary(portfolio).totalTrackedValue || 0) * MIN_CASH_RESERVE_PCT / 100) } });
+  const normalizedEligibility = context?.traderAdvisoryEligibilityEvidence?.[p.instrumentId];
+  const stats = getExecutionStats24h(), binding = context?.validatedPortfolioIdentity;
+  const sourceProof = p.traderSources.every(ref => {
+    const trader = traderObserver.view().traders.find(t => t.realCID === ref.traderId);
+    return trader && ["AVAILABLE", "PARTIAL"].includes(trader.status) && !trader.historicalSnapshot && trader.observationId === ref.observationId &&
+      !runtimeState.traderObserver.observations.some(o => o.corrects === ref.observationId) && trader.snapshot?.portfolio?.positions?.some(row => row.instrumentId === p.instrumentId);
+  });
+  // Missing adapters remain unknown. No account/key identity, costs or release is inferred from a read.
+  return { mode: TRADING_MODE_LABEL, armed: LIVE_EXECUTION_ARMED, buyArmed: liveBuyReady(process.env), accountRef,
+    identityVerified: binding?.ok === true, tokenBindingVerified: false,
+    release: runtimeState.traderExecutionBridge.releaseApproval || null, asOf: portfolio?.fetchedAt || null,
+    positions: view.owned.rows, portfolioComplete: view.owned.coverage === "COMPLETE", pendingComplete: view.pending.status === "COMPLETE_KNOWN_BUY_UPPER_BOUND",
+    uncertainOrPending: view.pending.orders.length > 0 || Object.values(runtimeState.orderIntents || {}).some(i => isActiveExecutionStatus(i.status)),
+    instrument: { instrumentId: row?.instrumentId, asset: row?.symbol, allowed: TRADE_ALLOWED_ASSETS.has(p.asset) && TRADE_ALLOWED_CATEGORIES.has(row?.category) },
+    quote: { instrumentId: p.instrumentId, asOf: q?.date, currency: "USD", bid: q?.bid, ask: q?.ask },
+    eligibility: { instrumentId: p.instrumentId, side: p.side, asOf: cached.fetchedAt, allowed: cached.technicalEligibility === "ALLOWED_CONFIGURATION",
+      accountRef, currency: cached.currency, leverage: 1, settlementType: "Underlying", minimumUsd: normalizedEligibility?.minimumUsd ?? null, maximumUsd: normalizedEligibility?.maximumUsd ?? null },
+    cost: context?.traderExecutionCosts?.[p.proposalId] || context?.traderAdvisoryCostEvidence?.[p.instrumentId] || null,
+    cashUsd: extractPortfolioSummary(portfolio).availableCash, reserveUsd: Math.max(10, Number(extractPortfolioSummary(portfolio).totalTrackedValue || 0) * MIN_CASH_RESERVE_PCT / 100),
+    exposure: { coverage: preview.status === "AVAILABLE_ESTIMATED_ACCOUNT_VALUE_SCENARIO" && preview.sizing.status !== "UNAVAILABLE" ? "COMPLETE" : "INCOMPLETE",
+      afterWithinLimits: p.side === "BUY" ? preview.sizing.headroomUsd !== null && p.amountUsd <= preview.sizing.headroomUsd : preview.marginal.proposedDeltaUsd !== null,
+      proposalId: p.proposalId, amountUsd: p.amountUsd, units: p.units, asOf: new Date(now).toISOString() },
+    risk: { approved: risk.approved && risk.finalDecision.decision === p.side && risk.finalDecision.asset === p.asset, instrumentId: p.instrumentId, side: p.side,
+      amountUsd: risk.finalDecision.amount_usd, proposalId: p.proposalId, positionId: p.side === "SELL" ? String(p.positionId) : null, units: p.units, asOf: new Date(now).toISOString() },
+    limits: { cadenceAllowed: stats.hoursSinceLastExecution === null || stats.hoursSinceLastExecution >= MIN_HOURS_BETWEEN_EXECUTIONS,
+      dailyAllowed: stats.total < MAX_EXECUTED_ORDERS_24H && (p.side === "BUY" ? stats.buys < MAX_BUYS_24H : stats.sells < MAX_SELLS_24H), singleWriterVerified: false },
+    sourceProof: { status: sourceProof && !preview.problems.includes("TRADER_SOURCE_UNVERIFIED_OR_STALE") ? "CURRENT_REFERENCES_VERIFIED" : "UNAVAILABLE", opposed: p.side === "BUY" && p.traderSources.some(ref => traderObserver.view().traders.find(t => t.realCID === ref.traderId)?.snapshot?.portfolio?.positions?.some(row => row.instrumentId === p.instrumentId && (row.isBuy !== true || row.leverage !== 1))), proposalId: p.proposalId, asOf: new Date(now).toISOString() } };
+}
+function reconcileTraderExecutionProofs() {
+  for (const [id, op] of Object.entries(runtimeState.traderExecutionBridge.operations || {})) {
+    if (["CONFIRMED", "VETOED", "REJECTED"].includes(op.status) || !op.intentId) continue;
+    const intent = runtimeState.orderIntents[op.intentId];
+    if (!intent || intent.strategyOperationId !== id || intent.proposalId !== op.proposal.proposalId) continue;
+    runtimeState.traderExecutionBridge = traderExecution.reconcile(runtimeState.traderExecutionBridge, id, {
+      intentId: intent.id, confirmed: intent.status === EXECUTION_STATUS.CONFIRMED, verification_status: intent.status,
+      businessAcknowledged: intent.businessAcknowledged === true, data: { positionId: intent.response?.positionId || null },
+      verification: { beforeSnapshot: intent.beforeSnapshot, afterSnapshot: intent.afterSnapshot }
+    }, Date.now());
+  }
+}
+function guardTraderNormalExecution(options, preflight, marketData, request) {
+  const metadata = options.strategyExecution, op = runtimeState.traderExecutionBridge.operations[metadata?.operationId];
+  if (!op || !traderExecutionContext || !request || op.proposal.side !== request.side || op.proposal.asset !== request.asset ||
+      request.side === "BUY" && op.proposal.amountUsd !== request.amountUsd || request.side === "SELL" &&
+      (String(op.proposal.positionId) !== request.positionId || op.proposal.units !== request.units || op.proposal.quantityMode !== "FULL_POSITION")) return false;
+  const context = { ...traderExecutionContext, realPortfolio: preflight.portfolio, validatedPortfolioIdentity: preflight.identity, marketData, marketSummary: marketData?.normalized };
+  const evidence = prepareTraderExecutionEvidence(op.proposal, context);
+  const withoutSelf = { ...runtimeState.traderExecutionBridge, operations: Object.fromEntries(Object.entries(runtimeState.traderExecutionBridge.operations).filter(([id]) => id !== metadata.operationId)) };
+  return traderExecution.preflight(withoutSelf, op.proposal, evidence, traderExecutionSettings(), Date.now()).length === 0 &&
+    traderExecution.guardExecutor(runtimeState.traderExecutionBridge, metadata, evidence.positions, evidence.accountRef, Date.now());
+}
+const traderExecutionController = traderExecution.createController({
+  getState: () => runtimeState.traderExecutionBridge, setState: state => { runtimeState.traderExecutionBridge = state; }, persist: persistTraderExecution,
+  settings: traderExecutionSettings, evidence: p => prepareTraderExecutionEvidence(p, traderExecutionContext),
+  executeNormal: (p, metadata) => p.side === "BUY" ? executeBuy(p.asset, p.amountUsd, traderExecutionContext?.marketData, { strategyExecution: metadata })
+    : executeSell(p.asset, traderExecutionContext?.marketData, { strategyExecution: metadata, expectedPositionId: p.positionId, expectedUnits: p.units })
+});
+async function processTraderExecution(context, control) {
+  traderExecutionContext = { ...context, protectiveExitPending: control?.approved && control.finalDecision.decision === "SELL" };
+  try {
+    evaluateAutomaticTraderProposals(context, control);
+    return await traderExecutionController.drain();
+  } finally { traderExecutionContext = null; }
+}
 async function executeControlledDecision(control, marketData) {
   if (!control?.approved) return { skipped: true, executionAttempted: false, reason: "RISK_VETO" };
   const d = control.finalDecision;
@@ -14840,9 +15017,12 @@ async function scanMarket(source = "manual-scan") {
           source
         }, operation)
       : operation();
-    if (control.approved && control.finalDecision.decision === "BUY") {
+    const traderExecutionActive = TRADING_MODE_LABEL === "LIVE" && traderExecutionSettings().enabled;
+    const traderExecutionResult = traderExecutionActive ? await processTraderExecution(context, control) : null;
+    if (traderExecutionActive) execution = { ...traderExecutionResult, mode: "LIVE", skipped: !traderExecutionResult.executionAttempted };
+    if (!traderExecutionActive && control.approved && control.finalDecision.decision === "BUY") {
       execution = await observeDecision(() => executeControlledDecision(control, context.marketData));
-    } else if (control.approved && control.finalDecision.decision === "SELL") {
+    } else if (control.approved && control.finalDecision.decision === "SELL" && !traderExecutionResult?.executionAttempted) {
       execution = await observeDecision(() => executeControlledDecision(control, context.marketData));
     }
 
@@ -19705,6 +19885,19 @@ function currentTraderExposureView(portfolio) {
   return cachedTraderExposure;
 }
 // Explicit cache-only evaluation; never invoked by the scan or execution path.
+app.get("/trader-execution-status", requireSecret, (_req, res) => {
+  const state = runtimeState.traderExecutionBridge;
+  res.json({ version: traderExecution.VERSION, enabled: traderExecutionSettings().enabled, emergencyStop: state.emergencyStop,
+    recoveryRequired: state.recoveryRequired, disabledReason: state.disabledReason, queued: state.queue.length,
+    operations: Object.values(state.operations).map(o => ({ proposalId: o.proposal.proposalId, side: o.proposal.side, status: o.status, intentId: o.intentId || null, vetoes: o.vetoes || [] })),
+    managedPositionCount: Object.keys(state.managed).length, readiness: "BLOCKED_UNTIL_ACCOUNT_TOKEN_RELEASE_COST_EXPOSURE_AND_SINGLE_WRITER_PROOFS", partialClose: "BLOCKED_NOT_RELIABLY_SUPPORTED" });
+});
+app.post("/trader-execution-stop", requireSecret, async (req, res) => {
+  if (!req.body || Object.keys(req.body).length !== 1 || req.body.stop !== true) return res.status(400).json({ error: "STOP_TRUE_REQUIRED" });
+  runtimeState.traderExecutionBridge.emergencyStop = true;
+  const saved = await persistTraderExecution();
+  res.status(saved ? 200 : 503).json({ stopped: true, persisted: saved, executionAttempted: false });
+});
 app.get("/trader-shadow-status", requireSecret, (_req, res) => {
   res.json(traderShadow.report(runtimeState.traderShadowExperiment));
 });
@@ -19742,6 +19935,7 @@ app.post("/trader-advisory-evaluate", requireSecret, (req, res) => {
       exposure: cachedTraderExposureIntents === JSON.stringify(runtimeState.orderIntents || {}) ? cachedTraderExposure : null,
       ideas, quotes, costs: {}, eligibility: {}, overrides, now: Date.now() });
     runtimeState.traderAdvisoryState = traderAdvisory.compactState(result.state);
+    enqueueTraderAdvisory(result.report, decision, log?.time, runtimeState.lastMarketData?.normalized?.ratesByAsset?.[decision?.asset]?.mid);
     lastTraderAdvisoryReport = { ...result.report, historyTruncated: runtimeState.traderAdvisoryState.historyTruncated,
       runtimeEvidence: { costAdapter: "UNAVAILABLE_NO_BOUND_SIDE_SIZE_ACCOUNT_ESTIMATE",
         decisionReferencePrice: "NOT_RETAINED", exactSellPosition: "NOT_RETAINED",
@@ -20722,9 +20916,14 @@ module.exports = {
   executePaperBuy,
   executePaperSell,
   executeBuy,
+  executeSell,
   recordPaperDecision,
   recordTraderShadowScan,
   executeControlledDecision,
+  guardTraderNormalExecution,
+  prepareTraderExecutionEvidence,
+  reconcileTraderExecutionProofs,
+  evaluateAutomaticTraderProposals,
   recordPaperCashFlow,
   ensurePaperPortfolio,
   markPaperPortfolio,
