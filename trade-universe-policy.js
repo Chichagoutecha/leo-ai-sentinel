@@ -125,7 +125,8 @@ function evaluateBuyPolicy({ mode, armed = false, confirmation = '', demoArmed =
   if (!Number.isFinite(cash) || cash < numericAmount + Number(minimumCashReserve || 0)) blockers.push('AVAILABLE_CASH_OR_RESERVE_INSUFFICIENT');
   if (!Number.isFinite(Number(currentPositionCount)) || Number(currentPositionCount) >= Number(maxPositions)) blockers.push('POSITION_LIMIT_REACHED_OR_UNKNOWN');
   if (duplicateOrPending) blockers.push('DUPLICATE_OR_PENDING_ORDER');
-  return { allowed: blockers.length === 0, blockers, executionAttempted: false };
+  return { allowed: blockers.length === 0, blockers, executionAttempted: false,
+    blockerDetails: blockers.map(code => require('./trading-availability').describeVeto(code, { side: 'BUY', asset: symbol })) };
 }
 
 module.exports = {
