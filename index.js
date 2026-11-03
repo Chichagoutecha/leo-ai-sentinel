@@ -137,7 +137,7 @@ const fs = require("fs");
 const path = require("path");
 const { marketSourceAudit, decisionMarketEvidence } = require('./market-source-audit');
 const { createTraderObserver } = require('./etoro-trader-observer');
-const { emptyState: emptyTraderObserverState, compactObserverState } = require('./trader-observer');
+const { emptyState: emptyTraderObserverState, compactObserverState, digest: publicDataDigest } = require('./trader-observer');
 const { buildTraderExposureView, validateProposal: validateExposureProposal, previewProposal: previewExposureProposal } = require('./trader-exposure-link');
 const { createEligibilityClient, createEligibilityRegistry } = require('./etoro-instrument-eligibility');
 const { resolveTradingMode, liveBuyReady, demoBuyReady, liveBuyMaxOrderUsd, classifyAsset, buildUniverse, resolveTradeAllowlist, resolveAllowedCategories, parseExclusionReasons, analyzeLookThroughExposure, evaluateBuyPolicy } = require('./trade-universe-policy');
@@ -146,6 +146,7 @@ const traderAdvisory = require('./trader-advisory-policy');
 const { virtualFill } = require('./paper-shadow-execution');
 const traderShadow = require('./trader-shadow-experiment');
 const traderExecution = require('./trader-execution-bridge');
+const tradingAvailability = require('./trading-availability');
 const { ENDPOINT: SEC_BLACKROCK_ENDPOINT, REFRESH_INTERVAL_MS: SEC_REFRESH_INTERVAL_MS,
   normalizeBlackRockFilings, institutionalWatchStatus } = require('./sec-institutional-watch');
 
@@ -4392,24 +4393,26 @@ async function getPortfolio(options = {}) {
 }
 
 async function verifyRealPortfolioBeforeExecution({ asset, side, amount = 0 } = {}) {
+  const explain = code => ({ vetoDetails: [tradingAvailability.describeVeto(code, { side, asset, instrumentId: WATCHLIST[asset] })] });
   if (!LIVE_TRADING_ENABLED) {
-    return { ok: false, reason: "Préflight réel demandé hors mode LIVE" };
+    return { ok: false, ...explain("LIVE_MODE_AND_ARMING_REQUIRED"), reason: "Préflight réel demandé hors mode LIVE" };
   }
   if (!LIVE_EXECUTION_ARMED) {
     return {
       ok: false,
+      ...explain("LIVE_MODE_AND_ARMING_REQUIRED"),
       reason: "LIVE_EXECUTION_ARMED n'est pas égal à true",
       action: "Garder le bot en OFF/SHADOW tant que les contrôles ne sont pas validés."
     };
   }
   if (String(side || "").toUpperCase() === "BUY" && !liveBuyReady(process.env)) {
-    return { ok: false, reason: "LIVE_BUY_CONFIRMATION_REQUIRED", action: "Activer séparément LIVE_BUY_CONFIRMATION après validation." };
+    return { ok: false, ...explain("LIVE_BUY_NOT_EXPLICITLY_ARMED"), reason: "LIVE_BUY_CONFIRMATION_REQUIRED", action: "Activer séparément LIVE_BUY_CONFIRMATION après validation." };
   }
 
   const portfolio = await getPortfolio({ environment: "REAL" });
   const validation = validatePortfolioResponse(portfolio, { requireReal: true });
   if (!validation.ok) {
-    return { ok: false, reason: `Portefeuille REAL non vérifié: ${validation.errors.join(", ")}`, validation };
+    return { ok: false, ...explain("PORTFOLIO_OR_PENDING_INCOMPLETE"), reason: `Portefeuille REAL non vérifié: ${validation.errors.join(", ")}`, validation };
   }
 
   const summary = extractPortfolioSummary(portfolio);
@@ -4418,6 +4421,7 @@ async function verifyRealPortfolioBeforeExecution({ asset, side, amount = 0 } = 
   if (!identity.ok) {
     return {
       ok: false,
+      ...explain("ACCOUNT_OR_TOKEN_BINDING_UNVERIFIED"),
       reason: `Identité du portefeuille REAL non validée: ${identity.reasons.join(", ")}`,
       validation,
       identity,
@@ -4428,39 +4432,39 @@ async function verifyRealPortfolioBeforeExecution({ asset, side, amount = 0 } = 
   const safeAsset = String(asset || "").toUpperCase();
   const safeAmount = Number(amount || 0);
   if (!WATCHLIST[safeAsset]) {
-    return { ok: false, reason: `Actif invalide pour le préflight: ${safeAsset}`, validation };
+    return { ok: false, ...explain("INSTRUMENT_UNKNOWN"), reason: `Actif invalide pour le préflight: ${safeAsset}`, validation };
   }
 
   if (normalizedSide === "BUY") {
     if (hasOpenPosition(portfolio, safeAsset)) {
-      return { ok: false, reason: `Le portefeuille REAL détient déjà ${safeAsset}`, validation };
+      return { ok: false, ...explain("EXISTING_POSITION"), reason: `Le portefeuille REAL détient déjà ${safeAsset}`, validation };
     }
     if (hasOpenOrder(portfolio, safeAsset)) {
-      return { ok: false, reason: `Le portefeuille REAL possède déjà un ordre d'achat sur ${safeAsset}`, validation };
+      return { ok: false, ...explain("EXISTING_ORDER"), reason: `Le portefeuille REAL possède déjà un ordre d'achat sur ${safeAsset}`, validation };
     }
     const liveOrderPolicy = getProgressiveOrderPolicy(summary);
     const minimumExecutableVirtualOrderUsd = Number(liveOrderPolicy.minimumExecutableVirtualOrderUsd || MIN_ORDER_USD);
     if (!liveOrderPolicy.realCopySizing?.valid) {
-      return { ok: false, reason: "Configuration du capital réel copié invalide", validation, liveOrderPolicy };
+      return { ok: false, ...explain("COPY_SIZING_UNVERIFIED"), reason: "Configuration du capital réel copié invalide", validation, liveOrderPolicy };
     }
     if (!Number.isFinite(safeAmount) || safeAmount < minimumExecutableVirtualOrderUsd) {
-      return { ok: false, reason: `Montant LIVE invalide: ${safeAmount} USD < minimum virtuel ${minimumExecutableVirtualOrderUsd} USD nécessaire pour répliquer au moins ${MIN_REAL_COPIED_POSITION_USD} USD`, validation, liveOrderPolicy };
+      return { ok: false, ...explain("ORDER_AMOUNT_INVALID"), reason: `Montant LIVE invalide: ${safeAmount} USD < minimum virtuel ${minimumExecutableVirtualOrderUsd} USD nécessaire pour répliquer au moins ${MIN_REAL_COPIED_POSITION_USD} USD`, validation, liveOrderPolicy };
     }
     if (safeAmount > Number(liveOrderPolicy.maximumOrderUsd || 0) + 0.0001) {
-      return { ok: false, reason: `Montant LIVE ${safeAmount} USD supérieur au plafond courant ${liveOrderPolicy.maximumOrderUsd} USD`, validation, liveOrderPolicy };
+      return { ok: false, ...explain("ORDER_AMOUNT_ABOVE_HARD_CAP"), reason: `Montant LIVE ${safeAmount} USD supérieur au plafond courant ${liveOrderPolicy.maximumOrderUsd} USD`, validation, liveOrderPolicy };
     }
     if (Number(validation.availableCash) < safeAmount) {
-      return { ok: false, reason: `Cash REAL insuffisant (${validation.availableCash} USD < ${safeAmount} USD)`, validation };
+      return { ok: false, ...explain("AVAILABLE_CASH_OR_RESERVE_INSUFFICIENT"), reason: `Cash REAL insuffisant (${validation.availableCash} USD < ${safeAmount} USD)`, validation };
     }
     const allocationGuard = allocationCheckForBuy(safeAsset, summary, safeAmount);
     if (PORTFOLIO_ALLOCATION_MODE === "enforced" && !allocationGuard.ok) {
-      return { ok: false, reason: allocationGuard.reason, validation, summary, allocationGuard };
+      return { ok: false, ...explain("ALLOCATION_ENTRY_VETO"), reason: allocationGuard.reason, validation, summary, allocationGuard };
     }
   }
 
   if (normalizedSide === "SELL") {
     if (!hasOpenPosition(portfolio, safeAsset)) {
-      return { ok: false, reason: `Aucune position REAL ouverte sur ${safeAsset}`, validation };
+      return { ok: false, ...explain("NO_POSITION"), reason: `Aucune position REAL ouverte sur ${safeAsset}`, validation };
     }
     // La duplication SELL est protégée par les intents persistants et
     // l'ExecutionVerifier. ordersForClose du PnL n'est pas traité comme un
@@ -13527,16 +13531,17 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
     },
     reason,
     code,
-    diagnostics
+    diagnostics,
+    vetoDetails: [tradingAvailability.describeVeto(code, { side: d.decision, asset: d.asset, instrumentId: WATCHLIST[d.asset] })]
   });
 
-  if (d.decision === "HOLD") return hold("HOLD choisi", "passed");
+  if (d.decision === "HOLD") return hold("HOLD choisi", "passed", "HOLD_CHOSEN");
   const unresolvedLiveIntents = Object.values(runtimeState.orderIntents || {})
     .filter((intent) => intent?.mode === "LIVE" && isActiveExecutionStatus(intent?.status));
   if (LIVE_TRADING_ENABLED && unresolvedLiveIntents.length > 0) {
-    return hold(`ExecutionVerifier bloque tout nouvel ordre: ${unresolvedLiveIntents.length} intent(s) LIVE à réconcilier`);
+    return hold(`ExecutionVerifier bloque tout nouvel ordre: ${unresolvedLiveIntents.length} intent(s) LIVE à réconcilier`, "failed", "UNRESOLVED_LIVE_INTENTS");
   }
-  if (d.risk_check !== "passed") return hold("Risk check IA non validé");
+  if (d.risk_check !== "passed") return hold("Risk check IA non validé", "failed", "AI_RISK_VETO");
   if (PAPER_TRADING_ENABLED && d.decision === "BUY" && runtimeState.paperPortfolio?.seedCoverage?.complete === false) {
     return hold("Portefeuille SHADOW incomplet au démarrage; initialiser ou vérifier le portefeuille virtuel avant de simuler un achat", "failed", "SHADOW_SEED_INCOMPLETE");
   }
@@ -13544,17 +13549,17 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
       runtimeState.paperPortfolio.snapshots[runtimeState.paperPortfolio.snapshots.length - 1]?.valuationComplete === false) {
     return hold("Valorisation SHADOW incomplète ou périmée; achat virtuel bloqué jusqu'à une couverture de prix suffisante", "failed", "SHADOW_VALUATION_INCOMPLETE");
   }
-  if (!WATCHLIST[d.asset]) return hold("Actif absent du registre d'instruments");
+  if (!WATCHLIST[d.asset]) return hold("Actif absent du registre d'instruments", "failed", "INSTRUMENT_UNKNOWN");
   if ((LIVE_TRADING_ENABLED || DEMO_TRADING_ENABLED) &&
       (!TRADE_ALLOWED_ASSETS.has(d.asset) || !TRADE_ALLOWED_CATEGORIES.has(classifyAsset(d.asset, ASSET_RULES[d.asset])))) {
-    return hold("Actif ou catégorie absent de la liste explicite d'achat autorisé");
+    return hold("Actif ou catégorie absent de la liste explicite d'achat autorisé", "failed", "INSTRUMENT_NOT_ALLOWED");
   }
-  if (agents.healthAgent?.circuitBreakerOpen) return hold(`Circuit breaker ouvert: ${agents.healthAgent.reasons.join(", ")}`);
+  if (agents.healthAgent?.circuitBreakerOpen) return hold(`Circuit breaker ouvert: ${agents.healthAgent.reasons.join(", ")}`, "failed", "HEALTH_CIRCUIT_OPEN");
 
   const marketCheck = isMarketRateTradable(marketData, d.asset);
-  if (!marketCheck.ok) return hold(`MarketDataAgent bloque : ${marketCheck.reason}`);
+  if (!marketCheck.ok) return hold(`MarketDataAgent bloque : ${marketCheck.reason}`, "failed", "MARKET_RATE_INVALID");
   const integrityCheck = dataIntegrityCheckForAsset(agents.dataIntegrityAgent, d.asset);
-  if (!integrityCheck.ok) return hold(integrityCheck.reason);
+  if (!integrityCheck.ok) return hold(integrityCheck.reason, "failed", "DATA_INTEGRITY_VETO");
   const technicalCheck = technicalCheckForAsset(
     agents.technicalAnalysisAgent,
     agents.marketRegimeAgent,
@@ -13563,30 +13568,30 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
     d.confidence,
     summary
   );
-  if (!technicalCheck.ok) return hold(technicalCheck.reason);
+  if (!technicalCheck.ok) return hold(technicalCheck.reason, "failed", "TECHNICAL_VETO");
   const intelligenceCheck = intelligenceCheckForAsset(
     agents.intelligenceAnalysisAgent, d.asset, d.decision, d.confidence
   );
-  if (!intelligenceCheck.ok) return hold(intelligenceCheck.reason);
+  if (!intelligenceCheck.ok) return hold(intelligenceCheck.reason, "failed", "INTELLIGENCE_VETO");
   const macroCheck = macroCreditCheckForDecision(
     agents.macroCreditFundamentalRegimeAgent, d
   );
-  if (!macroCheck.ok) return hold(macroCheck.reason);
+  if (!macroCheck.ok) return hold(macroCheck.reason, "failed", "MACRO_ENTRY_VETO");
   const councilCheck = councilCheckForDecision(agents.agentCouncil, d);
-  if (!councilCheck.ok) return hold(councilCheck.reason);
+  if (!councilCheck.ok) return hold(councilCheck.reason, "failed", "COUNCIL_VETO");
   const riskSellCheck = riskSellCheckForDecision(agents.riskSellIntelligenceAgent, d);
-  if (!riskSellCheck.ok) return hold(riskSellCheck.reason);
+  if (!riskSellCheck.ok) return hold(riskSellCheck.reason, "failed", "RISK_SELL_VETO");
 
   const trend = getTrendForAsset(trendSummary, d.asset);
-  if (d.decision === "BUY" && trend?.trendSignal === "strong_down" && d.confidence < 85) return hold(`TrendMemoryAgent bloque : tendance forte baissière sur ${d.asset}`);
-  if (d.decision === "BUY" && trend?.volatilitySignal === "high" && d.confidence < 88) return hold(`TrendMemoryAgent bloque : volatilité élevée sur ${d.asset}`);
-  if (executionStats.total >= MAX_EXECUTED_ORDERS_24H) return hold(`Limite d'ordres 24h atteinte (${executionStats.total}/${MAX_EXECUTED_ORDERS_24H})`);
-  if (executionStats.hoursSinceLastExecution !== null && executionStats.hoursSinceLastExecution < MIN_HOURS_BETWEEN_EXECUTIONS) return hold(`Dernier ordre trop récent (${executionStats.hoursSinceLastExecution.toFixed(2)}h)`);
+  if (d.decision === "BUY" && trend?.trendSignal === "strong_down" && d.confidence < 85) return hold(`TrendMemoryAgent bloque : tendance forte baissière sur ${d.asset}`, "failed", "TREND_ENTRY_VETO");
+  if (d.decision === "BUY" && trend?.volatilitySignal === "high" && d.confidence < 88) return hold(`TrendMemoryAgent bloque : volatilité élevée sur ${d.asset}`, "failed", "VOLATILITY_ENTRY_VETO");
+  if (executionStats.total >= MAX_EXECUTED_ORDERS_24H) return hold(`Limite d'ordres 24h atteinte (${executionStats.total}/${MAX_EXECUTED_ORDERS_24H})`, "failed", "GLOBAL_ORDER_LIMIT");
+  if (executionStats.hoursSinceLastExecution !== null && executionStats.hoursSinceLastExecution < MIN_HOURS_BETWEEN_EXECUTIONS) return hold(`Dernier ordre trop récent (${executionStats.hoursSinceLastExecution.toFixed(2)}h)`, "failed", "EXECUTION_COOLDOWN");
 
   const rules = ASSET_RULES[d.asset];
   if (d.decision === "BUY") {
-    if (agents.riskBudgetAgent?.newBuyBlocked) return hold(`RiskBudgetAgent bloque les achats: ${agents.riskBudgetAgent.blocks.join(", ")}`);
-    if (executionStats.buys >= MAX_BUYS_24H) return hold(`Limite BUY 24h atteinte (${executionStats.buys}/${MAX_BUYS_24H})`);
+    if (agents.riskBudgetAgent?.newBuyBlocked) return hold(`RiskBudgetAgent bloque les achats: ${agents.riskBudgetAgent.blocks.join(", ")}`, "failed", "RISK_BUDGET_ENTRY_VETO");
+    if (executionStats.buys >= MAX_BUYS_24H) return hold(`Limite BUY 24h atteinte (${executionStats.buys}/${MAX_BUYS_24H})`, "failed", "BUY_DAILY_LIMIT");
     // Vérifier directement que l'allocation permet au moins le minimum réellement
     // exécutable, tout en respectant le plafond de la phase progressive courante.
     const progressiveOrderPolicy = getProgressiveOrderPolicy(summary);
@@ -13598,12 +13603,12 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
       (LIVE_TRADING_ENABLED || DEMO_TRADING_ENABLED) ? LIVE_BUY_MAX_ORDER_USD : progressiveOrderPolicy.maximumOrderUsd
     );
     const allocationGuard = allocationCheckForBuy(d.asset, summary, requestedAllocationUsd);
-    if (PORTFOLIO_ALLOCATION_MODE === "enforced" && !allocationGuard.ok) return hold(allocationGuard.reason);
+    if (PORTFOLIO_ALLOCATION_MODE === "enforced" && !allocationGuard.ok) return hold(allocationGuard.reason, "failed", "ALLOCATION_ENTRY_VETO");
     const category = rules.category;
     const diversificationState = summary.diversificationState || {};
-    if (category === "AI_BIG_TECH" && diversificationState.tooConcentratedInAIBigTech && d.confidence < 90) return hold(`Surconcentration AI_BIG_TECH avant ${d.asset}`);
-    if (category === "ETF_GROWTH" && diversificationState.tooConcentratedInTechLike && !diversificationState.hasCoreETF && d.confidence < 82) return hold(`Priorité à SPY/GLD/SHY/XLV/XLP avant ${d.asset}`);
-    if (category === "CYBERSECURITY" && diversificationState.tooConcentratedInTechLike && d.confidence < 84) return hold(`Diversification défensive prioritaire avant ${d.asset}`);
+    if (category === "AI_BIG_TECH" && diversificationState.tooConcentratedInAIBigTech && d.confidence < 90) return hold(`Surconcentration AI_BIG_TECH avant ${d.asset}`, "failed", "CONCENTRATION_ENTRY_VETO");
+    if (category === "ETF_GROWTH" && diversificationState.tooConcentratedInTechLike && !diversificationState.hasCoreETF && d.confidence < 82) return hold(`Priorité à SPY/GLD/SHY/XLV/XLP avant ${d.asset}`, "failed", "CONCENTRATION_ENTRY_VETO");
+    if (category === "CYBERSECURITY" && diversificationState.tooConcentratedInTechLike && d.confidence < 84) return hold(`Diversification défensive prioritaire avant ${d.asset}`, "failed", "CONCENTRATION_ENTRY_VETO");
 
     let buyThreshold = rules.buyThreshold;
     if (summary.starterMode && STARTER_PRIORITY.includes(d.asset)) {
@@ -13611,12 +13616,12 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
       else if (category === "CRYPTO_MAJOR" || category === "ETF_CORE") buyThreshold = Math.max(64, buyThreshold - 3);
       else buyThreshold = Math.max(66, buyThreshold - 2);
     }
-    if (d.confidence < buyThreshold) return hold(`Confiance BUY trop faible (${d.confidence} < ${buyThreshold})`);
-    if (summary.ordersForOpenCount > 0) return hold("Ordre d'achat déjà en attente");
-    if (hasOpenPosition(portfolioResponse, d.asset)) return hold(`Position déjà ouverte sur ${d.asset}`);
-    if (hasOpenOrder(portfolioResponse, d.asset)) return hold(`Ordre déjà en attente sur ${d.asset}`);
-    if (isInCooldown(d.asset)) return hold(`Cooldown actif sur ${d.asset}`);
-    if (summary.uniquePositionsCount >= MAX_OPEN_POSITIONS) return hold(`Maximum d'actifs uniques atteint (${summary.uniquePositionsCount}/${MAX_OPEN_POSITIONS})`);
+    if (d.confidence < buyThreshold) return hold(`Confiance BUY trop faible (${d.confidence} < ${buyThreshold})`, "failed", "BUY_CONFIDENCE_VETO");
+    if (summary.ordersForOpenCount > 0) return hold("Ordre d'achat déjà en attente", "failed", "PENDING_BUY_ORDERS");
+    if (hasOpenPosition(portfolioResponse, d.asset)) return hold(`Position déjà ouverte sur ${d.asset}`, "failed", "EXISTING_POSITION");
+    if (hasOpenOrder(portfolioResponse, d.asset)) return hold(`Ordre déjà en attente sur ${d.asset}`, "failed", "EXISTING_ORDER");
+    if (isInCooldown(d.asset)) return hold(`Cooldown actif sur ${d.asset}`, "failed", "ASSET_COOLDOWN");
+    if (summary.uniquePositionsCount >= MAX_OPEN_POSITIONS) return hold(`Maximum d'actifs uniques atteint (${summary.uniquePositionsCount}/${MAX_OPEN_POSITIONS})`, "failed", "MAX_POSITIONS");
 
     const baseDynamicAmount = dynamicBuyAmount(
       { ...d, amount_usd: requestedAllocationUsd },
@@ -13711,11 +13716,11 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
   }
 
   if (d.decision === "SELL") {
-    if (executionStats.sells >= MAX_SELLS_24H) return hold(`Limite SELL 24h atteinte (${executionStats.sells}/${MAX_SELLS_24H})`);
-    if (d.confidence < rules.sellThreshold) return hold(`Confiance SELL trop faible (${d.confidence} < ${rules.sellThreshold})`);
+    if (executionStats.sells >= MAX_SELLS_24H) return hold(`Limite SELL 24h atteinte (${executionStats.sells}/${MAX_SELLS_24H})`, "failed", "SELL_DAILY_LIMIT");
+    if (d.confidence < rules.sellThreshold) return hold(`Confiance SELL trop faible (${d.confidence} < ${rules.sellThreshold})`, "failed", "SELL_CONFIDENCE_VETO");
     // Les doublons SELL sont bloqués par activeOrderIntentForAsset et la
     // réconciliation persistante, pas par ordersForClose du PnL.
-    if (!hasOpenPosition(portfolioResponse, d.asset)) return hold(`Aucune position ouverte sur ${d.asset}`);
+    if (!hasOpenPosition(portfolioResponse, d.asset)) return hold(`Aucune position ouverte sur ${d.asset}`, "failed", "NO_POSITION");
     return {
       approved: true,
       finalDecision: { ...d, risk_check: "passed" },
@@ -13726,7 +13731,7 @@ function riskController(decision, portfolioResponse, marketData, trendSummary, f
     };
   }
 
-  return hold("Décision invalide");
+  return hold("Décision invalide", "failed", "INVALID_DECISION");
 }
 
 async function executeDemoBuy(asset, amount) {
@@ -13847,7 +13852,7 @@ async function executeBuy(asset, amount, marketData = null, options = {}) {
   const preflight = await verifyRealPortfolioBeforeExecution({ asset, side: "BUY", amount: safeAmount });
   if (!preflight.ok) {
     addAudit("LIVE_BUY_PREFLIGHT_BLOCKED", { asset, amount: safeAmount, reason: preflight.reason, validation: preflight.validation || null });
-    return { skipped: true, mode: "LIVE", reason: preflight.reason, preflight: preflight.validation || null, identity: preflight.identity || null };
+    return { skipped: true, mode: "LIVE", reason: preflight.reason, vetoDetails: preflight.vetoDetails || [], preflight: preflight.validation || null, identity: preflight.identity || null };
   }
 
   const executionMarketData = await getMarketRates();
@@ -14080,7 +14085,7 @@ async function executeSell(asset, marketData = null, options = {}) {
   const preflight = await verifyRealPortfolioBeforeExecution({ asset, side: "SELL", amount: 0 });
   if (!preflight.ok) {
     addAudit("LIVE_SELL_PREFLIGHT_BLOCKED", { asset, reason: preflight.reason, validation: preflight.validation || null });
-    return { skipped: true, mode: "LIVE", reason: preflight.reason, preflight: preflight.validation || null, identity: preflight.identity || null };
+    return { skipped: true, mode: "LIVE", reason: preflight.reason, vetoDetails: preflight.vetoDetails || [], preflight: preflight.validation || null, identity: preflight.identity || null };
   }
 
   const portfolio = preflight.portfolio;
@@ -14747,6 +14752,20 @@ function evaluateAutomaticTraderProposals(context, control, cutoff = Date.now())
     runtimeState.traderExecutionBridge.managed[r.positionId]?.status === "VERIFIED_MANAGED").sort((a, b) => a.positionId.localeCompare(b.positionId));
   const target = managedTargets[0];
   const quote = context.marketSummary?.ratesByAsset?.[decision?.asset];
+  const hasManagedInstrument = Object.values(runtimeState.traderExecutionBridge.managed).some(r => r.instrumentId === item?.instrumentId && r.status === "VERIFIED_MANAGED");
+  if (decision?.decision === "SELL" && (target || hasManagedInstrument)) {
+    const policy = traderAdvisory.config(JSON.parse(process.env.TRADER_ADVISORY_POLICY_JSON || "{}"));
+    const candidate = traderExecution.managedCloseCandidate({ state: runtimeState.traderExecutionBridge, target, approved: control.approved === true,
+      leoConfidence: decision.confidence, asset: decision.asset, instrumentId: item.instrumentId, policyVersion: traderAdvisory.VERSION,
+      policyId: publicDataDigest(policy), createdAt: new Date(cutoff).toISOString(),
+      referencePrice: quote?.mid, priceDriftLimitPct: policy.maxDecisionPriceDriftPct });
+    if (candidate) {
+      runtimeState.traderExecutionBridge = traderExecution.enqueue(runtimeState.traderExecutionBridge, candidate); scheduleSave();
+      return { managedExitProposed: true };
+    }
+    // A managed target must never fall through to a different position chosen by symbol.
+    return { managedExitProposed: true, candidateUnavailable: true };
+  }
   const idea = item && ["BUY", "SELL"].includes(decision?.decision) ? { instrumentId: item.instrumentId, side: decision.decision,
     amountUsd: decision.amount_usd, asOf: new Date(cutoff).toISOString(), ownAnalysisApproved: control.approved === true,
     hardVeto: control.approved !== true, referencePrice: quote?.mid ?? null, positionId: target?.positionId,
@@ -14834,8 +14853,18 @@ const traderExecutionController = traderExecution.createController({
 async function processTraderExecution(context, control) {
   traderExecutionContext = { ...context, protectiveExitPending: control?.approved && control.finalDecision.decision === "SELL" };
   try {
-    evaluateAutomaticTraderProposals(context, control);
-    return await traderExecutionController.drain();
+    let evaluation;
+    try { evaluation = evaluateAutomaticTraderProposals(context, control); }
+    catch {
+      // Evaluation is cache-only and cannot submit. An error here must not consume
+      // a separately approved normal SELL. Never catch dispatch errors as a no-send.
+      return { status: "TRADER_LAYER_UNAVAILABLE", executionAttempted: false,
+        managedExitProposed: control?.finalDecision?.decision === "SELL" && Object.values(runtimeState.traderExecutionBridge.managed).some(r => r.asset === control.finalDecision.asset && r.status === "VERIFIED_MANAGED"),
+        vetoDetails: [tradingAvailability.describeVeto("TRADER_LAYER_UNAVAILABLE", { side: control?.finalDecision?.decision })] };
+    }
+    if (evaluation?.candidateUnavailable) return { status: "MANAGED_CLOSE_CANDIDATE_UNAVAILABLE", managedExitProposed: true, executionAttempted: false,
+      vetoDetails: [tradingAvailability.describeVeto("EXACT_MANAGED_FULL_POSITION_SCOPE_UNVERIFIED", { side: "SELL" })] };
+    return { ...await traderExecutionController.drain(), managedExitProposed: evaluation?.managedExitProposed === true };
   } finally { traderExecutionContext = null; }
 }
 async function executeControlledDecision(control, marketData) {
@@ -15022,7 +15051,7 @@ async function scanMarket(source = "manual-scan") {
     if (traderExecutionActive) execution = { ...traderExecutionResult, mode: "LIVE", skipped: !traderExecutionResult.executionAttempted };
     if (!traderExecutionActive && control.approved && control.finalDecision.decision === "BUY") {
       execution = await observeDecision(() => executeControlledDecision(control, context.marketData));
-    } else if (control.approved && control.finalDecision.decision === "SELL" && !traderExecutionResult?.executionAttempted) {
+    } else if (control.approved && control.finalDecision.decision === "SELL" && !traderExecutionResult?.executionAttempted && !traderExecutionResult?.managedExitProposed) {
       execution = await observeDecision(() => executeControlledDecision(control, context.marketData));
     }
 
@@ -19889,7 +19918,7 @@ app.get("/trader-execution-status", requireSecret, (_req, res) => {
   const state = runtimeState.traderExecutionBridge;
   res.json({ version: traderExecution.VERSION, enabled: traderExecutionSettings().enabled, emergencyStop: state.emergencyStop,
     recoveryRequired: state.recoveryRequired, disabledReason: state.disabledReason, queued: state.queue.length,
-    operations: Object.values(state.operations).map(o => ({ proposalId: o.proposal.proposalId, side: o.proposal.side, status: o.status, intentId: o.intentId || null, vetoes: o.vetoes || [] })),
+    operations: Object.values(state.operations).map(o => ({ proposalId: o.proposal.proposalId, side: o.proposal.side, status: o.status, intentId: o.intentId || null, vetoes: o.vetoes || [], vetoDetails: (o.vetoes || []).map(code => tradingAvailability.describeVeto(code, o.proposal)), availabilityNotes: (o.availabilityNotes || []).map(code => tradingAvailability.describeVeto(code, o.proposal)) })),
     managedPositionCount: Object.keys(state.managed).length, readiness: "BLOCKED_UNTIL_ACCOUNT_TOKEN_RELEASE_COST_EXPOSURE_AND_SINGLE_WRITER_PROOFS", partialClose: "BLOCKED_NOT_RELIABLY_SUPPORTED" });
 });
 app.post("/trader-execution-stop", requireSecret, async (req, res) => {

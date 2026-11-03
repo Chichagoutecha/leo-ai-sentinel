@@ -1,6 +1,7 @@
 'use strict';
 // Orchestration only: no HTTP, credentials, order client or autonomous worker.
 const { digest } = require('./trader-observer');
+const { describeVeto } = require('./trading-availability');
 const VERSION = 'trader-execution-v1';
 const finite = n => typeof n === 'number' && Number.isFinite(n);
 const safeId = s => typeof s === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(s);
@@ -24,6 +25,19 @@ function proposal(raw) {
 function initializeForContext(state, evidence) {
   if (evidence?.identityVerified !== true || evidence?.tokenBindingVerified !== true || !safeId(evidence.accountRef) || evidence.mode !== 'LIVE' || evidence.executionHistoryReviewed !== true || Object.keys(state.operations).length || Object.keys(state.managed).length) throw Error('INITIALIZATION_REVIEW_REQUIRED');
   return { ...structuredClone(state), recoveryRequired: false, accountRef: evidence.accountRef };
+}
+function managedCloseCandidate({ state, target, approved, leoConfidence, asset, instrumentId, policyVersion, policyId, createdAt, referencePrice, priceDriftLimitPct }) {
+  const managed = state?.managed?.[String(target?.positionId)];
+  if (approved !== true || !managed || managed.status !== 'VERIFIED_MANAGED' || managed.accountRef !== state.accountRef || managed.instrumentId !== instrumentId || target?.instrumentId !== instrumentId || String(managed.positionId) !== String(target?.positionId) || managed.units !== target?.units || target?.ownership !== 'DIRECT' || target?.isBuy !== true || target?.leverage !== 1 || target?.settlementType !== 'Underlying') return null;
+  // Historical source references preserve provenance, not a claim of current visibility.
+  // This is only a candidate: the full current preflight remains mandatory.
+  try {
+    const decisionId = digest({ at: createdAt, instrumentId, side: 'SELL', positionId: String(target.positionId) });
+    return proposal({ proposalId: digest({ decisionId, policyId }), decisionId, policyVersion, policyId, createdAt,
+      side: 'SELL', asset, instrumentId, positionId: String(target.positionId), units: target.units, quantityMode: 'FULL_POSITION',
+      traderSources: managed.traderSources, decision: 'ADVISORY_REVIEW_ONLY', scope: 'REAL_MANAGED_STRATEGY',
+      leoConfidence, referencePrice, priceDriftLimitPct });
+  } catch { return null; }
 }
 function enqueue(state, raw) {
   const p = proposal(raw), next = structuredClone(state);
@@ -62,10 +76,13 @@ function preflight(state, p, e, settings, now) {
   if (!fresh(cost?.asOf, now) || cost.instrumentId !== p.instrumentId || cost.side !== p.side || cost.accountRef !== e.accountRef || cost.coverage !== 'COMPLETE_ESTIMATE' || !finite(cost.totalUsd) || cost.totalUsd < 0 || !finite(settings.maxCostUsd) || cost.totalUsd > settings.maxCostUsd) vetoes.push('COST_UNKNOWN_OR_EXCESS');
   if (e?.risk?.approved !== true || e.risk.side !== p.side || e.risk.instrumentId !== p.instrumentId || e.risk.proposalId !== p.proposalId || !fresh(e.risk.asOf, now)) vetoes.push('FINAL_LEO_RISK_VETO_OR_UNVERIFIED');
   if (e?.limits?.cadenceAllowed !== true || e?.limits?.dailyAllowed !== true || e?.limits?.singleWriterVerified !== true) vetoes.push('CADENCE_RISK_OR_SINGLE_WRITER_UNVERIFIED');
-  if (!e?.exposure || e.exposure.coverage !== 'COMPLETE' || e.exposure.afterWithinLimits !== true || !fresh(e.exposure.asOf, now) || e.exposure.proposalId !== p.proposalId) vetoes.push('MARGINAL_EXPOSURE_UNKNOWN_OR_EXCESS');
-  if (e?.sourceProof?.status !== 'CURRENT_REFERENCES_VERIFIED' || e.sourceProof.proposalId !== p.proposalId || !fresh(e.sourceProof.asOf, now) || e.sourceProof.opposed === true) vetoes.push('SOURCE_REFERENCES_INVALID_OR_OPPOSED');
+  // A verified exact long/unlevered close reduces the identified holding. Unknown
+  // aggregate taxonomy and unavailable social context must not turn into entry tests.
+  // All account, portfolio, risk, price, cost and exact managed target gates still apply.
+  if (p.side === 'BUY' && (!e?.exposure || e.exposure.coverage !== 'COMPLETE' || e.exposure.afterWithinLimits !== true || !fresh(e.exposure.asOf, now) || e.exposure.proposalId !== p.proposalId)) vetoes.push('MARGINAL_EXPOSURE_UNKNOWN_OR_EXCESS');
+  if (p.side === 'BUY' && (e?.sourceProof?.status !== 'CURRENT_REFERENCES_VERIFIED' || e.sourceProof.proposalId !== p.proposalId || !fresh(e.sourceProof.asOf, now) || e.sourceProof.opposed === true)) vetoes.push('SOURCE_REFERENCES_INVALID_OR_OPPOSED');
   const matching = (e?.positions || []).filter(r => r.instrumentId === p.instrumentId);
-  if (matching.some(r => !state.managed[String(r.positionId)] || state.managed[String(r.positionId)].accountRef !== e.accountRef || state.managed[String(r.positionId)].status !== 'VERIFIED_MANAGED' || state.managed[String(r.positionId)].units !== r.units || r.ownership !== 'DIRECT' || r.isBuy !== true || r.leverage !== 1 || r.settlementType !== 'Underlying')) vetoes.push('UNMANAGED_OR_COPY_POSITION_ON_INSTRUMENT');
+  if (p.side === 'BUY' && matching.some(r => !state.managed[String(r.positionId)] || state.managed[String(r.positionId)].accountRef !== e.accountRef || state.managed[String(r.positionId)].status !== 'VERIFIED_MANAGED' || state.managed[String(r.positionId)].units !== r.units || r.ownership !== 'DIRECT' || r.isBuy !== true || r.leverage !== 1 || r.settlementType !== 'Underlying')) vetoes.push('UNMANAGED_OR_COPY_POSITION_ON_INSTRUMENT');
   if (p.side === 'BUY') {
     if (!finite(settings.maxOrderUsd) || p.amountUsd > settings.maxOrderUsd || !finite(eligibility?.minimumUsd) || !finite(eligibility?.maximumUsd) || p.amountUsd < eligibility.minimumUsd || p.amountUsd > eligibility.maximumUsd) vetoes.push('AMOUNT_OUTSIDE_CAP_OR_MINIMUMS');
     if (!finite(e?.cashUsd) || e.cashUsd < 0 || !finite(e?.reserveUsd) || e.reserveUsd < 0 || !finite(cost?.totalUsd) || e.cashUsd - p.amountUsd - cost.totalUsd < e.reserveUsd) vetoes.push('CASH_OR_RESERVE_UNAVAILABLE');
@@ -73,8 +90,8 @@ function preflight(state, p, e, settings, now) {
   } else {
     const managed = state.managed[String(p.positionId)], target = matching.filter(r => String(r.positionId) === String(p.positionId));
     if (p.quantityMode !== 'FULL_POSITION') vetoes.push('PARTIAL_CLOSE_NOT_RELIABLY_SUPPORTED');
-    if (target.length !== 1 || !managed || managed.status !== 'VERIFIED_MANAGED' || managed.accountRef !== e.accountRef || managed.instrumentId !== p.instrumentId || target[0]?.ownership !== 'DIRECT' || target[0]?.isBuy !== true || target[0]?.units !== p.units || managed.units !== p.units || managed.externalMutation === true) vetoes.push('EXACT_MANAGED_FULL_POSITION_SCOPE_UNVERIFIED');
-    if (cost?.units !== p.units || e?.exposure?.units !== p.units || e?.risk?.positionId !== String(p.positionId) || e?.risk?.units !== p.units) vetoes.push('SELL_SIZE_EVIDENCE_MISMATCH');
+    if (target.length !== 1 || !managed || managed.status !== 'VERIFIED_MANAGED' || managed.accountRef !== e.accountRef || managed.instrumentId !== p.instrumentId || target[0]?.ownership !== 'DIRECT' || target[0]?.isBuy !== true || target[0]?.leverage !== 1 || target[0]?.settlementType !== 'Underlying' || target[0]?.units !== p.units || managed.units !== p.units || managed.externalMutation === true) vetoes.push('EXACT_MANAGED_FULL_POSITION_SCOPE_UNVERIFIED');
+    if (cost?.units !== p.units || e?.risk?.positionId !== String(p.positionId) || e?.risk?.units !== p.units || e?.exposure?.units !== undefined && e.exposure.units !== p.units || e?.exposure?.proposalId !== undefined && e.exposure.proposalId !== p.proposalId) vetoes.push('SELL_SIZE_EVIDENCE_MISMATCH');
     const cap = settings.maxExitNotionalUsd ?? settings.maxOrderUsd;
     if (!finite(cap) || !finite(quote?.bid) || p.units * quote.bid > cap) vetoes.push('FULL_EXIT_EXCEEDS_ORDER_CAP_PARTIAL_CLOSE_UNSUPPORTED');
   }
@@ -84,7 +101,7 @@ function guardExecutor(state, metadata, positions, accountRef, now) {
   const operation = state.operations[metadata?.operationId];
   const p = operation?.proposal;
   if (!operation || operation.status !== 'RESERVED' || !p || metadata.proposalId !== p.proposalId || operation.accountRef !== accountRef || state.emergencyStop || state.disabledReason || state.recoveryRequired || !fresh(operation.reservedAt, now) || !Array.isArray(positions) || !operation.checks || Object.values(operation.checks).some(t => !fresh(t, now))) return false;
-  const rows = positions.filter(r => r.instrumentId === p.instrumentId);
+  const rows = positions.filter(r => r.instrumentId === p.instrumentId && (p.side === 'BUY' || String(r.positionId) === String(p.positionId)));
   if (rows.some(r => r.ownership !== 'DIRECT' || !state.managed[String(r.positionId)] || state.managed[String(r.positionId)].units !== r.units)) return false;
   if (p.side === 'SELL') return rows.filter(r => String(r.positionId) === String(p.positionId) && r.units === p.units && r.isBuy === true).length === 1;
   return true;
@@ -136,32 +153,35 @@ function createController({ getState, setState, persist, evidence, executeNormal
     running = true;
     try {
       const config = settings(), state = getState();
-      if (!config.enabled) return { status: 'AUTOMATION_DISABLED', executionAttempted: false };
+      if (!config.enabled) return { status: 'AUTOMATION_DISABLED', vetoDetails: [describeVeto('AUTOMATION_DISABLED')], executionAttempted: false };
       const p = select(state); if (!p) return { status: 'NO_PROPOSAL', executionAttempted: false };
       const e = await evidence(p);
       if (getState().operations[p.proposalId]) return { status: 'DUPLICATE_OPERATION', executionAttempted: false };
       const vetoes = preflight(getState(), p, e, settings(), clock());
       if (vetoes.length) {
+        const vetoDetails = vetoes.map(code => describeVeto(code, p));
         const next = structuredClone(getState()); next.operations[p.proposalId] = { proposal: p, status: 'VETOED', vetoes, accountRef: e?.accountRef || null, updatedAt: new Date(clock()).toISOString() };
-        setState(next); await persist(); return { status: 'VETOED', proposalId: p.proposalId, vetoes, executionAttempted: false };
+        setState(next); await persist(); return { status: 'VETOED', proposalId: p.proposalId, vetoes, vetoDetails, executionAttempted: false };
       }
       const next = structuredClone(getState());
       next.operations[p.proposalId] = { proposal: p, status: 'RESERVED', accountRef: e.accountRef, reservedAt: new Date(clock()).toISOString(),
         finalDecision: { side: p.side, instrumentId: p.instrumentId, amountUsd: p.amountUsd ?? null, positionId: p.positionId || null, units: p.units ?? null },
-        checks: { portfolio: e.asOf, quote: e.quote.asOf, eligibility: e.eligibility.asOf, cost: e.cost.asOf, exposure: e.exposure.asOf, source: e.sourceProof.asOf, risk: e.risk.asOf },
+        checks: { portfolio: e.asOf, quote: e.quote.asOf, eligibility: e.eligibility.asOf, cost: e.cost.asOf, risk: e.risk.asOf,
+          ...(p.side === 'BUY' ? { exposure: e.exposure.asOf, source: e.sourceProof.asOf } : {}) },
         evidenceAtApproval: { quote: { bid: e.quote.bid, ask: e.quote.ask, asOf: e.quote.asOf },
           cost: { totalUsd: e.cost.totalUsd, amountUsd: e.cost.amountUsd ?? null, units: e.cost.units ?? null, coverage: e.cost.coverage },
           eligibility: { allowed: e.eligibility.allowed, minimumUsd: e.eligibility.minimumUsd ?? null, maximumUsd: e.eligibility.maximumUsd ?? null },
-          exposure: { coverage: e.exposure.coverage, afterWithinLimits: e.exposure.afterWithinLimits }, cashUsd: e.cashUsd ?? null, reserveUsd: e.reserveUsd ?? null },
+          exposure: { coverage: e.exposure?.coverage || 'UNAVAILABLE', afterWithinLimits: e.exposure?.afterWithinLimits ?? null }, cashUsd: e.cashUsd ?? null, reserveUsd: e.reserveUsd ?? null },
+        availabilityNotes: p.side === 'SELL' ? ['SOURCE_CONTEXT_NOT_REQUIRED_FOR_EXACT_CLOSE', 'AGGREGATE_EXPOSURE_NOT_REQUIRED_FOR_EXACT_CLOSE'] : [],
         beforeSnapshot: { instrumentId: p.instrumentId, positionDetails: e.positions.filter(r => r.instrumentId === p.instrumentId).map(r => ({ positionId: String(r.positionId), units: r.units })) } };
       setState(next);
-      if (await persist() !== true) { getState().operations[p.proposalId].status = 'NEEDS_RECONCILIATION'; return { status: 'PERSISTENCE_UNAVAILABLE', executionAttempted: false }; }
+      if (await persist() !== true) { getState().operations[p.proposalId].status = 'NEEDS_RECONCILIATION'; return { status: 'PERSISTENCE_UNAVAILABLE', vetoDetails: [describeVeto('PERSISTENCE_UNAVAILABLE', p)], executionAttempted: false }; }
       // Re-check after the durable reservation; no second executor invocation after any uncertainty.
       const again = settings();
-      if (!getState().operations[p.proposalId] || getState().disabledReason || !again.enabled || again.emergencyStop || getState().emergencyStop) { if (getState().operations[p.proposalId]) getState().operations[p.proposalId].status = 'VETOED'; await persist(); return { status: 'EMERGENCY_STOP', executionAttempted: false }; }
+      if (!getState().operations[p.proposalId] || getState().disabledReason || !again.enabled || again.emergencyStop || getState().emergencyStop) { if (getState().operations[p.proposalId]) getState().operations[p.proposalId].status = 'VETOED'; await persist(); return { status: 'EMERGENCY_STOP', vetoDetails: [describeVeto('EMERGENCY_STOP', p)], executionAttempted: false }; }
       const withoutSelf = { ...getState(), operations: Object.fromEntries(Object.entries(getState().operations).filter(([id]) => id !== p.proposalId)) };
       const recheck = preflight(withoutSelf, p, e, again, clock());
-      if (recheck.length) { getState().operations[p.proposalId].status = 'VETOED'; getState().operations[p.proposalId].vetoes = recheck; await persist(); return { status: 'VETOED', vetoes: recheck, executionAttempted: false }; }
+      if (recheck.length) { const vetoDetails = recheck.map(code => describeVeto(code, p)); getState().operations[p.proposalId].status = 'VETOED'; getState().operations[p.proposalId].vetoes = recheck; await persist(); return { status: 'VETOED', vetoes: recheck, vetoDetails, executionAttempted: false }; }
       let result;
       try { result = await executeNormal(p, { operationId: p.proposalId, proposalId: p.proposalId, accountRef: e.accountRef }); }
       catch { result = { confirmed: false, uncertain: true }; }
@@ -179,4 +199,4 @@ function compact(state, maxBytes = 60000) {
   if (Buffer.byteLength(JSON.stringify(copy)) <= maxBytes) return copy;
   return { ...initialState(), emergencyStop: true, disabledReason: 'ARCHIVE_REQUIRED_NO_AUTOMATIC_RESET', accountRef: copy.accountRef || null };
 }
-module.exports = { VERSION, initialState, initializeForContext, proposal, enqueue, select, preflight, guardExecutor, recover, reconcile, createController, compact };
+module.exports = { VERSION, initialState, initializeForContext, managedCloseCandidate, proposal, enqueue, select, preflight, guardExecutor, recover, reconcile, createController, compact };
