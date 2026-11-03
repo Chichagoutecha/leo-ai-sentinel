@@ -2,6 +2,7 @@
 // Offline fixtures only: synthetic identities, evidence, permissions and broker. No HTTP or process.env.
 const assert = require('node:assert/strict');
 const b = require('./trader-execution-bridge');
+const { progressFor } = require('./order-finality-fixtures');
 const NOW = Date.parse('2026-11-02T12:00:00Z'), at = new Date(NOW).toISOString();
 function buy(id = 'proposal-1') { return { proposalId: id, decisionId: `decision-${id}`, policyVersion: 'trader-context-v1', policyId: 'a'.repeat(64), createdAt: at,
   side: 'BUY', asset: 'AAPL', instrumentId: 1, amountUsd: 10, scope: 'REAL_MANAGED_STRATEGY', decision: 'ADVISORY_REVIEW_ONLY', leoConfidence: 85, referencePrice: 10, priceDriftLimitPct: 2,
@@ -41,6 +42,7 @@ function harness({ state = initialized(), positions = [], configure = settings()
       else rows = [row(outcome === 'PARTIAL' ? 0.4 : 1)];
       const result = { intentId: `intent-${p.proposalId}`, confirmed: true, data: { positionId: '101' }, verification: {
         beforeSnapshot: { instrumentId: 1, positionDetails: beforeRows }, afterSnapshot: { instrumentId: 1, positionDetails: rows.map(r => ({ positionId: r.positionId, units: r.units })) } } };
+      result.orderProgress = progressFor(p, beforeRows, rows, outcome === 'PARTIAL' ? 'PARTIAL' : 'FILLED');
       if (outcome === 'AMBIGUOUS') result.verification.afterSnapshot.positionDetails.push({ positionId: '102', units: 1 });
       if (outcome === 'UNBOUND') delete result.data.positionId;
       return result;

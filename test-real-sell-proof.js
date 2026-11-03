@@ -72,8 +72,9 @@ test('SELL is confirmed when the exact targeted positionId disappears even if an
   assert.equal(proof.cashDeltaIsProof, false);
   assert.ok(proof.evidence.includes('EXACT_POSITION_ID_CLOSE_PROOF'));
 
-  assert.equal(evaluation.status, leo.EXECUTION_STATUS.CONFIRMED);
-  assert.equal(evaluation.confirmed, true);
+  assert.equal(evaluation.confirmed, false);
+  assert.equal(evaluation.status, leo.EXECUTION_STATUS.UNCERTAIN);
+  assert.equal(evaluation.confirmed, false);
   assert.equal(evaluation.closeProof.fullCloseProven, true);
 });
 
@@ -98,7 +99,7 @@ test('SELL is not confirmed if another position disappears but the targeted posi
     expectedPositionId: 3551537645
   });
 
-  assert.equal(evaluation.status, leo.EXECUTION_STATUS.NOT_FOUND);
+  assert.equal(evaluation.status, leo.EXECUTION_STATUS.UNCERTAIN);
   assert.equal(evaluation.confirmed, false);
   assert.equal(evaluation.closeProof.targetStillPresent, true);
   assert.ok(evaluation.evidence.includes('TARGET_POSITION_STILL_PRESENT'));
@@ -156,7 +157,7 @@ test('ordersForClose descriptor changes are supplemental only and cannot confirm
     expectedPositionId: 3551537645
   });
 
-  assert.equal(evaluation.status, leo.EXECUTION_STATUS.NOT_FOUND);
+  assert.equal(evaluation.status, leo.EXECUTION_STATUS.UNCERTAIN);
   assert.equal(evaluation.confirmed, false);
   assert.equal(evaluation.closeProof.closeDescriptorChanged, true);
   assert.equal(evaluation.closeProof.closeDescriptorIsProof, false);
@@ -183,13 +184,13 @@ test('SELL confirmation fails closed when the expected positionId is missing', (
     afterSnapshot: after
   });
 
-  assert.equal(evaluation.status, leo.EXECUTION_STATUS.NOT_FOUND);
+  assert.equal(evaluation.status, leo.EXECUTION_STATUS.UNCERTAIN);
   assert.equal(evaluation.confirmed, false);
   assert.equal(evaluation.closeProof.requiresExactTargetPositionId, true);
   assert.ok(evaluation.evidence.includes('TARGET_POSITION_ID_REQUIRED'));
 });
 
-test('BUY evidence behavior remains unchanged', () => {
+test('BUY position appearance is not a complete order proof', () => {
   const before = snapshot({ ids: [], units: 0, invested: 0, cash: 9000 });
   const after = snapshot({ ids: [999], units: 1, invested: 500, cash: 8500 });
 
@@ -199,10 +200,11 @@ test('BUY evidence behavior remains unchanged', () => {
     afterSnapshot: after
   });
 
-  assert.equal(evaluation.status, leo.EXECUTION_STATUS.CONFIRMED);
-  assert.equal(evaluation.confirmed, true);
+  assert.equal(evaluation.confirmed, false);
+  assert.equal(evaluation.status, leo.EXECUTION_STATUS.UNCERTAIN);
+  assert.equal(evaluation.confirmed, false);
   assert.equal(evaluation.closeProof, null);
-  assert.ok(evaluation.evidence.includes('NEW_POSITION_VISIBLE'));
+  assert.ok(evaluation.evidence.includes('ORDER_FINALITY_UNVERIFIED'));
 });
 
 test('execution verifier exposes the exact SELL proof contract without triggering an order', () => {
