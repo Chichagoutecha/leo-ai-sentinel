@@ -2,13 +2,14 @@
 // Orchestration only: no HTTP, credentials, order client or autonomous worker.
 const { digest } = require('./trader-observer');
 const { describeVeto } = require('./trading-availability');
+const finality = require('./etoro-order-finality');
 const VERSION = 'trader-execution-v1';
 const finite = n => typeof n === 'number' && Number.isFinite(n);
 const safeId = s => typeof s === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(s);
 const brokerPositionId = v => typeof v === 'number' ? Number.isSafeInteger(v) && v > 0 : typeof v === 'string' && /^[1-9][0-9]{0,25}$/.test(v);
 const stamp = s => typeof s === 'string' && Number.isFinite(Date.parse(s)) ? Date.parse(s) : null;
 const fresh = (s, now, age = 300000) => stamp(s) !== null && now >= stamp(s) && now - stamp(s) <= age;
-const active = s => !['CONFIRMED', 'REJECTED', 'VETOED'].includes(s);
+const active = s => !['CONFIRMED', 'PARTIALLY_FILLED_TERMINAL', 'CANCELED', 'REJECTED', 'VETOED'].includes(s);
 function initialState() { return { version: 1, recoveryRequired: true, emergencyStop: false, disabledReason: null, operations: {}, managed: {}, queue: [] }; }
 function proposal(raw) {
   const allowed = ['proposalId', 'decisionId', 'policyVersion', 'policyId', 'createdAt', 'side', 'asset', 'instrumentId', 'amountUsd', 'positionId', 'units', 'quantityMode', 'traderSources', 'decision', 'scope', 'leoConfidence', 'referencePrice', 'priceDriftLimitPct'];
@@ -108,43 +109,47 @@ function guardExecutor(state, metadata, positions, accountRef, now) {
 }
 function recover(state) {
   const copy = structuredClone(state);
-  for (const o of Object.values(copy.operations)) if (active(o.status)) o.status = 'NEEDS_RECONCILIATION';
+  for (const o of Object.values(copy.operations)) if (active(o.status) || o.status === 'CONFIRMED' && o.orderProgress?.complete !== true) o.status = 'NEEDS_RECONCILIATION';
   return copy;
 }
 function applyResult(state, id, result, now) {
   const op = state.operations[id];
   if (!op) throw Error('UNKNOWN_OPERATION');
-  if (op.intentId && op.intentId !== result?.intentId || result?.confirmed === true && !op.intentId) { op.status = 'NEEDS_RECONCILIATION'; return; }
+  if (op.intentId && op.intentId !== result?.intentId || !op.intentId && result?.confirmed === true) { op.status = 'NEEDS_RECONCILIATION'; return; }
   op.intentId = safeId(result?.intentId) ? result.intentId : op.intentId || null;
   op.updatedAt = new Date(now).toISOString();
-  if (result?.confirmed !== true) {
-    op.status = result?.verification_status === 'ORDER_REJECTED' ? 'REJECTED' : result?.skipped === true && !op.intentId ? 'VETOED' : 'NEEDS_RECONCILIATION';
-    op.evidence = { confirmed: false, acknowledgementOnly: result?.businessAcknowledged === true, brokerOrderId: null };
-    if (op.status === 'VETOED') op.vetoes = ['STRATEGY_LIVE_ONLY', 'STRATEGY_REVALIDATION_FAILED', 'TARGET_UNITS_CHANGED', 'PARTIAL_CLOSE_NOT_RELIABLY_SUPPORTED'].includes(result?.reason) ? [result.reason] : ['NORMAL_EXECUTOR_VETO'];
+  const p = op.proposal, before = result?.verification?.beforeSnapshot || op.beforeSnapshot, after = result?.verification?.afterSnapshot;
+  const next = result?.orderProgress || result?.verification?.orderProgress || finality.unknown();
+  const progress = finality.monotonic(op.orderProgress, next);
+  op.orderProgress = progress;
+  const proof = finality.positionProof({ side: p.side, beforeSnapshot: before, afterSnapshot: after, progress, expectedPositionId: p.positionId });
+  if (!op.intentId || progress.instrumentId !== p.instrumentId || !proof.matched || p.side === 'BUY' && progress.requestedAmount !== p.amountUsd || p.side === 'SELL' && progress.requestedUnits !== p.units) {
+    op.status = result?.verification_status === 'ORDER_REJECTED' && !(op.orderProgress?.lastVerified?.executedUnits > 0) ? 'REJECTED' : result?.skipped === true && !op.intentId ? 'VETOED' : 'NEEDS_RECONCILIATION';
+    op.evidence = { confirmed: false, acknowledgementOnly: result?.businessAcknowledged === true, reason: proof.reason || 'ORDER_BINDING_UNVERIFIED' };
     return;
   }
-  const before = result?.verification?.beforeSnapshot || op.beforeSnapshot;
-  const after = result?.verification?.afterSnapshot;
-  const p = op.proposal;
-  const beforeRows = before?.positionDetails, afterRows = after?.positionDetails;
-  if (!op.intentId || !Array.isArray(beforeRows) || !Array.isArray(afterRows) || before?.instrumentId !== p.instrumentId || after?.instrumentId !== p.instrumentId) { op.status = 'NEEDS_RECONCILIATION'; return; }
-  if ([...beforeRows, ...afterRows].some(r => !brokerPositionId(r.positionId) || !finite(r.units) || r.units <= 0)) { op.status = 'NEEDS_RECONCILIATION'; return; }
-  const ids = rows => rows.map(r => String(r.positionId));
-  if (new Set(ids(beforeRows)).size !== beforeRows.length || new Set(ids(afterRows)).size !== afterRows.length) { op.status = 'NEEDS_RECONCILIATION'; return; }
+  const terminal = progress.terminal === true;
   if (p.side === 'SELL') {
-    if (!beforeRows.some(r => String(r.positionId) === String(p.positionId) && r.units === p.units) || afterRows.some(r => String(r.positionId) === String(p.positionId))) { op.status = 'NEEDS_RECONCILIATION'; return; }
-    delete state.managed[String(p.positionId)];
-  } else {
-    const changed = afterRows.filter(a => !beforeRows.some(b => String(b.positionId) === String(a.positionId) && b.units === a.units));
-    const beforeUnchanged = beforeRows.every(b => afterRows.some(a => String(a.positionId) === String(b.positionId) && a.units >= b.units));
-    const target = changed[0], existing = target && state.managed[String(target.positionId)];
-    const previous = target && beforeRows.find(b => String(b.positionId) === String(target.positionId));
-    if (!beforeUnchanged || changed.length !== 1 || !safeId(String(target?.positionId || '')) || String(result?.data?.positionId || '') !== String(target?.positionId) || !finite(target?.units) || target.units <= 0 || previous && (!existing || existing.units !== previous.units) || !previous && existing || previous && target.units <= previous.units) { op.status = 'NEEDS_RECONCILIATION'; return; }
-    state.managed[String(target.positionId)] = { positionId: String(target.positionId), instrumentId: p.instrumentId, asset: p.asset, units: target.units,
-      accountRef: op.accountRef, status: 'VERIFIED_MANAGED', operationIds: [...(existing?.operationIds || []), id], traderSources: [...(existing?.traderSources || []), ...p.traderSources],
+    const target = after.positionDetails.find(r => String(r.positionId) === String(p.positionId));
+    if (terminal && progress.complete && !target) delete state.managed[String(p.positionId)];
+    else {
+      const managed = state.managed[String(p.positionId)];
+      if (!managed) { op.status = 'NEEDS_RECONCILIATION'; return; }
+      managed.units = target?.units ?? 0;
+      managed.status = terminal ? 'VERIFIED_MANAGED' : 'RECONCILIATION_REQUIRED';
+      managed.verifiedAt = op.updatedAt;
+    }
+  } else if (progress.executions.length === 1) {
+    const targetId = progress.executions[0].positionId, target = after.positionDetails.find(r => String(r.positionId) === targetId), previous = before.positionDetails.find(r => String(r.positionId) === targetId);
+    const existing = state.managed[targetId];
+    if (!target || previous && (!existing || !existing.operationIds?.includes(id) && existing.units !== previous.units) || !previous && existing && !existing.operationIds?.includes(id) || result?.data?.positionId && String(result.data.positionId) !== targetId) { op.status = 'NEEDS_RECONCILIATION'; return; }
+    state.managed[targetId] = { positionId: targetId, instrumentId: p.instrumentId, asset: p.asset, units: target.units,
+      accountRef: op.accountRef, status: terminal ? 'VERIFIED_MANAGED' : 'RECONCILIATION_REQUIRED', operationIds: [...new Set([...(existing?.operationIds || []), id])],
+      traderSources: existing?.operationIds?.includes(id) ? existing.traderSources : [...(existing?.traderSources || []), ...p.traderSources],
       scope: 'WHOLE_BROKER_POSITION_NOT_SIGNAL_LOTS', verifiedAt: op.updatedAt };
-  }
-  op.status = 'CONFIRMED'; op.evidence = { confirmed: true, proof: p.side === 'SELL' ? 'EXACT_TARGET_REMOVAL' : 'UNAMBIGUOUS_MANAGED_POSITION_CHANGE', intentId: op.intentId };
+  } else if (progress.executedUnits > 0) { op.status = 'NEEDS_RECONCILIATION'; return; }
+  op.status = terminal ? (progress.complete ? 'CONFIRMED' : progress.executedUnits > 0 ? 'PARTIALLY_FILLED_TERMINAL' : progress.state === 'REJECTED' ? 'REJECTED' : 'CANCELED') : 'NEEDS_RECONCILIATION';
+  op.evidence = { confirmed: terminal && progress.complete, partial: progress.executedUnits > 0 && !progress.complete, terminal, matchedPortfolio: true };
 }
 function createController({ getState, setState, persist, evidence, executeNormal, clock = Date.now, settings = () => ({ enabled: false }) }) {
   let running = false;

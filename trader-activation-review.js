@@ -96,12 +96,10 @@ async function rehearse() {
   }
   const partial = f.harness({ outcome: 'PARTIAL' }); partial.queue(f.buy());
   const partialResult = await partial.controller.drain();
-  // Deliberately expose a gap instead of claiming a partial fill is a successful full order.
-  // Ground truth: requested $10, price $10, only 0.4 units ($4) appear. The mock normal
-  // verifier reports a position change as confirmed; the bridge does not require order finality.
-  assert.equal(partialResult.status, 'CONFIRMED'); assert.equal(partial.state.managed['101'].units, 0.4);
-  record('partial_buy_without_order_finality', { requestedUsd: 10, observedUnits: 0.4, quoteUsd: 10, statusObserved: partialResult.status,
-    required: 'Track partial quantity and broker order terminal state; reserve remaining commitment; prohibit new sends while unresolved.' }, 'BLOCKER_REPRODUCED');
+  assert.equal(partialResult.status, 'NEEDS_RECONCILIATION'); assert.equal(partial.state.managed['101'].units, 0.4);
+  assert.equal(partial.state.managed['101'].status, 'RECONCILIATION_REQUIRED');
+  record('partial_buy_without_order_finality', { requestedUsd: 10, observedUnits: 0.4, statusObserved: partialResult.status,
+    complete: false, automaticResend: false });
   const reductions = f.harness(); reductions.queue(f.buy()); await reductions.controller.drain();
   reductions.queue({ ...f.sell(), units: 0.25, quantityMode: 'UNITS' });
   assert.ok((await reductions.controller.drain()).vetoes.includes('PARTIAL_CLOSE_NOT_RELIABLY_SUPPORTED'));

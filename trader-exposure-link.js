@@ -122,8 +122,8 @@ function normalizeOwnedPortfolio(response, { universe = [], now = Date.now(), ma
     unreconstructedRisk: rows.filter(r => !r.riskReconstructed).map(r => ({ positionId: r.positionId, instrumentId: r.instrumentId, leverage: r.leverage, isBuy: r.isBuy, settlementType: r.settlementType, reason: 'DERIVATIVE_SHORT_LEVERAGE_OR_PRODUCT_METADATA_UNRECONSTRUCTED' })),
     creditUsd: numeric(client.credit), ordersForCloseIgnored: Array.isArray(client.ordersForClose) ? client.ordersForClose.length : null };
 }
-const TERMINAL = new Set(['POSITION_CONFIRMED', 'ORDER_REJECTED', 'ORDER_NO_EFFECT', 'CONFIRMED', 'REJECTED']);
-function pendingExposure(client = {}, intents = []) {
+const TERMINAL = new Set(['POSITION_CONFIRMED', 'ORDER_REJECTED', 'ORDER_NO_EFFECT', 'CONFIRMED', 'REJECTED', 'ORDER_PARTIALLY_FILLED_TERMINAL', 'ORDER_CANCELED', 'ORDER_EXPIRED']);
+function pendingExposure(client = {}, intents = [], now = Date.now(), account = {}) {
   client = client && typeof client === 'object' ? client : {};
   const candidates = [], issues = [];
   for (const name of ['ordersForOpen', 'orders']) {
@@ -150,12 +150,24 @@ function pendingExposure(client = {}, intents = []) {
     }
     if (key) intentGroups.set(key, raw);
     if (!raw || typeof raw !== 'object') { issues.push('INVALID_INTENT'); continue; }
-    if (TERMINAL.has(raw.status)) continue;
-    const id = identifier(raw.id), broker = identifier(raw.brokerResponse?.orderId ?? raw.orderId);
+    const id = identifier(raw.id), broker = identifier(raw.response?.orderId ?? raw.brokerResponse?.orderId ?? raw.orderId);
+    if (TERMINAL.has(raw.status)) {
+      const residual = broker ? orders.find(o => o.key === broker) : null;
+      if (residual) { residual.impactKnown = false; issues.push('TERMINAL_ORDER_STILL_REPORTED_PENDING'); }
+      continue;
+    }
     const found = broker ? orders.find(o => o.key === broker) : null;
     if (found) {
       found.intentIds.push(id);
-      if (numeric(raw.amount) !== null && raw.type === 'BUY' && raw.amount !== found.amountUsd || raw.type === 'SELL' && found.isBuy === true) { found.impactKnown = false; issues.push('INTENT_BROKER_ORDER_CONFLICT'); }
+      const p = raw.orderProgress, checked = time(p?.checkedAt);
+      const accountMatch = p?.accountContext && Object.keys(p.accountContext).length > 0 && Object.entries(p.accountContext).every(([key, value]) => account[key] === value);
+      const partialBound = p?.verifiedForIntent === true && p.orderId === broker && raw.positionProof?.matched === true && accountMatch && checked !== null && now >= checked && now - checked <= 300000 && numeric(p.remainingRequestedAmount) !== null;
+      if (raw.type === 'BUY' && (p?.executedUnits > 0 || p?.lastVerified?.executedUnits > 0) && !partialBound) { found.impactKnown = false; issues.push('PARTIAL_FINALITY_UNVERIFIED'); }
+      else if (raw.type === 'BUY' && partialBound) {
+        if (found.instrumentId !== p.instrumentId || ![raw.amount, p.remainingRequestedAmount].some(v => Math.abs(v - found.amountUsd) < 0.000001)) {
+          found.impactKnown = false; issues.push('PARTIAL_ORDER_AMOUNT_CONTRADICTION');
+        } else { found.amountUsd = p.remainingRequestedAmount; found.quantityBasis = 'UNEXECUTED_PRINCIPAL_ONLY'; found.additionalCashDeductionUsd = 0; }
+      } else if (numeric(raw.amount) !== null && raw.type === 'BUY' && raw.amount !== found.amountUsd || raw.type === 'SELL' && found.isBuy === true) { found.impactKnown = false; issues.push('INTENT_BROKER_ORDER_CONFLICT'); }
     } else orders.push({ key: null, intentIds: id ? [id] : [], source: 'LOCAL_INTENT', status: typeof raw.status === 'string' && /^[A-Z_]{1,60}$/.test(raw.status) ? raw.status : 'UNKNOWN', instrumentId: null,
       analysisAsset: symbol(raw.asset), amountUsd: numeric(raw.amount), impactKnown: false, reason: 'EXECUTION_INSTRUMENT_OR_ORDER_CORRELATION_UNVERIFIED' });
   }
@@ -163,7 +175,7 @@ function pendingExposure(client = {}, intents = []) {
   orders.sort((a, b) => String(a.key || a.intentIds[0] || '').localeCompare(String(b.key || b.intentIds[0] || '')));
   const map = new Map(); for (const order of orders) if (order.impactKnown) add(map, order.instrumentId, order.amountUsd);
   const complete = !issues.length && orders.every(r => r.impactKnown);
-  return { status: complete ? 'COMPLETE_KNOWN_BUY_UPPER_BOUND' : 'INCOMPLETE', quantityBasis: 'REPORTED_PENDING_AMOUNT_UPPER_BOUND_NOT_VERIFIED_REMAINING_AMOUNT', knownBuyUpperBoundByInstrument: ordered(map), allBuyUpperBoundByInstrument: complete ? ordered(map) : null,
+  return { status: complete ? 'COMPLETE_KNOWN_BUY_UPPER_BOUND' : 'INCOMPLETE', quantityBasis: 'PER_ORDER_REPORTED_UPPER_BOUND_OR_VERIFIED_UNEXECUTED_PRINCIPAL', knownBuyUpperBoundByInstrument: ordered(map), allBuyUpperBoundByInstrument: complete ? ordered(map) : null,
     orders, issues: [...new Set(issues)].sort(), caveat: 'PENDING_IS_NOT_HELD; uncertain fills/SELLs never reduce held exposure; no assumption that every pending order fills.' };
 }
 function trustedTaxonomy(records, id, now) {
@@ -209,7 +221,7 @@ function observedConcentrations(observerView = {}, owned, { now = Date.now(), ma
 function buildTraderExposureView({ portfolioResponse, observerView, intents = [], proposals = [], universe = [], taxonomy = [], now = Date.now() } = {}) {
   const owned = normalizeOwnedPortfolio(portfolioResponse, { universe, now });
   return { readOnly: true, executionAttempted: false, generatedAt: new Date(now).toISOString(), owned,
-    pending: pendingExposure(portfolioResponse?.data?.clientPortfolio, intents),
+    pending: pendingExposure(portfolioResponse?.data?.clientPortfolio, intents, now, require('./etoro-order-finality').contextFromPortfolio(portfolioResponse)),
     observedOnly: observedConcentrations(observerView, owned, { now }), dimensions: dimensionExposure(owned, taxonomy, now),
     proposalsNotExecuted: proposals.slice(-50).map(r => traceView(r, intents)),
     lotModel: 'EXACT_BROKER_POSITION_IDS_ONLY_NO_SYNTHETIC_INDEPENDENT_LOTS' };

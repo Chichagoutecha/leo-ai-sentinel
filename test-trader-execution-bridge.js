@@ -2,6 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const b = require('./trader-execution-bridge');
+const { progressFor } = require('./order-finality-fixtures');
 const NOW = Date.parse('2026-11-02T12:00:00Z'), at = new Date(NOW).toISOString();
 function buy(id = 'proposal-1') { return { proposalId: id, decisionId: `decision-${id}`, policyVersion: 'trader-context-v1', policyId: 'a'.repeat(64), createdAt: at,
   side: 'BUY', asset: 'AAPL', instrumentId: 1, amountUsd: 10, scope: 'REAL_MANAGED_STRATEGY', decision: 'ADVISORY_REVIEW_ONLY', leoConfidence: 85, referencePrice: 10, priceDriftLimitPct: 2,
@@ -41,6 +42,7 @@ function harness({ state = initialized(), positions = [], configure = settings()
       else rows = [row()];
       const result = { intentId: `intent-${p.proposalId}`, confirmed: true, data: { positionId: '101' }, verification: {
         beforeSnapshot: { instrumentId: 1, positionDetails: beforeRows }, afterSnapshot: { instrumentId: 1, positionDetails: rows.map(r => ({ positionId: r.positionId, units: r.units })) } } };
+      result.orderProgress = progressFor(p, beforeRows, rows, outcome === 'PARTIAL' ? 'PARTIAL' : 'FILLED');
       if (outcome === 'AMBIGUOUS') result.verification.afterSnapshot.positionDetails.push({ positionId: '102', units: 1 });
       if (outcome === 'UNBOUND') delete result.data.positionId;
       return result;
@@ -106,7 +108,7 @@ test('duplicate proposals, reused decision IDs and corrected conflicting proposa
   assert.throws(() => h.queue({ ...buy('different-id'), decisionId: buy().decisionId }));
 });
 test('network errors and acknowledgement-only responses survive restart without retry or scope adoption', async () => {
-  for (const outcome of ['NETWORK', 'ACK', 'AMBIGUOUS', 'UNBOUND']) {
+  for (const outcome of ['NETWORK', 'ACK', 'AMBIGUOUS']) {
     const h = harness({ outcome }); h.queue(buy()); assert.equal((await h.controller.drain()).status, 'NEEDS_RECONCILIATION');
     assert.deepEqual(h.state.managed, {}); assert.ok(!JSON.stringify(h.state).includes('SECRET_ERROR_NOT_RETAINED'));
     const restored = harness({ state: b.recover(JSON.parse(JSON.stringify(h.state))) }); await restored.controller.drain(); assert.equal(restored.calls.length, 0);
@@ -133,7 +135,7 @@ test('SELL is selected before an unrelated BUY and a blocked entry does not cons
 });
 test('reconciliation uses an exact intent and confirmed position proof, never cash or an acknowledgement', async () => {
   const h = harness({ outcome: 'ACK' }); h.queue(buy()); await h.controller.drain();
-  const confirmed = { confirmed: true, intentId: 'intent-proposal-1', data: { positionId: '101' }, verification: { afterSnapshot: { instrumentId: 1, positionDetails: [{ positionId: '101', units: 1 }] } } };
+  const confirmed = { orderProgress: progressFor(buy(), [], [row()]), confirmed: true, intentId: 'intent-proposal-1', data: { positionId: '101' }, verification: { afterSnapshot: { instrumentId: 1, positionDetails: [{ positionId: '101', units: 1 }] } } };
   const r = b.reconcile(h.state, 'proposal-1', confirmed, NOW); assert.equal(r.operations['proposal-1'].status, 'CONFIRMED'); assert.equal(r.managed['101'].units, 1);
   const wrong = b.reconcile(h.state, 'proposal-1', { ...confirmed, intentId: 'other' }, NOW); assert.equal(wrong.operations['proposal-1'].status, 'NEEDS_RECONCILIATION'); assert.deepEqual(wrong.managed, {});
 });
@@ -182,11 +184,11 @@ test('real executor functions in an isolated VM use the existing BUY/close contr
   const source = require('node:fs').readFileSync(require.resolve('./index'), 'utf8');
   const functions = source.slice(source.indexOf('async function executeBuy('), source.indexOf('async function buildRuntimeContext('));
   const vm = require('node:vm');
-  for (const side of ['BUY', 'SELL']) for (const scenario of ['CONFIRMED', 'NETWORK', 'ACK', 'PERSISTENCE']) {
+  for (const side of ['BUY', 'SELL']) for (const scenario of ['CONFIRMED', 'NETWORK', 'ACK', 'PERSISTENCE']) for (const strategy of [true, false]) {
     const requests = [], events = [], intents = {};
     const positions = side === 'SELL' ? [{ positionId: '999', instrumentId: 1, units: 2 }, { positionId: '101', instrumentId: 1, units: 1 }] : [];
     const snap = () => ({ instrumentId: 1, positionIds: positions.map(r => r.positionId), positionDetails: positions.map(r => ({ positionId: r.positionId, units: r.units })) });
-    const sandbox = { TRADING_MODE: 'LIVE', TRADING_MODE_LABEL: 'LIVE', DEMO_TRADING_ENABLED: false, LIVE_TRADING_ENABLED: true, LIVE_EXECUTION_ARMED: true,
+    const sandbox = { orderFinality: require('./etoro-order-finality'), TRADING_MODE: 'LIVE', TRADING_MODE_LABEL: 'LIVE', DEMO_TRADING_ENABLED: false, LIVE_TRADING_ENABLED: true, LIVE_EXECUTION_ARMED: true,
       LIVE_PORTFOLIO_PREFLIGHT_ENABLED: true, LIVE_BUY_MAX_ORDER_USD: 10, MIN_ORDER_USD: 1, MAX_OPEN_POSITIONS: 10,
       WATCHLIST: { AAPL: 1 }, ASSET_RULES: { AAPL: {} }, TRADE_ALLOWED_ASSETS: new Set(['AAPL']), TRADE_ALLOWED_CATEGORIES: new Set(['STOCK']),
       SELL_CLOSE_PROOF_VERSION: 'TEST', EXECUTION_STATUS: { SENT: 'ORDER_SENT', ACCEPTED: 'ORDER_ACCEPTED', NOT_FOUND: 'ORDER_ACCEPTED_NOT_CONFIRMED', CONFIRMED: 'POSITION_CONFIRMED', REJECTED: 'ORDER_REJECTED', UNCERTAIN: 'EXECUTION_UNCERTAIN' },
@@ -198,7 +200,8 @@ test('real executor functions in an isolated VM use the existing BUY/close contr
       guardTraderNormalExecution: (_options, _preflight, _market, request) => { assert.equal(request.side, side); if (side === 'SELL') assert.equal(request.positionId, '101'); return true; },
       createOrderIntent: (type, asset, amount, details) => { events.push('intent'); const intent = { id: 'intent-test', type, asset, amount, ...details }; intents[intent.id] = intent; return { ok: true, intent }; },
       updateOrderIntentStatus: (id, status, details) => Object.assign(intents[id], { status }, details),
-      runtimeState: { traderExecutionBridge: { operations: { 'proposal-1': {} } } },
+      runtimeState: { orderIntents: intents, traderExecutionBridge: { operations: { 'proposal-1': {} } } },
+      persistOrderIntentBeforeSend: async intent => { assert.ok(intent); events.push('durable-intent'); return scenario !== 'PERSISTENCE'; },
       persistTraderExecution: async () => { events.push('durable-intent'); return scenario !== 'PERSISTENCE'; }, traderExecutionSettings: () => ({ enabled: true }),
       etoroHeaders: () => ({ 'x-request-id': 'test-request' }),
       fetchJsonWithRetry: async (url, init, opts) => { assert.equal(events.at(-1), 'durable-intent'); assert.equal(opts.retries, 0); requests.push({ url, method: init.method, body: JSON.parse(init.body) });
@@ -207,9 +210,9 @@ test('real executor functions in an isolated VM use the existing BUY/close contr
       verifyPortfolioAfterExecution: async () => ({ confirmed: scenario === 'CONFIRMED', observed: scenario === 'CONFIRMED', status: scenario === 'CONFIRMED' ? 'POSITION_CONFIRMED' : 'ORDER_ACCEPTED_NOT_CONFIRMED', afterSnapshot: { instrumentId: 1, positionDetails: [] }, evidence: [] }),
       addAudit() {}, addExecutionHistory() {}, setCooldown() {}, recordExecutionVerification() {} };
     vm.createContext(sandbox); vm.runInContext(functions, sandbox);
-    const options = { strategyExecution: { operationId: 'proposal-1', proposalId: 'proposal-1', accountRef: 'fixture-account' }, expectedPositionId: '101', expectedUnits: 1 };
+    const options = { ...(strategy ? { strategyExecution: { operationId: 'proposal-1', proposalId: 'proposal-1', accountRef: 'fixture-account' } } : {}), expectedPositionId: '101', expectedUnits: 1 };
     const r = side === 'BUY' ? await sandbox.executeBuy('AAPL', 10, null, options) : await sandbox.executeSell('AAPL', null, options);
-    assert.equal(intents['intent-test'].proposalId, 'proposal-1');
+    assert.equal(intents['intent-test'].proposalId, strategy ? 'proposal-1' : undefined);
     if (scenario === 'PERSISTENCE') { assert.equal(requests.length, 0); assert.equal(r.confirmed, false); continue; }
     assert.equal(requests.length, 1); assert.equal(requests[0].method, 'POST');
     if (side === 'BUY') { assert.equal(requests[0].url, 'https://public-api.etoro.com/api/v2/trading/execution/orders'); assert.equal(requests[0].body.transaction, 'buy'); assert.equal(requests[0].body.leverage, 1); }

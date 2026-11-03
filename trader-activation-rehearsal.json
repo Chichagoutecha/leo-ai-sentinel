@@ -125,12 +125,12 @@
     },
     {
       "name": "partial_buy_without_order_finality",
-      "status": "BLOCKER_REPRODUCED",
+      "status": "PASS_MOCK",
       "requestedUsd": 10,
       "observedUnits": 0.4,
-      "quoteUsd": 10,
-      "statusObserved": "CONFIRMED",
-      "required": "Track partial quantity and broker order terminal state; reserve remaining commitment; prohibit new sends while unresolved."
+      "statusObserved": "NEEDS_RECONCILIATION",
+      "complete": false,
+      "automaticResend": false
     },
     {
       "name": "partial_reduction",

@@ -146,6 +146,8 @@ const traderAdvisory = require('./trader-advisory-policy');
 const { virtualFill } = require('./paper-shadow-execution');
 const traderShadow = require('./trader-shadow-experiment');
 const traderExecution = require('./trader-execution-bridge');
+const orderFinality = require('./etoro-order-finality');
+const orderFinalityReads = orderFinality.createReadClient({ headers: () => etoroHeaders() });
 const tradingAvailability = require('./trading-availability');
 const { ENDPOINT: SEC_BLACKROCK_ENDPOINT, REFRESH_INTERVAL_MS: SEC_REFRESH_INTERVAL_MS,
   normalizeBlackRockFilings, institutionalWatchStatus } = require('./sec-institutional-watch');
@@ -312,6 +314,11 @@ const EXECUTION_STATUS = Object.freeze({
   SENT: "ORDER_SENT",
   ACCEPTED: "ORDER_ACCEPTED_BY_ETORO",
   CONFIRMED: "POSITION_CONFIRMED",
+  PARTIAL: "ORDER_PARTIALLY_FILLED",
+  TERMINAL_PARTIAL: "ORDER_PARTIALLY_FILLED_TERMINAL",
+  FILLED_AWAITING_PORTFOLIO: "ORDER_FILLED_AWAITING_PORTFOLIO",
+  CANCELED: "ORDER_CANCELED",
+  EXPIRED: "ORDER_EXPIRED",
   REJECTED: "ORDER_REJECTED",
   NOT_FOUND: "POSITION_NOT_FOUND",
   NO_EFFECT: "ORDER_NO_EFFECT",
@@ -322,6 +329,8 @@ const EXECUTION_STATUS = Object.freeze({
 const ACTIVE_EXECUTION_STATUSES = new Set([
   EXECUTION_STATUS.INTENT_CREATED,
   EXECUTION_STATUS.SENT,
+  EXECUTION_STATUS.PARTIAL,
+  EXECUTION_STATUS.FILLED_AWAITING_PORTFOLIO,
   EXECUTION_STATUS.ACCEPTED,
   EXECUTION_STATUS.NOT_FOUND,
   EXECUTION_STATUS.UNCERTAIN,
@@ -3470,6 +3479,7 @@ function executionHistoryEntryIsEffective(entry) {
     EXECUTION_STATUS.DUPLICATE_BLOCKED
   ].includes(status)) return false;
 
+  if (status === EXECUTION_STATUS.TERMINAL_PARTIAL) return true;
   if (entry.confirmed === true || status === EXECUTION_STATUS.CONFIRMED) return true;
 
   // Avec un intent moderne, seule une preuve portefeuille confirmée compte comme
@@ -5921,99 +5931,57 @@ function buildSellCloseProof({
   };
 }
 
-function evaluateExecutionEvidence({
-  side,
-  beforeSnapshot = null,
-  afterSnapshot,
-  expectedPositionId = null
-}) {
+function evaluateExecutionEvidence({ side, beforeSnapshot = null, afterSnapshot, expectedPositionId = null, orderProgress = null }) {
   const normalizedSide = String(side || "BUY").toUpperCase();
-  if (!afterSnapshot) {
-    return {
-      status: EXECUTION_STATUS.UNCERTAIN,
-      confirmed: false,
-      evidence: ["AFTER_SNAPSHOT_MISSING"],
-      closeProof: normalizedSide === "SELL"
-        ? buildSellCloseProof({ beforeSnapshot, afterSnapshot, expectedPositionId })
-        : null
-    };
-  }
+  const closeProof = normalizedSide === "SELL" ? buildSellCloseProof({ beforeSnapshot, afterSnapshot, expectedPositionId }) : null;
+  const proof = orderFinality.positionProof({ side: normalizedSide, beforeSnapshot, afterSnapshot, progress: orderProgress, expectedPositionId });
+  let status = EXECUTION_STATUS.UNCERTAIN;
+  if (orderProgress?.verifiedForIntent && proof.matched) {
+    if (orderProgress.complete && orderProgress.terminal === true) status = EXECUTION_STATUS.CONFIRMED;
+    else if (orderProgress.terminal === true && orderProgress.executedUnits > 0) status = EXECUTION_STATUS.TERMINAL_PARTIAL;
+    else if (orderProgress.terminal === true && orderProgress.executedUnits === 0) status = orderProgress.state === "REJECTED" ? EXECUTION_STATUS.REJECTED : orderProgress.state === "EXPIRED" ? EXECUTION_STATUS.EXPIRED : EXECUTION_STATUS.CANCELED;
+    else if (orderProgress.executedUnits > 0) status = EXECUTION_STATUS.PARTIAL;
+    else status = EXECUTION_STATUS.ACCEPTED;
+  } else if (orderProgress?.verifiedForIntent && orderProgress.complete) status = EXECUTION_STATUS.FILLED_AWAITING_PORTFOLIO;
+  // Existence, cash delta and acknowledgement are observations, never whole-order proof.
+  return { status, confirmed: status === EXECUTION_STATUS.CONFIRMED, confidence: proof.matched ? "ORDER_AND_PORTFOLIO_MATCH" : "NONE",
+    evidence: [...(closeProof?.evidence || []), proof.matched ? "ORDER_EXECUTIONS_MATCH_PORTFOLIO" : proof.reason || "ORDER_FINALITY_UNVERIFIED"],
+    closeProof, orderProgress, positionProof: proof };
+}
 
-  const before = beforeSnapshot || {
-    positionLineCount: normalizedSide === "BUY" ? 0 : null,
-    positionIds: [],
-    openOrderCount: 0,
-    openOrderIds: [],
-    closeOrderCount: 0,
-    closeOrderIds: []
-  };
-  const newPositionIds = setDifference(afterSnapshot.positionIds, before.positionIds);
-  const newOpenOrderIds = setDifference(afterSnapshot.openOrderIds, before.openOrderIds);
-  const evidence = [];
+async function persistOrderIntentBeforeSend(intent) {
+  const candidate = buildPersistentState({ compact: hasUpstashMemory() });
+  const fitted = hasUpstashMemory() ? fitPersistentStateToBudget(candidate).state : candidate;
+  const saved = fitted.orderIntents?.[intent.id];
+  if (!saved || saved.requestId !== intent.requestId || saved.status !== EXECUTION_STATUS.SENT) return false;
+  return savePersistentState();
+}
 
-  if (normalizedSide === "BUY") {
-    const positionAppeared = afterSnapshot.positionLineCount > Number(before.positionLineCount || 0) ||
-      newPositionIds.length > 0 ||
-      (!beforeSnapshot && afterSnapshot.positionLineCount > 0);
-    if (positionAppeared) {
-      evidence.push("NEW_POSITION_VISIBLE", ...newPositionIds.map((id) => "POSITION_ID_" + id));
-      return {
-        status: EXECUTION_STATUS.CONFIRMED,
-        confirmed: true,
-        evidence,
-        confidence: "STRONG",
-        closeProof: null
-      };
-    }
-    const orderAppeared = afterSnapshot.openOrderCount > Number(before.openOrderCount || 0) ||
-      newOpenOrderIds.length > 0 ||
-      (!beforeSnapshot && afterSnapshot.openOrderCount > 0);
-    if (orderAppeared) {
-      evidence.push("OPEN_ORDER_VISIBLE", ...newOpenOrderIds.map((id) => "ORDER_ID_" + id));
-      return {
-        status: EXECUTION_STATUS.ACCEPTED,
-        confirmed: false,
-        evidence,
-        confidence: "MEDIUM",
-        closeProof: null
-      };
-    }
-  } else if (normalizedSide === "SELL") {
-    const closeProof = buildSellCloseProof({
-      beforeSnapshot,
-      afterSnapshot,
-      expectedPositionId
-    });
-    if (closeProof.fullCloseProven) {
-      return {
-        status: EXECUTION_STATUS.CONFIRMED,
-        confirmed: true,
-        evidence: closeProof.evidence,
-        confidence: closeProof.confidence,
-        closeProof
-      };
-    }
-    return {
-      status: EXECUTION_STATUS.NOT_FOUND,
-      confirmed: false,
-      evidence: closeProof.evidence,
-      confidence: "NONE",
-      closeProof
-    };
-  }
-
-  if (Number.isFinite(Number(before.availableCash)) && Number.isFinite(Number(afterSnapshot.availableCash))) {
-    const cashDelta = roundNumber(Number(afterSnapshot.availableCash) - Number(before.availableCash), 6);
-    if (Math.abs(cashDelta) > 0.0001) evidence.push("CASH_DELTA_" + cashDelta);
-  }
-  evidence.push("NO_POSITION_OR_ORDER_PROOF");
-  return {
-    status: EXECUTION_STATUS.NOT_FOUND,
-    confirmed: false,
-    evidence,
-    confidence: "NONE",
-    closeProof: null
-  };
+async function readOrderProgress(intent) {
+  if (!intent) return orderFinality.unknown("INTENT_UNAVAILABLE");
+  if (intent.orderProgress?.reviewRequired) return intent.orderProgress;
+  const target = intent.beforeSnapshot?.positionDetails?.find(r => String(r.positionId) === String(intent.expectedPositionId ?? intent.positionId));
+  const expected = { intentId: intent.id, side: intent.type, environment: intent.mode === "LIVE" ? "REAL" : "DEMO",
+    instrumentId: intent.beforeSnapshot?.instrumentId || WATCHLIST[intent.asset], orderId: intent.response?.orderId || intent.orderProgress?.orderId || intent.orderProgress?.lastVerified?.orderId,
+    referenceId: intent.requestId, positionId: intent.expectedPositionId ?? intent.positionId,
+    requestedAmount: intent.type === "BUY" ? intent.amount : null, requestedUnits: intent.type === "SELL" ? target?.units : null,
+    account: intent.lookupAccountContext || {} };
+  const ledger = runtimeState.orderIntents[intent.id];
+  const now = Date.now(), previous = ledger.orderProgress || intent.orderProgress;
+  const retain = reason => previous?.verifiedForIntent && now >= Date.parse(previous.checkedAt) && now - Date.parse(previous.checkedAt) <= 300000 ? previous : orderFinality.monotonic(previous, orderFinality.unknown(reason));
+  if (expected.environment !== "REAL" || !Object.keys(expected.account).length) return orderFinality.monotonic(previous, orderFinality.unknown("LOOKUP_CONTEXT_UNAVAILABLE"));
+  const recent = Object.values(runtimeState.orderIntents || {}).flatMap(i => i.lookupReadTimes || []).filter(at => now - at < 60000);
+  if (recent.length >= 6 || ledger.lookupNextAllowedAt > now) return retain("PERSISTED_LOOKUP_BUDGET_OR_COOLDOWN");
+  ledger.lookupReadTimes = [...(ledger.lookupReadTimes || []).filter(at => now - at < 60000), now].slice(-6);
+  ledger.lookupNextAllowedAt = now + 10000;
+  if (!await savePersistentState()) return orderFinality.monotonic(previous, orderFinality.unknown("LOOKUP_BUDGET_PERSISTENCE_UNAVAILABLE"));
+  const next = await orderFinalityReads.read(expected);
+  if (next.httpStatus === 429) ledger.lookupNextAllowedAt = now + 60000;
+  if (["LOOKUP_COOLDOWN", "LOCAL_SHARED_QUOTA_RESERVE"].includes(next.reason) && previous?.verifiedForIntent && Date.now() >= Date.parse(previous.checkedAt) && Date.now() - Date.parse(previous.checkedAt) <= 300000) return previous;
+  const progress = orderFinality.monotonic(previous, next);
+  ledger.orderProgress = progress;
+  if (progress.reviewRequired || next.httpStatus === 429) await savePersistentState(); else scheduleSave();
+  return progress;
 }
 
 async function verifyPortfolioAfterExecution({
@@ -6053,16 +6021,10 @@ async function verifyPortfolioAfterExecution({
         continue;
       }
       const afterSnapshot = buildAssetExecutionSnapshot(portfolio, asset);
-      const evaluation = evaluateExecutionEvidence({
-        side,
-        beforeSnapshot,
-        afterSnapshot,
-        expectedPositionId
-      });
+      const orderProgress = await readOrderProgress(runtimeState.orderIntents[intentId]);
+      const evaluation = evaluateExecutionEvidence({ side, beforeSnapshot, afterSnapshot, expectedPositionId, orderProgress });
       checks.push({ attempt, time: nowIso(), validation, afterSnapshot, evaluation });
-      strongest = evaluation.status === EXECUTION_STATUS.CONFIRMED
-        ? { evaluation, afterSnapshot }
-        : (strongest || { evaluation, afterSnapshot });
+      strongest = { evaluation, afterSnapshot };
       if (evaluation.status === EXECUTION_STATUS.CONFIRMED) break;
       if (evaluation.status === EXECUTION_STATUS.ACCEPTED) strongest = { evaluation, afterSnapshot };
     } catch (error) {
@@ -6080,13 +6042,8 @@ async function verifyPortfolioAfterExecution({
       buildSellCloseProof({ beforeSnapshot, afterSnapshot, expectedPositionId })
     : null;
 
-  if (strongest?.evaluation?.status === EXECUTION_STATUS.CONFIRMED) {
-    status = EXECUTION_STATUS.CONFIRMED;
-    confirmed = true;
-    evidence = strongest.evaluation.evidence || [];
-  } else if (strongest?.evaluation?.status === EXECUTION_STATUS.ACCEPTED) {
-    status = EXECUTION_STATUS.ACCEPTED;
-    evidence = strongest.evaluation.evidence || [];
+  if (strongest?.evaluation) {
+    status = strongest.evaluation.status; confirmed = strongest.evaluation.confirmed; evidence = strongest.evaluation.evidence || [];
   } else if (!apiAccepted || invalidPortfolioCount === checks.length || checks.every((check) => check.error)) {
     status = EXECUTION_STATUS.UNCERTAIN;
     evidence = ["PORTFOLIO_COULD_NOT_BE_VERIFIED"];
@@ -6123,7 +6080,7 @@ async function verifyPortfolioAfterExecution({
     checked: true,
     status,
     confirmed,
-    observed: status === EXECUTION_STATUS.CONFIRMED || status === EXECUTION_STATUS.ACCEPTED,
+    observed: status === EXECUTION_STATUS.CONFIRMED || status === EXECUTION_STATUS.ACCEPTED || status === EXECUTION_STATUS.PARTIAL || status === EXECUTION_STATUS.TERMINAL_PARTIAL,
     evidence,
     expectedPositionId: expectedPositionId ?? null,
     closeProof,
@@ -6131,6 +6088,8 @@ async function verifyPortfolioAfterExecution({
     beforeSnapshot,
     afterSnapshot,
     recordId: record.id,
+    orderProgress: strongest?.evaluation?.orderProgress || null,
+    positionProof: strongest?.evaluation?.positionProof || null,
     note: confirmed
       ? (String(side || "").toUpperCase() === "SELL"
           ? "SELL confirmé par disparition du positionId exact dans le portefeuille REAL."
@@ -6151,7 +6110,7 @@ async function reconcileExecutionIntents({ trigger = "manual", limit = EXECUTION
   const candidates = Object.values(runtimeState.orderIntents || {})
     .map(migrateOrderIntent)
     .filter((intent) => reconciliationMode && intent.mode === reconciliationMode && isActiveExecutionStatus(intent.status))
-    .slice(0, Math.max(1, Number(limit || EXECUTION_RECONCILE_MAX_PER_RUN)));
+    .slice(0, Math.min(3, Math.max(1, Number(limit || EXECUTION_RECONCILE_MAX_PER_RUN))));
 
   if (!reconciliationMode || !EXECUTION_VERIFIER_ENABLED || candidates.length === 0) {
     const result = {
@@ -6176,7 +6135,8 @@ async function reconcileExecutionIntents({ trigger = "manual", limit = EXECUTION
         side: intent.type,
         beforeSnapshot: intent.beforeSnapshot || null,
         afterSnapshot,
-        expectedPositionId: intent.positionId ?? intent.expectedPositionId ?? null
+        expectedPositionId: intent.positionId ?? intent.expectedPositionId ?? null,
+        orderProgress: await readOrderProgress(intent)
       });
       let nextStatus = evaluation.status;
       const nextReconciliationAttempts = Number(intent.reconciliationAttempts || 0) + 1;
@@ -6200,6 +6160,8 @@ async function reconcileExecutionIntents({ trigger = "manual", limit = EXECUTION
         lastReconciliationTrigger: trigger,
         afterSnapshot,
         verificationEvidence: evaluation.evidence,
+        orderProgress: evaluation.orderProgress,
+        positionProof: evaluation.positionProof,
         closeProof: evaluation.closeProof || intent.closeProof || null,
         noEffectAssessment,
         resolvedNoEffectAt: nextStatus === EXECUTION_STATUS.NO_EFFECT ? nowIso() : intent.resolvedNoEffectAt || null,
@@ -6735,6 +6697,10 @@ function isActiveExecutionStatus(status) {
 function migrateOrderIntent(intent) {
   const migrated = intent && typeof intent === "object" ? { ...intent } : {};
   migrated.status = normalizeExecutionIntentStatus(migrated.status);
+  migrated.finalityVersion = 1;
+  if (migrated.status === EXECUTION_STATUS.CONFIRMED && migrated.orderProgress?.complete !== true) {
+    migrated.legacyReportedStatus = migrated.status; migrated.status = EXECUTION_STATUS.UNCERTAIN;
+  }
   migrated.statusHistory = Array.isArray(migrated.statusHistory)
     ? migrated.statusHistory.slice(-30)
     : [{ status: migrated.status, time: migrated.updatedAt || migrated.createdAt || nowIso(), migrated: true }];
@@ -6789,6 +6755,7 @@ function createOrderIntent(type, asset, amount = 0, details = {}) {
     updatedAt: createdAt,
     statusHistory: [{ status: EXECUTION_STATUS.INTENT_CREATED, time: createdAt }],
     verificationAttempts: 0,
+    finalityVersion: 1,
     reconciliationAttempts: 0,
     ...details
   };
@@ -6824,18 +6791,20 @@ function finishOrderIntent(id, status, details = {}) {
 }
 
 function compactEtoroExecutionResponse(data) {
-  if (!data || typeof data !== "object") return data ?? null;
+  if (!data || typeof data !== "object") return null;
   const candidate = data.data && typeof data.data === "object" ? data.data : data;
   const first = Array.isArray(candidate) ? candidate[0] : candidate;
+  const numericId = value => typeof value === "number" && Number.isSafeInteger(value) && value > 0 || typeof value === "string" && /^[1-9][0-9]{0,25}$/.test(value) ? value : null;
+  const number = value => typeof value === "number" && Number.isFinite(value) ? value : null;
+  const reference = first?.referenceId ?? first?.referenceID ?? first?.ReferenceId ?? first?.ReferenceID ?? data?.referenceId ?? data?.referenceID;
   return {
-    orderId: first?.orderID ?? first?.orderId ?? first?.OrderID ?? first?.OrderId ?? null,
-    positionId: first?.positionID ?? first?.positionId ?? first?.PositionID ?? first?.PositionId ?? null,
-    token: first?.token ?? first?.Token ?? data?.token ?? data?.Token ?? null,
-    referenceId: first?.referenceId ?? first?.referenceID ?? first?.ReferenceId ?? first?.ReferenceID ?? data?.referenceId ?? data?.referenceID ?? data?.ReferenceId ?? data?.ReferenceID ?? null,
-    statusId: first?.statusID ?? first?.statusId ?? first?.StatusID ?? first?.StatusId ?? null,
-    message: first?.message ?? first?.Message ?? data?.message ?? data?.Message ?? null,
-    errorCode: first?.errorCode ?? first?.ErrorCode ?? data?.errorCode ?? data?.ErrorCode ?? null,
-    success: first?.success ?? first?.Success ?? data?.success ?? data?.Success ?? null
+    orderId: numericId(first?.orderID ?? first?.orderId ?? first?.OrderID ?? first?.OrderId),
+    positionId: numericId(first?.positionID ?? first?.positionId ?? first?.PositionID ?? first?.PositionId),
+    token: null, tokenPresent: Boolean(first?.token ?? first?.Token ?? data?.token ?? data?.Token),
+    referenceId: typeof reference === "string" && /^[a-f0-9-]{36}$/i.test(reference) ? reference : null,
+    statusId: number(first?.statusID ?? first?.statusId ?? first?.StatusID ?? first?.StatusId),
+    message: null, errorCode: number(first?.errorCode ?? first?.ErrorCode ?? data?.errorCode ?? data?.ErrorCode),
+    success: typeof first?.success === "boolean" ? first.success : typeof first?.Success === "boolean" ? first.Success : null
   };
 }
 
@@ -6843,7 +6812,7 @@ function hasExecutionBusinessAcknowledgement(response = null) {
   if (!response || typeof response !== "object") return false;
   if (response.orderId !== null && response.orderId !== undefined) return true;
   if (response.positionId !== null && response.positionId !== undefined) return true;
-  if (response.token !== null && response.token !== undefined) return true;
+  if (response.tokenPresent === true || response.token !== null && response.token !== undefined) return true;
   if (response.referenceId !== null && response.referenceId !== undefined) return true;
   if (response.statusId !== null && response.statusId !== undefined) return true;
   if (response.success === true) return true;
@@ -6884,6 +6853,7 @@ function executionStateUnchanged(beforeSnapshot = null, afterSnapshot = null) {
 }
 
 function shouldResolveIntentAsNoEffect(intent, evaluation, afterSnapshot, nextReconciliationAttempts = null) {
+  if (intent?.finalityVersion === 1) return { resolve: false, reasons: ["ORDER_FINALITY_REQUIRED_NO_TIMEOUT_RELEASE"] };
   if (!intent || evaluation?.status !== EXECUTION_STATUS.NOT_FOUND) {
     return { resolve: false, reasons: ["EVIDENCE_NOT_NOT_FOUND"] };
   }
@@ -13778,6 +13748,10 @@ async function executeDemoBuy(asset, amount) {
   updateOrderIntentStatus(intent.id, EXECUTION_STATUS.SENT, {
     requestId: headers["x-request-id"], sentAt: nowIso(), note: "Requête BUY envoyée une seule fois au compte eToro DEMO"
   });
+  if (!await persistOrderIntentBeforeSend(runtimeState.orderIntents[intent.id])) {
+    updateOrderIntentStatus(intent.id, EXECUTION_STATUS.UNCERTAIN, { note: "DURABILITY_FAILED_BEFORE_SEND" });
+    return { skipped: true, confirmed: false, executionAttempted: false, intentId: intent.id, reason: "DURABILITY_FAILED_BEFORE_SEND" };
+  }
   try {
     const { response, data } = await fetchJsonWithRetry(
       "https://public-api.etoro.com/api/v2/trading/execution/demo/orders",
@@ -13790,12 +13764,13 @@ async function executeDemoBuy(asset, amount) {
     const compactResponse = compactEtoroExecutionResponse(data);
     const businessAcknowledged = hasExecutionBusinessAcknowledgement(compactResponse);
     if (!response.ok) {
-      updateOrderIntentStatus(intent.id, EXECUTION_STATUS.REJECTED, {
+      const submissionStatus = response.status >= 400 && response.status < 500 && response.status !== 429 ? EXECUTION_STATUS.REJECTED : EXECUTION_STATUS.UNCERTAIN;
+      updateOrderIntentStatus(intent.id, submissionStatus, {
         httpStatus: response.status, response: compactResponse, requestId: headers["x-request-id"],
         rejectedAt: nowIso(), note: "Requête DEMO refusée par eToro"
       });
       return { ok: false, confirmed: false, mode: "DEMO", status: response.status,
-        verification_status: EXECUTION_STATUS.REJECTED, asset, amount: safeAmount, intentId: intent.id,
+        verification_status: submissionStatus, asset, amount: safeAmount, intentId: intent.id,
         requestId: headers["x-request-id"], data: compactResponse };
     }
     updateOrderIntentStatus(intent.id, businessAcknowledged ? EXECUTION_STATUS.ACCEPTED : EXECUTION_STATUS.NOT_FOUND, {
@@ -13882,6 +13857,7 @@ async function executeBuy(asset, amount, marketData = null, options = {}) {
   const intentResult = createOrderIntent("BUY", asset, safeAmount, {
     ...(options.strategyExecution ? { proposalId: options.strategyExecution.proposalId, strategyOperationId: options.strategyExecution.operationId } : {}),
     beforeSnapshot,
+    lookupAccountContext: orderFinality.contextFromPortfolio(preflight.portfolio),
     preflightValidation: preflight.validation || null,
     marketRateAtIntent: {
       mid: marketCheck.rate?.mid ?? null,
@@ -13914,6 +13890,9 @@ async function executeBuy(asset, amount, marketData = null, options = {}) {
       updateOrderIntentStatus(intent.id, EXECUTION_STATUS.UNCERTAIN, { note: "STRATEGY_DURABILITY_OR_STOP_BEFORE_SEND" });
       return { skipped: true, uncertain: true, confirmed: false, intentId: intent.id, executionAttempted: false, reason: "STRATEGY_DURABILITY_OR_STOP_BEFORE_SEND" };
     }
+  } else if (!await persistOrderIntentBeforeSend(runtimeState.orderIntents[intent.id])) {
+    updateOrderIntentStatus(intent.id, EXECUTION_STATUS.UNCERTAIN, { note: "DURABILITY_FAILED_BEFORE_SEND" });
+    return { skipped: true, confirmed: false, uncertain: true, executionAttempted: false, intentId: intent.id, reason: "DURABILITY_FAILED_BEFORE_SEND" };
   }
 
   try {
@@ -13938,19 +13917,20 @@ async function executeBuy(asset, amount, marketData = null, options = {}) {
     const compactResponse = compactEtoroExecutionResponse(data);
     const businessAcknowledged = hasExecutionBusinessAcknowledgement(compactResponse);
     if (!response.ok) {
-      updateOrderIntentStatus(intent.id, EXECUTION_STATUS.REJECTED, {
+      const submissionStatus = response.status >= 400 && response.status < 500 && response.status !== 429 ? EXECUTION_STATUS.REJECTED : EXECUTION_STATUS.UNCERTAIN;
+      updateOrderIntentStatus(intent.id, submissionStatus, {
         httpStatus: response.status,
         response: compactResponse,
         requestId: headers["x-request-id"],
         rejectedAt: nowIso(),
         note: "Requête refusée par eToro"
       });
-      addAudit("LIVE_BUY_REJECTED", { asset, amount: safeAmount, intentId: intent.id, status: response.status, response: compactResponse });
+      addAudit(submissionStatus === EXECUTION_STATUS.REJECTED ? "LIVE_BUY_REJECTED" : "LIVE_BUY_EXECUTION_UNCERTAIN", { asset, amount: safeAmount, intentId: intent.id, status: response.status, response: compactResponse });
       return {
         status: response.status,
         ok: false,
         confirmed: false,
-        verification_status: EXECUTION_STATUS.REJECTED,
+        verification_status: submissionStatus,
         type: "BUY",
         mode: "LIVE",
         asset,
@@ -13987,6 +13967,8 @@ async function executeBuy(asset, amount, marketData = null, options = {}) {
       verificationAttempts: verification.attempts,
       verificationEvidence: verification.evidence,
       afterSnapshot: verification.afterSnapshot,
+      orderProgress: verification.orderProgress,
+      positionProof: verification.positionProof,
       verificationRecordId: verification.recordId,
       confirmedAt: verification.confirmed ? nowIso() : null,
       note: verification.note
@@ -14124,6 +14106,7 @@ async function executeSell(asset, marketData = null, options = {}) {
   const intentResult = createOrderIntent("SELL", asset, 0, {
     ...(options.strategyExecution ? { proposalId: options.strategyExecution.proposalId, strategyOperationId: options.strategyExecution.operationId } : {}),
     beforeSnapshot,
+    lookupAccountContext: orderFinality.contextFromPortfolio(preflight.portfolio),
     positionId,
     expectedPositionId: positionId,
     sellProofContract: {
@@ -14159,6 +14142,9 @@ async function executeSell(asset, marketData = null, options = {}) {
       updateOrderIntentStatus(intent.id, EXECUTION_STATUS.UNCERTAIN, { note: "STRATEGY_DURABILITY_OR_STOP_BEFORE_SEND" });
       return { skipped: true, uncertain: true, confirmed: false, intentId: intent.id, executionAttempted: false, reason: "STRATEGY_DURABILITY_OR_STOP_BEFORE_SEND" };
     }
+  } else if (!await persistOrderIntentBeforeSend(runtimeState.orderIntents[intent.id])) {
+    updateOrderIntentStatus(intent.id, EXECUTION_STATUS.UNCERTAIN, { note: "DURABILITY_FAILED_BEFORE_SEND" });
+    return { skipped: true, confirmed: false, uncertain: true, executionAttempted: false, intentId: intent.id, reason: "DURABILITY_FAILED_BEFORE_SEND" };
   }
 
   try {
@@ -14175,19 +14161,20 @@ async function executeSell(asset, marketData = null, options = {}) {
     const compactResponse = compactEtoroExecutionResponse(data);
     const businessAcknowledged = hasExecutionBusinessAcknowledgement(compactResponse);
     if (!response.ok) {
-      updateOrderIntentStatus(intent.id, EXECUTION_STATUS.REJECTED, {
+      const submissionStatus = response.status >= 400 && response.status < 500 && response.status !== 429 ? EXECUTION_STATUS.REJECTED : EXECUTION_STATUS.UNCERTAIN;
+      updateOrderIntentStatus(intent.id, submissionStatus, {
         httpStatus: response.status,
         response: compactResponse,
         requestId: headers["x-request-id"],
         rejectedAt: nowIso(),
         note: "Requête refusée par eToro"
       });
-      addAudit("LIVE_SELL_REJECTED", { asset, positionId, intentId: intent.id, status: response.status, response: compactResponse });
+      addAudit(submissionStatus === EXECUTION_STATUS.REJECTED ? "LIVE_SELL_REJECTED" : "LIVE_SELL_EXECUTION_UNCERTAIN", { asset, positionId, intentId: intent.id, status: response.status, response: compactResponse });
       return {
         status: response.status,
         ok: false,
         confirmed: false,
-        verification_status: EXECUTION_STATUS.REJECTED,
+        verification_status: submissionStatus,
         type: "SELL",
         mode: "LIVE",
         asset,
@@ -14226,6 +14213,8 @@ async function executeSell(asset, marketData = null, options = {}) {
       verificationEvidence: verification.evidence,
       closeProof: verification.closeProof || null,
       afterSnapshot: verification.afterSnapshot,
+      orderProgress: verification.orderProgress,
+      positionProof: verification.positionProof,
       verificationRecordId: verification.recordId,
       confirmedAt: verification.confirmed ? nowIso() : null,
       note: verification.note
@@ -14829,7 +14818,8 @@ function reconcileTraderExecutionProofs() {
     runtimeState.traderExecutionBridge = traderExecution.reconcile(runtimeState.traderExecutionBridge, id, {
       intentId: intent.id, confirmed: intent.status === EXECUTION_STATUS.CONFIRMED, verification_status: intent.status,
       businessAcknowledged: intent.businessAcknowledged === true, data: { positionId: intent.response?.positionId || null },
-      verification: { beforeSnapshot: intent.beforeSnapshot, afterSnapshot: intent.afterSnapshot }
+      orderProgress: intent.orderProgress,
+      verification: { beforeSnapshot: intent.beforeSnapshot, afterSnapshot: intent.afterSnapshot, orderProgress: intent.orderProgress, positionProof: intent.positionProof }
     }, Date.now());
   }
 }
