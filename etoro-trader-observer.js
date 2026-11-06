@@ -75,7 +75,7 @@ function createTraderObserver({ env = process.env, client, clock = Date.now, get
       }),
       events: structuredClone(s.events.filter(e => list.some(t => t.realCID === e.traderId))) };
   }
-  async function refresh(realCID) {
+  async function refresh(realCID, { portfolioOnly = false } = {}) {
     const list = configured(), trader = list.find(t => t.realCID === realCID);
     if (!trader) throw Error('TRADER_NOT_CONFIGURED');
     const s = state();
@@ -96,7 +96,7 @@ function createTraderObserver({ env = process.env, client, clock = Date.now, get
       const identity = model.resolveIdentity(profile.data, trader, existing?.identityPin || existing?.snapshot?.identity);
       if (identity.status !== 'AVAILABLE' || !client.safeUsername(identity.username)) return fail(identity.reason || 'IDENTITY_UNSAFE');
       const results = {};
-      for (const kind of ['portfolio', 'performance', 'tradeStats']) {
+      for (const kind of (portfolioOnly ? ['portfolio'] : ['portfolio', 'performance', 'tradeStats'])) {
         results[kind] = noteRead(await client.read(kind, identity));
         if (results[kind].httpStatus === 401 || results[kind].httpStatus === 429 || ['READ_QUOTA_OR_COOLDOWN', 'CREDENTIAL_CONTEXT_CHANGED'].includes(results[kind].reason)) return fail(results[kind].reason);
       }
@@ -104,12 +104,23 @@ function createTraderObserver({ env = process.env, client, clock = Date.now, get
       const finalProfile = noteRead(await client.read('profile', { realCID }));
       const finalIdentity = finalProfile.data ? model.resolveIdentity(finalProfile.data, trader, identity) : null;
       if (finalIdentity?.status !== 'AVAILABLE' || finalIdentity.username !== identity.username || client.context().generation !== context.generation) return fail('IDENTITY_OR_CONTEXT_CHANGED_DURING_COLLECTION');
+      // The scan needs current identity and holdings. Existing public statistics
+      // retain their original collection date and never become fresh by reuse.
+      const oldStatistics = existing?.snapshot?.identity?.gcid === identity.gcid ? existing.snapshot : null;
+      if (portfolioOnly) for (const kind of ['performance', 'tradeStats']) {
+        results[kind] = { data: null, status: 'UNAVAILABLE', reason: 'NOT_REQUESTED_FOR_SCAN_CONTEXT',
+          source: oldStatistics?.sources?.[kind] || null, context, collectedAt: null,
+          pagination: { mode: 'NOT_REQUESTED', pagesFetched: 0, complete: null } };
+      }
       const unavailable = result => ({ status: 'UNAVAILABLE', reason: result.reason, positions: [], complete: false, effectiveAt: null, missingFields: ['response'], pagination: result.pagination });
       const snapshot = { realCID, identity, collectedAt: new Date(clock()).toISOString(), receivedAt: new Date(clock()).toISOString(), collectionStartedAt: startedAt,
         effectiveAt: null, delaySeconds: null, context,
         portfolio: results.portfolio.data ? model.normalizePortfolio(results.portfolio.data) : unavailable(results.portfolio),
-        performance: results.performance.data ? model.normalizePerformance(results.performance.data) : unavailable(results.performance),
-        tradeStats: results.tradeStats.data ? model.normalizeTradeStats(results.tradeStats.data, identity.username) : unavailable(results.tradeStats),
+        performance: portfolioOnly && oldStatistics?.performance ? structuredClone(oldStatistics.performance) : results.performance.data ? model.normalizePerformance(results.performance.data) : unavailable(results.performance),
+        tradeStats: portfolioOnly && oldStatistics?.tradeStats ? structuredClone(oldStatistics.tradeStats) : results.tradeStats.data ? model.normalizeTradeStats(results.tradeStats.data, identity.username) : unavailable(results.tradeStats),
+        componentCollectedAt: { portfolio: results.portfolio.collectedAt,
+          performance: portfolioOnly ? (oldStatistics?.componentCollectedAt ? oldStatistics.componentCollectedAt.performance : oldStatistics?.collectedAt || null) : results.performance.collectedAt,
+          tradeStats: portfolioOnly ? (oldStatistics?.componentCollectedAt ? oldStatistics.componentCollectedAt.tradeStats : oldStatistics?.collectedAt || null) : results.tradeStats.collectedAt },
         sources: { identity: profile.source, portfolio: results.portfolio.source, performance: results.performance.source, tradeStats: results.tradeStats.source },
         reads: Object.fromEntries(Object.entries({ identity: profile, ...results, identityConfirmation: finalProfile }).map(([key, r]) => [key, { source: r.source, collectedAt: r.collectedAt, httpStatus: r.httpStatus, status: r.status, reason: r.reason, context: r.context, effectiveAt: null, delaySeconds: null, missingFields: ['sourceUpdateTimestamp'], pagination: r.pagination }])) };
       snapshot.status = 'PARTIAL';
@@ -121,6 +132,6 @@ function createTraderObserver({ env = process.env, client, clock = Date.now, get
     } catch { return fail('COLLECTION_FAILED'); }
     finally { active = false; }
   }
-  return { view, refresh };
+  return { view, refresh, refreshForScan: realCID => refresh(realCID, { portfolioOnly: true }) };
 }
 module.exports = { ROOT, DOCS, createTraderReadClient, createTraderObserver };

@@ -226,3 +226,29 @@ test('429 cooldown survives persistence that replaces the quota object', async (
   assert.equal(saved.blockedUntil, start + 60000);
   assert.equal((await client.read('profile', { realCID: 1 })).reason, 'READ_QUOTA_OR_COOLDOWN');
 });
+
+test('scan collection uses three official GETs and preserves the original date of cached statistics', async () => {
+  const s = setup();
+  await s.observer.refresh(1);
+  const previous = structuredClone(s.observer.view().traders[0].snapshot);
+  s.advance(1001);
+  const before = s.calls.length;
+  await s.observer.refreshForScan(1);
+  const next = s.observer.view().traders[0].snapshot;
+  assert.equal(s.calls.length - before, 3);
+  assert.deepEqual(next.performance, previous.performance);
+  assert.equal(next.componentCollectedAt.performance, previous.componentCollectedAt.performance);
+  assert.equal(next.componentCollectedAt.tradeStats, previous.componentCollectedAt.tradeStats);
+  assert.notEqual(next.componentCollectedAt.portfolio, previous.componentCollectedAt.portfolio);
+  assert.ok(!s.calls.slice(before).some(c => c.url.endsWith('/gain') || c.url.includes('/tradeinfo')));
+  assert.equal(next.reads.performance.pagination.pagesFetched, 0);
+});
+
+test('five scan collections remain within the existing twenty-per-minute read quota', async () => {
+  const s = setup({ handler: async u => u.pathname.endsWith('/people') ? new Response(JSON.stringify({ users: [{ realCID: Number(u.searchParams.get('cidList')), gcid: 100 + Number(u.searchParams.get('cidList')), username: 'Trader' + u.searchParams.get('cidList') }] })) : undefined });
+  s.env.TRADER_OBSERVER_TRADERS_JSON = JSON.stringify([1, 2, 3, 4, 5].map(realCID => ({ realCID })));
+  for (let id = 1; id <= 5; id++) assert.equal((await s.observer.refreshForScan(id)).status, 'PARTIAL');
+  assert.equal(s.calls.length, 15);
+  assert.ok(s.calls.every(c => c.method === 'GET'));
+  assert.ok(s.observer.view().traders.every(t => t.status === 'PARTIAL'));
+});

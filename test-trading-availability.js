@@ -126,7 +126,7 @@ test('normal buy policy exposes structured reasons without changing its allow de
 test('cache-only trader evaluation errors remain distinct from dispatch uncertainty', async () => {
   const block = source.slice(source.indexOf('async function processTraderExecution('), source.indexOf('async function executeControlledDecision('));
   let drains = 0;
-  const sandbox = { tradingAvailability: availability, runtimeState: { traderExecutionBridge: { managed: {} } }, traderExecutionContext: null, evaluateAutomaticTraderProposals() { throw Error('SECRET_NO_OUTPUT'); },
+  const sandbox = { hasUpstashMemory: () => false, tradingAvailability: availability, runtimeState: { traderExecutionBridge: { managed: {} } }, traderExecutionContext: null, evaluateAutomaticTraderProposals() { throw Error('SECRET_NO_OUTPUT'); },
     traderExecutionController: { async drain() { drains++; throw Error('SUBMISSION_MAY_HAVE_HAPPENED'); } } };
   vm.createContext(sandbox); vm.runInContext(block, sandbox);
   const control = { approved: true, finalDecision: { decision: 'SELL' } };
