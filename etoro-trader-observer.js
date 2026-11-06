@@ -3,6 +3,12 @@ const { randomUUID } = require('node:crypto');
 const model = require('./trader-observer');
 const ROOT = 'https://public-api.etoro.com/api/v1/user-info/people';
 const DOCS = 'https://api-portal.etoro.com/api-reference/users-info/';
+const RANKINGS = 'https://public-api.etoro.com/api/v2/portfolios/rankings';
+function rankingsSelector(s) {
+  return s && Object.keys(s).every(k => ['period', 'page', 'pageSize'].includes(k)) &&
+    ['AbsOneYear', 'AbsTwoYears'].includes(s.period) && Number.isSafeInteger(s.page) && s.page >= 1 && s.page <= 3 &&
+    Number.isSafeInteger(s.pageSize) && s.pageSize >= 1 && s.pageSize <= 100;
+}
 function createTraderReadClient({ env = process.env, fetchImpl = global.fetch, clock = Date.now, timeoutMs = 8000, quotaStore, onQuotaChange = () => {} } = {}) {
   let credentials = [], generation = 0; const localQuota = { timestamps: [], blockedUntil: 0 };
   function context() {
@@ -15,9 +21,10 @@ function createTraderReadClient({ env = process.env, fetchImpl = global.fetch, c
     async read(kind, selector) {
       const ctx = context(); let source;
       if (kind === 'profile' && model.validId(selector?.realCID)) source = `${ROOT}?cidList=${selector.realCID}`;
+      else if (kind === 'rankings' && rankingsSelector(selector)) source = `${RANKINGS}?${new URLSearchParams({ period: selector.period, page: selector.page, pageSize: selector.pageSize })}`;
       else if (['portfolio', 'performance', 'tradeStats'].includes(kind) && safeUsername(selector?.username)) source = `${ROOT}/${encodeURIComponent(selector.username)}/${({ portfolio: 'portfolio/live', performance: 'gain', tradeStats: 'tradeinfo?period=LastTwoYears' })[kind]}`;
       else return { status: 'UNAVAILABLE', reason: 'READ_NOT_ALLOWLISTED', source: null, data: null };
-      const base = { source, collectedAt: new Date(clock()).toISOString(), context: ctx, httpStatus: null, effectiveAt: null, delaySeconds: null, missingFields: ['sourceUpdateTimestamp'], pagination: { mode: 'NOT_DOCUMENTED', pagesFetched: 0, complete: null } };
+      const base = { source, collectedAt: new Date(clock()).toISOString(), context: ctx, httpStatus: null, requestAttempted: false, effectiveAt: null, delaySeconds: null, missingFields: ['sourceUpdateTimestamp'], pagination: { mode: 'NOT_DOCUMENTED', pagesFetched: 0, complete: null } };
       if (!credentials[0] || !credentials[1]) return { ...base, status: 'UNAVAILABLE', reason: 'CREDENTIALS_ABSENT', data: null };
       const quota = quotaStore ? quotaStore() : localQuota;
       quota.timestamps = (Array.isArray(quota.timestamps) ? quota.timestamps : []).filter(t => Number.isFinite(t) && clock() - t < 60000).slice(-20);
@@ -25,6 +32,7 @@ function createTraderReadClient({ env = process.env, fetchImpl = global.fetch, c
       quota.timestamps.push(clock()); onQuotaChange();
       const controller = new AbortController(), timer = setTimeout(() => controller.abort(), Number.isFinite(timeoutMs) ? Math.max(10, Math.min(timeoutMs, 10000)) : 8000);
       try {
+        base.requestAttempted = true;
         const r = await fetchImpl(source, { method: 'GET', redirect: 'error', signal: controller.signal,
           headers: { 'x-api-key': credentials[0], 'x-user-key': credentials[1], 'x-request-id': randomUUID() } });
         base.httpStatus = r.status;
@@ -86,7 +94,7 @@ function createTraderObserver({ env = process.env, client, clock = Date.now, get
     if (Number.isFinite(previousAttempt) && clock() - previousAttempt < minIntervalMs) return { status: 'UNAVAILABLE', reason: 'TRADER_READ_COOLDOWN', executionAttempted: false };
     active = true;
     const startedAt = new Date(clock()).toISOString(), context = client.context(), attemptedReads = [];
-    const noteRead = r => { attemptedReads.push({ source: r.source, collectedAt: r.collectedAt, httpStatus: r.httpStatus, status: r.status, reason: r.reason, context: r.context, effectiveAt: null, delaySeconds: null, pagination: r.pagination }); return r; };
+    const noteRead = r => { attemptedReads.push({ source: r.source, collectedAt: r.collectedAt, httpStatus: r.httpStatus, requestAttempted: r.requestAttempted === true, status: r.status, reason: r.reason, context: r.context, effectiveAt: null, delaySeconds: null, pagination: r.pagination }); return r; };
     s.traders[realCID] = { ...existing, lastAttempt: { at: startedAt, status: 'UNAVAILABLE', reason: 'COLLECTION_NOT_FINISHED' } };
     const fail = reason => { s.traders[realCID].lastAttempt = { at: startedAt, completedAt: new Date(clock()).toISOString(), status: 'UNAVAILABLE', reason, context, reads: attemptedReads }; persist(); return { status: 'UNAVAILABLE', reason, executionAttempted: false }; };
     try {
@@ -122,7 +130,7 @@ function createTraderObserver({ env = process.env, client, clock = Date.now, get
           performance: portfolioOnly ? (oldStatistics?.componentCollectedAt ? oldStatistics.componentCollectedAt.performance : oldStatistics?.collectedAt || null) : results.performance.collectedAt,
           tradeStats: portfolioOnly ? (oldStatistics?.componentCollectedAt ? oldStatistics.componentCollectedAt.tradeStats : oldStatistics?.collectedAt || null) : results.tradeStats.collectedAt },
         sources: { identity: profile.source, portfolio: results.portfolio.source, performance: results.performance.source, tradeStats: results.tradeStats.source },
-        reads: Object.fromEntries(Object.entries({ identity: profile, ...results, identityConfirmation: finalProfile }).map(([key, r]) => [key, { source: r.source, collectedAt: r.collectedAt, httpStatus: r.httpStatus, status: r.status, reason: r.reason, context: r.context, effectiveAt: null, delaySeconds: null, missingFields: ['sourceUpdateTimestamp'], pagination: r.pagination }])) };
+        reads: Object.fromEntries(Object.entries({ identity: profile, ...results, identityConfirmation: finalProfile }).map(([key, r]) => [key, { source: r.source, collectedAt: r.collectedAt, httpStatus: r.httpStatus, requestAttempted: r.requestAttempted === true, status: r.status, reason: r.reason, context: r.context, effectiveAt: null, delaySeconds: null, missingFields: ['sourceUpdateTimestamp'], pagination: r.pagination }])) };
       snapshot.status = 'PARTIAL';
       snapshot.reason = 'SOURCE_TIMESTAMPS_COMPLETENESS_OR_TRANSACTION_HISTORY_UNAVAILABLE';
       model.ingest(s, snapshot);
@@ -134,4 +142,4 @@ function createTraderObserver({ env = process.env, client, clock = Date.now, get
   }
   return { view, refresh, refreshForScan: realCID => refresh(realCID, { portfolioOnly: true }) };
 }
-module.exports = { ROOT, DOCS, createTraderReadClient, createTraderObserver };
+module.exports = { ROOT, DOCS, RANKINGS, createTraderReadClient, createTraderObserver };
