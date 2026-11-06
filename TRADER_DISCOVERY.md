@@ -50,13 +50,19 @@ L'observateur continue à distinguer apparitions de positions et transactions pr
 Depuis le Shell du service disposant déjà des clés, les commandes suivantes extraient uniquement trois modules dans un répertoire temporaire. Elles ne changent pas la branche ni les fichiers du service en cours, ne lancent pas `npm start` et ne recopient aucune clé :
 
 ```sh
-git fetch --quiet origin feat/trader-discovery-readonly
-leo_trader_audit_dir=$(mktemp -d /tmp/leo-traders.XXXXXX)
-git archive FETCH_HEAD etoro-trader-discovery.js etoro-trader-observer.js trader-observer.js | tar -x -C "$leo_trader_audit_dir"
-node "$leo_trader_audit_dir/etoro-trader-discovery.js" --read-only-audit
+(
+  set -eu
+  leo_trader_audit_dir=$(mktemp -d /tmp/leo-traders.XXXXXX)
+  for fichier in etoro-trader-discovery.js etoro-trader-observer.js trader-observer.js; do
+    curl --fail --silent --show-error --max-time 20 --proto '=https' \
+      "https://raw.githubusercontent.com/Chichagoutecha/leo-ai-sentinel/b33301d7a4767cf3c60f1b96d3c3dcee964aaf3f/$fichier" \
+      -o "$leo_trader_audit_dir/$fichier"
+  done
+  node "$leo_trader_audit_dir/etoro-trader-discovery.js" --read-only-audit
+)
 ```
 
-S'arrêter si une commande échoue. Ne pas répéter un 401/403. Le programme ne fait aucune répétition automatique, borne chaque lecture à huit secondes et réutilise le client de lecture avec son budget de vingt requêtes par minute. Un 429 arrête la collecte. Les requêtes de diagnostic sont supplémentaires à celles du serveur déjà actif : la limite locale ne coordonne pas les autres processus. Exécuter une seule fois, pas dans une boucle ni une tâche planifiée.
+Le bloc s'arrête automatiquement si un téléchargement échoue. Ne pas répéter un 401/403. Le programme ne fait aucune répétition automatique, borne chaque lecture à huit secondes et réutilise le client de lecture avec son budget de vingt requêtes par minute. Un 429 arrête la collecte. Les requêtes de diagnostic sont supplémentaires à celles du serveur déjà actif : la limite locale ne coordonne pas les autres processus. Exécuter une seule fois, pas dans une boucle ni une tâche planifiée.
 
 Par défaut, `node etoro-trader-discovery.js` affiche seulement les instructions : **zéro requête**. Seul `--read-only-audit` déclenche la collecte. Les autres arguments sont refusés. L'import n'a aucun effet réseau.
 
