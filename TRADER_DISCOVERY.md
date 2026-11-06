@@ -19,15 +19,15 @@ Documentation consultée le 6 novembre 2026 :
 - [Identités publiques](https://api-portal.etoro.com/api-reference/users-info/get-user-profile-and-account-summary) : lecture déjà utilisée par l'observateur, GET `/api/v1/user-info/people?cidList={cid}`.
 - [Portefeuille public](https://api-portal.etoro.com/api-reference/users-info/get-user-live-portfolio) : lecture déjà utilisée par l'observateur, GET `/api/v1/user-info/people/{username}/portfolio/live`.
 
-Le client n'accepte pour les classements que les paramètres `period`, `page`, `pageSize`, les fenêtres documentées `AbsOneYear` / `AbsTwoYears` et au maximum trois pages. Aucun URL, autre méthode, filtre ou POST fourni par l'appelant n'est accepté. Aucun endpoint de copie ou d'exécution n'est importé.
+Le client n'accepte pour les classements que les paramètres `period`, `page`, `pageSize` et le filtre booléen strict `popularInvestor=true`, les fenêtres documentées `AbsOneYear` / `AbsTwoYears` et au maximum trois pages. Aucun URL, autre méthode, filtre ou POST fourni par l'appelant n'est accepté. Aucun endpoint de copie ou d'exécution n'est importé. Le filtre officiel limite aux Popular Investors actifs ; leur statut ne prouve pas leur qualité ni la performance future.
 
-Le diagnostic par défaut autorise **cinq requêtes GET maximum** :
+Le diagnostic par défaut autorise **onze requêtes GET maximum** :
 
-1. Une page de vingt candidats sur `AbsOneYear`.
-2. Une page de vingt candidats sur `AbsTwoYears`.
-3. Pour un candidat présent dans les deux échantillons, lecture du profil officiel.
-4. Lecture de son portefeuille public si son identité est résolue.
-5. Confirmation du profil pour détecter une course au changement de pseudonyme.
+1. Une page de vingt candidats sur `AbsOneYear`, avec `popularInvestor=true`.
+2. Une page de vingt candidats sur `AbsTwoYears`, avec le même filtre officiel.
+3. Pour au maximum trois candidats distincts présents dans les deux échantillons, lecture du profil officiel.
+4. Pour chacun, lecture de son portefeuille public seulement si le CID et le pseudonyme correspondent au classement.
+5. Pour chacun, confirmation du profil pour détecter une course au changement de pseudonyme. Deux lectures de classement plus trois lectures par candidat donnent au maximum onze GET.
 
 L'ordre des candidats par CID sert uniquement à rendre l'échantillonnage reproductible. Le premier candidat vérifié n'est **pas** déclaré meilleur ou sélectionné pour trader. Un CID de classement n'est pas assimilé d'emblée à un realCID : la réponse officielle du profil doit établir cette correspondance.
 
@@ -55,7 +55,7 @@ Depuis le Shell du service disposant déjà des clés, les commandes suivantes e
   leo_trader_audit_dir=$(mktemp -d /tmp/leo-traders.XXXXXX)
   for fichier in etoro-trader-discovery.js etoro-trader-observer.js trader-observer.js; do
     curl --fail --silent --show-error --max-time 20 --proto '=https' \
-      "https://raw.githubusercontent.com/Chichagoutecha/leo-ai-sentinel/b33301d7a4767cf3c60f1b96d3c3dcee964aaf3f/$fichier" \
+      "https://raw.githubusercontent.com/Chichagoutecha/leo-ai-sentinel/c1a7be4908b1cad1853d89c31e1118c3a12b640e/$fichier" \
       -o "$leo_trader_audit_dir/$fichier"
   done
   node "$leo_trader_audit_dir/etoro-trader-discovery.js" --read-only-audit
@@ -65,6 +65,8 @@ Depuis le Shell du service disposant déjà des clés, les commandes suivantes e
 Le bloc s'arrête automatiquement si un téléchargement échoue. Ne pas répéter un 401/403. Le programme ne fait aucune répétition automatique, borne chaque lecture à huit secondes et réutilise le client de lecture avec son budget de vingt requêtes par minute. Un 429 arrête la collecte. Les requêtes de diagnostic sont supplémentaires à celles du serveur déjà actif : la limite locale ne coordonne pas les autres processus. Exécuter une seule fois, pas dans une boucle ni une tâche planifiée.
 
 Par défaut, `node etoro-trader-discovery.js` affiche seulement les instructions : **zéro requête**. Seul `--read-only-audit` déclenche la collecte. Les autres arguments sont refusés. L'import n'a aucun effet réseau.
+
+Le rapport v2 donne les motifs précis de rejet des lignes, la lecture du profil et sa correspondance avec le candidat séparément, ainsi que les motifs d'indisponibilité du portefeuille par alias (`CANDIDATE_1`, etc.). Une différence de casse dans le pseudonyme n'est pas assimilée sans preuve à une identité certaine. Le portefeuille n'est pas demandé si le profil contredit le pseudonyme du classement. Un 403 n'est pas répété pour le même candidat ; il n'interdit pas de vérifier un autre candidat distinct. Les 401 et 429 arrêtent la suite. Les identifiants de requête sont des UUID aléatoires de corrélation pour le support, jamais dérivés des secrets.
 
 Le JSON à partager ne contient ni pseudonymes, ni identifiants de compte/trader/jeton, ni positions ou soldes. Il indique méthodes, endpoints génériques, HTTP, structures attendues, dates, couverture et comptes de résultats. Une identité publique de trader vérifiée ne prouve pas l'identité du compte exécutant LEO. Une lecture réussie ne prouve jamais les droits d'ordre.
 
@@ -86,9 +88,15 @@ Conclusion : **BLOCKED pour le réel**, en attente des lectures authentifiées e
 
 ## Vérifications réalisées
 
-- `npm test` : **392 tests réussis**, aucun échec, dont 22 tests de découverte et 26 tests existants de l'observateur.
+- `npm test` : **401 tests réussis**, aucun échec, dont 31 tests de découverte et 26 tests existants de l'observateur.
 - `npm run check` : réussite de la vérification syntaxique.
 - `git diff --check` : réussite.
 - Réponses simulées : fenêtres et pages, données manquantes, doublons et contradictions, changement de pseudonyme, CID ambigu, HTTP 200 sans identité valide, 401/403/429, secrets dans les corps/erreurs, rotation des clés, restauration, expiration, concurrence, décompte des tentatives réseau et refus de toute requête hors liste.
-- Le parcours CLI par défaut est testé dans un sous-processus isolé sans identifiants. Le test principal observe exactement cinq GET simulés, aucun POST/DELETE, aucune sélection de trading et aucune fonction d'ordre.
+- Le parcours CLI par défaut est testé dans un sous-processus isolé sans identifiants. Le test principal observe exactement cinq GET simulés pour un candidat et onze pour trois candidats, aucun POST/DELETE, aucune sélection de trading et aucune fonction d'ordre.
 - Ces résultats ne prouvent ni un accès authentifié aux classements ni une performance de stratégie. Aucun ordre, déploiement, changement de variable Render ou fusion n'a eu lieu.
+
+## Preuve reçue de Render et limites de la correction v2
+
+Diagnostic v1 communiqué par l’opérateur, le 6 novembre 2026 à **17 h 07 (Paris)** : cinq lectures, classements à un/deux ans HTTP 200 et profils publics HTTP 200 ; portefeuille du candidat HTTP 403. Onze lignes retenues dans chaque fenêtre, une page seulement, aucun trader sélectionné. Les compteurs annonçaient zéro identité liée au classement ; la cause précise n’était pas conservée. Cela établit des accès sélectifs, pas l’absence générale d’accès aux traders. Le caractère privé du candidat et les permissions manquantes ne sont pas prouvés.
+
+Le v1 interrogeait le classement général (plusieurs millions de résultats rapportés), sans le filtre Popular Investor. Le v2 corrige ce périmètre, explique les correspondances et peut vérifier trois candidats distincts. Il ne prétend pas corriger côté client un refus eToro et n’élargit aucune permission. Aucune nouvelle lecture authentifiée depuis cet environnement ; le résultat v2 de Render reste à obtenir. Le CLI demeure isolé du service et du trading.
