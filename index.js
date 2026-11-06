@@ -143,6 +143,9 @@ const { createEligibilityClient, createEligibilityRegistry } = require('./etoro-
 const { resolveTradingMode, liveBuyReady, demoBuyReady, liveBuyMaxOrderUsd, classifyAsset, buildUniverse, resolveTradeAllowlist, resolveAllowedCategories, parseExclusionReasons, analyzeLookThroughExposure, evaluateBuyPolicy } = require('./trade-universe-policy');
 const { buildPaperShadowScorecard } = require('./paper-shadow-accounting');
 const traderAdvisory = require('./trader-advisory-policy');
+const traderScanInputs = require('./trader-scan-inputs');
+const traderRuntimeReadiness = require('./trader-runtime-readiness');
+let lastTraderScanInputs = null;
 const { virtualFill } = require('./paper-shadow-execution');
 const traderShadow = require('./trader-shadow-experiment');
 const traderExecution = require('./trader-execution-bridge');
@@ -14325,7 +14328,7 @@ async function askDecisionAgent(portfolioSummary, marketSummary, trendSummary, s
     max_order_usd: progressiveOrderPolicy.maximumOrderUsd,
     progressive_order_policy: progressiveOrderPolicy,
     starter_portfolio_mode: portfolioSummary.starterMode,
-    preferred_next_assets: preferredNextAssets,
+    preferred_next_assets: traderScanInputs.prioritize(preferredNextAssets, foundationAgents?.traderContext),
     watchlist: WATCHLIST,
     asset_rules: ASSET_RULES,
     portfolio_summary: portfolioSummary,
@@ -14333,7 +14336,7 @@ async function askDecisionAgent(portfolioSummary, marketSummary, trendSummary, s
     foundation_agents: foundationAgents,
     agent_council: foundationAgents?.agentCouncil || runtimeState.lastAgentCouncil,
     execution_stats_24h: getExecutionStats24h(),
-    instruction: "Choisis une seule décision. Respecte le MultiAgentCouncil: aucun hard veto n'est contournable; en mode required, sélectionne uniquement APPROVED_BUY ou APPROVED_SELL. Pour un BUY approuvé, utilise max_order_usd comme budget de phase; le RiskController appliquera ensuite les multiplicateurs et plafonds. Explique les soutiens et oppositions."
+    instruction: "Choisis une seule décision. Respecte le MultiAgentCouncil: aucun hard veto n'est contournable; en mode required, sélectionne uniquement APPROVED_BUY ou APPROVED_SELL. Pour un BUY approuvé, utilise max_order_usd comme budget de phase; le RiskController appliquera ensuite les multiplicateurs et plafonds. Explique les soutiens et oppositions. Les actifs observés dans traderContext sont des candidats à analyser. Une détention publique ne prouve pas une transaction ni une indépendance entre traders. Toute vente doit viser le périmètre géré de LEO."
   };
 
   const schema = {
@@ -14386,7 +14389,7 @@ async function askDecisionAgent(portfolioSummary, marketSummary, trendSummary, s
 }
 
 
-async function buildRuntimeContext(source) {
+async function buildRuntimeContext(source, { refreshTraders = false } = {}) {
   let realPortfolio;
   try {
     realPortfolio = await getPortfolio({ environment: ETORO_ACCOUNT_ENV });
@@ -14430,7 +14433,23 @@ async function buildRuntimeContext(source) {
     source,
     record: true
   });
-  const preferredNextAssets = getPreferredNextAssets(portfolioSummary, marketSummary);
+  let traderInput = null;
+  if (refreshTraders) {
+    try {
+      const prepared = await traderScanInputs.prepare({ observer: traderObserver, state: runtimeState.traderAdvisoryState,
+        observerState: runtimeState.traderObserver, universe: buildUniverse(WATCHLIST, ASSET_RULES, CONFIGURED_UNIVERSE_CANDIDATES),
+        allowedAssets: [...TRADE_ALLOWED_ASSETS], allowedCategories: [...TRADE_ALLOWED_CATEGORIES], quotes: marketSummary?.ratesByAsset || {},
+        overrides: JSON.parse(process.env.TRADER_ADVISORY_POLICY_JSON || "{}") });
+      runtimeState.traderAdvisoryState = prepared.state;
+      traderInput = prepared.input;
+      lastTraderScanInputs = traderInput;
+      scheduleSave();
+    } catch {
+      traderInput = { status: "UNAVAILABLE", reason: "TRADER_SCAN_INPUT_UNAVAILABLE", candidates: [], executionAllowed: false };
+      lastTraderScanInputs = traderInput;
+    }
+  }
+  const preferredNextAssets = traderScanInputs.prioritize(getPreferredNextAssets(portfolioSummary, marketSummary), traderInput);
   const candidates = preferredNextAssets
     .filter((item) => item.eligibleForTrade)
     .slice(0, SECONDARY_MAX_ASSETS_PER_SCAN)
@@ -14499,6 +14518,8 @@ async function buildRuntimeContext(source) {
     riskSellIntelligenceAgent,
     agentCouncil
   });
+
+  if (traderInput) foundationAgents.traderContext = traderInput;
 
   return {
     realPortfolio,
@@ -14680,6 +14701,11 @@ function buildDecisionDiagnostics(context, decisionRaw, control) {
 
 function recordTraderShadowScan(context, decisionRaw, control, aiDecisionCost, cycleId, cutoff = Date.now()) {
   if (!PAPER_TRADING_ENABLED) return { status: "SHADOW_REQUIRED", brokerCalls: 0 };
+  const traderInput = context?.foundationAgents?.traderContext;
+  if (traderInput?.candidates?.length) return { status: "UNAVAILABLE_INDEPENDENT_BASELINE_REQUIRED",
+    inputId: traderInput.inputId, inputVersion: traderInput.inputVersion,
+    reason: "The normal decision already received trader context; it cannot serve as a trader-free baseline.",
+    virtualOnly: true, executionAllowed: false, brokerCalls: 0 };
   try {
     const universe = buildUniverse(WATCHLIST, ASSET_RULES, CONFIGURED_UNIVERSE_CANDIDATES);
     const observerView = traderObserver.view();
@@ -14809,7 +14835,8 @@ function prepareTraderExecutionEvidence(p, context) {
   // Missing adapters remain unknown. No account/key identity, costs or release is inferred from a read.
   return { mode: TRADING_MODE_LABEL, armed: LIVE_EXECUTION_ARMED, buyArmed: liveBuyReady(process.env), accountRef,
     identityVerified: binding?.ok === true, tokenBindingVerified: false,
-    release: runtimeState.traderExecutionBridge.releaseApproval || null, asOf: portfolio?.fetchedAt || null,
+    release: p.side === "SELL" || runtimeState.traderExecutionBridge.releaseApproval?.inputVersion === traderScanInputs.VERSION
+      ? runtimeState.traderExecutionBridge.releaseApproval || null : null, asOf: portfolio?.fetchedAt || null,
     positions: view.owned.rows, portfolioComplete: view.owned.coverage === "COMPLETE", pendingComplete: view.pending.status === "COMPLETE_KNOWN_BUY_UPPER_BOUND",
     uncertainOrPending: view.pending.orders.length > 0 || Object.values(runtimeState.orderIntents || {}).some(i => isActiveExecutionStatus(i.status)),
     instrument: { instrumentId: row?.instrumentId, asset: row?.symbol, allowed: TRADE_ALLOWED_ASSETS.has(p.asset) && TRADE_ALLOWED_CATEGORIES.has(row?.category) },
@@ -14827,7 +14854,7 @@ function prepareTraderExecutionEvidence(p, context) {
       amountUsd: risk.finalDecision.amount_usd, proposalId: p.proposalId, positionId: p.side === "SELL" ? String(p.positionId) : null, units: p.units, asOf: new Date(now).toISOString() },
     limits: { exitSlotAfterEntry: stats.total + 1 < MAX_EXECUTED_ORDERS_24H && stats.sells < MAX_SELLS_24H,
       cadenceAllowed: stats.hoursSinceLastExecution === null || stats.hoursSinceLastExecution >= MIN_HOURS_BETWEEN_EXECUTIONS,
-      dailyAllowed: stats.total < MAX_EXECUTED_ORDERS_24H && (p.side === "BUY" ? stats.buys < MAX_BUYS_24H : stats.sells < MAX_SELLS_24H), singleWriterVerified: false },
+      dailyAllowed: stats.total < MAX_EXECUTED_ORDERS_24H && (p.side === "BUY" ? stats.buys < MAX_BUYS_24H : stats.sells < MAX_SELLS_24H), singleWriterVerified: traderScanInputs.writerVerified(context?.executionWriterProof, now) },
     sourceProof: { status: sourceProof && !preview.problems.includes("TRADER_SOURCE_UNVERIFIED_OR_STALE") ? "CURRENT_REFERENCES_VERIFIED" : "UNAVAILABLE", opposed: p.side === "BUY" && p.traderSources.some(ref => traderObserver.view().traders.find(t => t.realCID === ref.traderId)?.snapshot?.portfolio?.positions?.some(row => row.instrumentId === p.instrumentId && (row.isBuy !== true || row.leverage !== 1))), proposalId: p.proposalId, asOf: new Date(now).toISOString() } };
 }
 function reconcileTraderExecutionProofs() {
@@ -14861,7 +14888,12 @@ const traderExecutionController = traderExecution.createController({
     : executeSell(p.asset, traderExecutionContext?.marketData, { strategyExecution: metadata, expectedPositionId: p.positionId, expectedUnits: p.units })
 });
 async function processTraderExecution(context, control) {
-  traderExecutionContext = { ...context, protectiveExitPending: control?.approved && control.finalDecision.decision === "SELL" };
+  let executionWriterProof = null;
+  if (hasUpstashMemory() && await savePersistentState()) {
+    const checkedAt = Date.now();
+    try { executionWriterProof = { ...await continuity.status(), checkedAt }; } catch { /* unavailable evidence */ }
+  }
+  traderExecutionContext = { ...context, executionWriterProof, protectiveExitPending: control?.approved && control.finalDecision.decision === "SELL" };
   try {
     let evaluation;
     try { evaluation = evaluateAutomaticTraderProposals(context, control); }
@@ -14910,7 +14942,7 @@ async function scanMarket(source = "manual-scan") {
   markAutomaticRun("scan", source, "started");
   runtimeState.scanRunning = true;
   try {
-    const context = await buildRuntimeContext(source);
+    const context = await buildRuntimeContext(source, { refreshTraders: true });
     let decisionRaw;
     let aiDecisionCost = null;
     try {
@@ -15020,6 +15052,7 @@ async function scanMarket(source = "manual-scan") {
         preferredNextAssets: getPreferredNextAssets(context.portfolioSummary, context.marketSummary),
         assetsOverride: [decisionAsset]
       });
+      const traderInput = context.foundationAgents?.traderContext;
       context.foundationAgents = buildFoundationAgents({
         portfolioSummary: context.portfolioSummary,
         marketSummary: context.marketSummary,
@@ -15035,6 +15068,7 @@ async function scanMarket(source = "manual-scan") {
         riskSellIntelligenceAgent: context.riskSellIntelligenceAgent,
         agentCouncil: context.agentCouncil
       });
+      if (traderInput) context.foundationAgents.traderContext = traderInput;
     }
 
     const control = riskController(decisionRaw, context.decisionPortfolio, context.marketData, context.trendSummary, context.foundationAgents);
@@ -19978,6 +20012,19 @@ app.get("/trader-shadow-status", requireSecret, (_req, res) => {
 app.get("/trader-shadow-decisions", requireSecret, (_req, res) => {
   res.json({ virtualOnly: true, executionAllowed: false, historyTruncated: runtimeState.traderShadowExperiment.historyTruncated,
     records: runtimeState.traderShadowExperiment.records });
+});
+app.get("/trader-execution-readiness", requireSecret, async (_req, res) => {
+  let writer = null;
+  if (hasUpstashMemory()) {
+    const checkedAt = Date.now();
+    try { writer = { ...await continuity.status(), checkedAt }; } catch { /* unavailable proof */ }
+  }
+  res.json(traderRuntimeReadiness.report({ credentials: { etoro: Boolean(process.env.ETORO_API_KEY && process.env.ETORO_USER_KEY), persistence: hasUpstashMemory() },
+    settings: traderExecutionSettings(), mode: TRADING_MODE_LABEL, armed: LIVE_EXECUTION_ARMED, buyArmed: liveBuyReady(process.env),
+    state: runtimeState.traderExecutionBridge, writer, inputs: lastTraderScanInputs, now: Date.now() }));
+});
+app.get("/trader-scan-inputs", requireSecret, (_req, res) => {
+  res.json({ input: lastTraderScanInputs, executionAllowed: false, collectionTriggered: false });
 });
 app.get("/trader-advisory-status", requireSecret, (_req, res) => {
   res.json({ version: traderAdvisory.VERSION, executionAllowed: false, providerCalls: 0,
