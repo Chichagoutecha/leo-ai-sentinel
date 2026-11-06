@@ -114,8 +114,8 @@ test('readiness explains missing integrations even with all trading switches ena
     mode: 'LIVE', armed: true, buyArmed: true, state, writer: { ownLease: true, checkedAt: f.START, leaseRemainingMs: 10000 },
     inputs: { candidates: [{ asset: 'AAPL' }] }, now: f.START });
   assert.equal(r.status, 'BLOCKED');
-  assert.ok(r.entries.reasons.includes('TOKEN_BINDING_ADAPTER_UNAVAILABLE'));
-  assert.ok(r.entries.reasons.includes('ACCOUNT_BOUND_COST_ADAPTER_UNAVAILABLE'));
+  assert.ok(r.entries.reasons.includes('CANDIDATE_EVIDENCE_NOT_COLLECTED'));
+  assert.ok(r.entries.resolutions.every(r => typeof r.resolution === 'string' && r.resolution.length));
   assert.ok(r.exits.reasons.includes('NO_VERIFIED_MANAGED_POSITION'));
   assert.ok(!JSON.stringify(r).includes('SECRET'));
   assert.equal(r.authenticatedBrokerCalls, 0);
@@ -157,7 +157,7 @@ test('the execution bridge derives writer evidence only after a successful durab
   const source = fs.readFileSync(require.resolve('./index'), 'utf8');
   const block = source.slice(source.indexOf('async function processTraderExecution('), source.indexOf('async function executeControlledDecision('));
   let saved = true, reads = 0, captured;
-  const sandbox = { hasUpstashMemory: () => true, savePersistentState: async () => saved,
+  const sandbox = { hydrateTraderRuntimeEvidence: async context => context, lastTraderRuntimeContext: null, hasUpstashMemory: () => true, savePersistentState: async () => saved,
     continuity: { status: async () => { reads++; return { ownLease: true, leaseRemainingMs: 10000 }; } },
     traderExecutionContext: null, evaluateAutomaticTraderProposals: () => ({}),
     traderExecutionController: { drain: async () => { captured = sandbox.traderExecutionContext.executionWriterProof; return { executionAttempted: false }; } } };
