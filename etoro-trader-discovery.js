@@ -3,7 +3,7 @@
 // execution clients, storage credentials, or a scheduler here.
 const { createTraderReadClient, createTraderObserver, RANKINGS } = require('./etoro-trader-observer');
 const { emptyState, digest, validId, validUsername } = require('./trader-observer');
-const VERSION = 'trader-discovery-v1';
+const VERSION = 'trader-discovery-v2';
 const SOURCE = 'https://api-portal.etoro.com/api-reference/rankings/get-paginated-investor-rankings';
 const PERIODS = Object.freeze(['AbsOneYear', 'AbsTwoYears']);
 const FIELDS = Object.freeze(['annualizedReturn', 'gain', 'riskScore', 'maxMonthlyRiskScore', 'peakToValley',
@@ -37,11 +37,18 @@ function normalizePage(read, selector, client) {
     p.totalItems >= (p.page - 1) * p.pageSize + read.data.results.length &&
     (p.hasNext ? read.data.results.length === p.pageSize && p.totalItems > p.page * p.pageSize : p.totalItems === (p.page - 1) * p.pageSize + read.data.results.length);
   const rows = schema ? read.data.results.map(r => normalizeRow(r, client)) : [];
+  const rejectedRows = { invalidCid: 0, notDocumentedTraderType: 0, invalidOrUnsafeUsername: 0 };
+  if (schema) read.data.results.forEach((raw, i) => {
+    if (rows[i]) return;
+    if (!validId(raw?.cid)) rejectedRows.invalidCid++;
+    else if (raw.type !== 'trader') rejectedRows.notDocumentedTraderType++;
+    else rejectedRows.invalidOrUnsafeUsername++;
+  });
   return { source: read.source, period: selector.period, page: selector.page, collectedAt: date(read.collectedAt), effectiveAt: null,
     httpStatus: read.httpStatus, status: schema ? rows.some(r => !r) ? 'PARTIAL' : 'AVAILABLE' : 'UNAVAILABLE',
     reason: schema ? rows.some(r => !r) ? 'INVALID_OR_NON_TRADER_ROWS' : null : read.reason || 'RANKINGS_SCHEMA_OR_PAGINATION_INVALID',
     pagination: schema ? { page: p.page, pageSize: p.pageSize, hasNext: p.hasNext, totalItems: p.totalItems } : null,
-    invalidRows: rows.filter(r => !r).length, rows: rows.filter(Boolean) };
+    invalidRows: rows.filter(r => !r).length, rejectedRows, rows: rows.filter(Boolean) };
 }
 function combine(pages, now) {
   const records = new Map(), conflicts = new Set(), coverage = {};
@@ -59,6 +66,7 @@ function combine(pages, now) {
     const complete = group.length > 0 && group.every(p => p.status === 'AVAILABLE') && consecutive && !group.at(-1).pagination?.hasNext && totals.size === 1 && duplicateRows === 0;
     coverage[period] = { status: complete ? 'AVAILABLE' : group.some(p => p.rows.length) ? 'PARTIAL' : 'UNAVAILABLE',
       pagesFetched: group.filter(p => p.httpStatus !== null).length, retainedRows: seen.size, duplicateRows,
+      rejectedRows: Object.fromEntries(['invalidCid', 'notDocumentedTraderType', 'invalidOrUnsafeUsername'].map(k => [k, group.reduce((n, p) => n + (p.rejectedRows?.[k] || 0), 0)])),
       reportedTotalItems: totals.size === 1 ? [...totals][0] : null, enumerationComplete: complete,
       temporalCompleteness: 'UNVERIFIED', reason: totals.size > 1 ? 'UNIVERSE_CHANGED_DURING_PAGINATION' : !complete ? 'BOUNDED_SAMPLE_OR_INCOMPLETE_PAGINATION' : 'NO_PROVIDER_SNAPSHOT_TIMESTAMP' };
   }
@@ -69,12 +77,13 @@ function combine(pages, now) {
       bestTraderRank: null, selectedForTrading: false };
   }).sort((a, b) => a.providerCid - b.providerCid);
   return { version: VERSION, generatedAt: new Date(now).toISOString(), readOnly: true, executionAttempted: false, sourceDocumentation: SOURCE,
-    periods: PERIODS, coverage, candidates, comparison: { status: 'UNAVAILABLE', ranking: null,
+    periods: PERIODS, universe: 'ACTIVE_POPULAR_INVESTORS_FILTER_REQUESTED_NOT_QUALITY_RANKING', coverage, candidates, comparison: { status: 'UNAVAILABLE', ranking: null,
       reason: 'NO_VERIFIED_REFRESH_DATE_COMPLETE_HISTORIES_VOLATILITY_COSTS_OR_INDEPENDENCE' },
     selection: { status: 'NOT_SELECTED', count: 0, rule: 'DISCOVERY_NEVER_MODIFIES_OBSERVER_LIST_OR_TRADE_ALLOWLIST' }, limitations: LIMITS };
 }
 function createDiscovery({ env = process.env, client, clock = Date.now, configuration = {}, getState, onChange = () => {} } = {}) {
   const o = options(configuration); let active = false, collectedInProcess = false, local = { version: 1, lastAttemptAt: null, report: null, readQuota: { timestamps: [], blockedUntil: 0 } };
+  const maxRequests = 2 * o.maxPages + 3 * o.verifyCount;
   const state = () => getState ? getState() : local;
   if (!client) client = createTraderReadClient({ env, clock, quotaStore: () => state().readQuota, onQuotaChange: onChange });
   let credentialGeneration = client.context().generation;
@@ -98,11 +107,11 @@ function createDiscovery({ env = process.env, client, clock = Date.now, configur
       for (const period of PERIODS) {
         if (denied) break;
         for (let page = 1; page <= o.maxPages; page++) {
-          const selector = { period, page, pageSize: o.pageSize }, read = await client.read('rankings', selector);
+          const selector = { period, page, pageSize: o.pageSize, popularInvestor: true }, read = await client.read('rankings', selector);
           if (read.requestAttempted) providerCalls++;
           const normalized = normalizePage(read, selector, client); pages.push(normalized);
           checks.push({ capability: 'INVESTOR_RANKINGS', endpoint: RANKINGS, method: 'GET', period, page,
-            checkedAt: read.collectedAt, httpStatus: read.httpStatus, expectedStructure: normalized.pagination ? 'PRESENT' : 'ABSENT',
+            checkedAt: read.collectedAt, requestId: read.requestId, httpStatus: read.httpStatus, popularInvestor: true, expectedStructure: normalized.pagination ? 'PRESENT' : 'ABSENT',
             status: read.httpStatus === 401 ? 'UNAUTHORIZED' : read.httpStatus === 403 ? 'FORBIDDEN' : normalized.pagination ? 'VERIFIED_READ' : 'UNAVAILABLE', reason: normalized.reason });
           if ([401, 403, 429].includes(read.httpStatus) || ['CREDENTIALS_ABSENT', 'READ_QUOTA_OR_COOLDOWN', 'CREDENTIAL_CONTEXT_CHANGED'].includes(read.reason)) { denied = true; break; }
           if (normalized.status !== 'AVAILABLE' || !normalized.pagination.hasNext) break;
@@ -115,31 +124,38 @@ function createDiscovery({ env = process.env, client, clock = Date.now, configur
       if (!denied) for (const candidate of report.candidates.filter(c => c.status === 'RESEARCH_CANDIDATE').slice(0, o.verifyCount)) {
         const observerState = emptyState(), candidateEnv = { ...env, TRADER_OBSERVER_TRADERS_JSON: JSON.stringify([{ realCID: candidate.providerCid }]) };
         const observer = createTraderObserver({ env: candidateEnv, client, clock, getState: () => observerState });
-        await observer.refreshForScan(candidate.providerCid);
+        await observer.refreshForScan(candidate.providerCid, { expectedUsername: candidate.username });
         const trader = observer.view().traders[0], snapshot = trader?.snapshot;
         const reads = snapshot ? Object.values(snapshot.reads).filter(r => r.requestAttempted) : observerState.traders[candidate.providerCid]?.lastAttempt?.reads || [];
         providerCalls += reads.filter(r => r.requestAttempted).length;
         // Do not turn absence of public portfolio access into proven privacy.
         candidate.identityStatus = snapshot?.identity?.status === 'AVAILABLE' && snapshot.identity.username === candidate.username ? 'VERIFIED_READ' : 'UNVERIFIED';
+        const firstIdentity = observerState.traders[candidate.providerCid]?.lastAttempt?.identityRead;
+        candidate.publicIdentityRead = snapshot?.identity?.status === 'AVAILABLE' ? 'VERIFIED_READ' : firstIdentity?.status || 'UNVERIFIED';
+        candidate.rankingProfileMatch = candidate.identityStatus === 'VERIFIED_READ' ? 'MATCH' : firstIdentity?.rankingMatch || 'UNVERIFIED';
+        candidate.identityReason = candidate.identityStatus === 'VERIFIED_READ' ? null : firstIdentity?.reason || trader?.reason || 'RANKING_PROFILE_BINDING_UNVERIFIED';
+        candidate.popularInvestorStatus = snapshot?.identity?.isPi === true ? 'PROFILE_REPORTED_PI' : snapshot?.identity?.isPi === false ? 'CONTRADICTED_BY_PROFILE' : 'UNVERIFIED';
         candidate.holdingsStatus = snapshot?.portfolio?.status || 'UNAVAILABLE';
+        candidate.holdingsReason = snapshot?.portfolio?.reason || (candidate.rankingProfileMatch === 'MISMATCH' ? 'NOT_REQUESTED_IDENTITY_MISMATCH' : trader?.reason || 'NOT_VERIFIED');
         candidate.transactionHistory = 'UNAVAILABLE_AGGREGATE_STATS_AND_SNAPSHOTS_ARE_NOT_TRANSACTIONS';
-        candidate.observerCandidate = candidate.identityStatus === 'VERIFIED_READ' && ['AVAILABLE', 'PARTIAL'].includes(candidate.holdingsStatus)
+        candidate.observerCandidate = candidate.identityStatus === 'VERIFIED_READ' && candidate.popularInvestorStatus !== 'CONTRADICTED_BY_PROFILE' && ['AVAILABLE', 'PARTIAL'].includes(candidate.holdingsStatus)
           ? { realCID: snapshot.identity.realCID, expectedGcid: snapshot.identity.gcid } : null;
         for (const r of reads) {
           const portfolioRead = r.source?.endsWith('/portfolio/live');
-          const present = portfolioRead ? snapshot && ['AVAILABLE', 'PARTIAL'].includes(snapshot.portfolio?.status) : snapshot?.identity?.status === 'AVAILABLE';
+          const present = portfolioRead ? snapshot && ['AVAILABLE', 'PARTIAL'].includes(snapshot.portfolio?.status) : candidate.publicIdentityRead === 'VERIFIED_READ';
           checks.push({ capability: portfolioRead ? 'PUBLIC_TRADER_PORTFOLIO' : 'PUBLIC_TRADER_IDENTITY',
           endpoint: r.source?.endsWith('/portfolio/live') ? 'https://public-api.etoro.com/api/v1/user-info/people/{username}/portfolio/live' : 'https://public-api.etoro.com/api/v1/user-info/people?cidList={cid}',
-          method: 'GET', checkedAt: r.collectedAt, httpStatus: r.httpStatus, status: r.httpStatus === 401 ? 'UNAUTHORIZED' : r.httpStatus === 403 ? 'FORBIDDEN' : present && r.status === 'AVAILABLE' ? 'VERIFIED_READ' : 'UNAVAILABLE',
+          method: 'GET', checkedAt: r.collectedAt, requestId: r.requestId, httpStatus: r.httpStatus, status: r.httpStatus === 401 ? 'UNAUTHORIZED' : r.httpStatus === 403 ? 'FORBIDDEN' : present && r.status === 'AVAILABLE' ? 'VERIFIED_READ' : 'UNAVAILABLE',
           expectedStructure: present ? 'PRESENT' : 'UNVERIFIED', reason: r.reason || (!present ? 'PUBLIC_IDENTITY_OR_PORTFOLIO_SCHEMA_UNVERIFIED' : null) });
         }
         if (reads.some(r => [401, 429].includes(r.httpStatus))) break;
       }
-      if (client.context().generation !== ctx.generation) { s.report = null; onChange(); return { status: 'UNAVAILABLE', reason: 'CREDENTIAL_CONTEXT_CHANGED', providerCalls }; }
+      if (client.context().generation !== ctx.generation) { s.report = null; onChange(); return { status: 'UNAVAILABLE', reason: 'CREDENTIAL_CONTEXT_CHANGED', providerCalls, maxRequests }; }
       report.checks = checks; report.providerCalls = providerCalls; report.maxRequests = 2 * o.maxPages + 3 * o.verifyCount;
+      report.generatedAt = new Date(clock()).toISOString();
       s.report = report; collectedInProcess = true; onChange(); return { ...view(), providerCalls };
     } catch {
-      s.report = null; onChange(); return { status: 'UNAVAILABLE', reason: 'DISCOVERY_FAILED', readOnly: true, providerCalls };
+      s.report = null; onChange(); return { status: 'UNAVAILABLE', reason: 'DISCOVERY_FAILED', readOnly: true, providerCalls, maxRequests };
     } finally { active = false; }
   }
   return { view, refresh };
@@ -150,6 +166,10 @@ function diagnostic(report) {
   return { version: VERSION, generatedAt: report.generatedAt || null, readOnly: true, executionAttempted: false,
     status: report.status, reason: report.reason, providerCalls: report.providerCalls || 0, maxRequests: report.maxRequests || 5,
     checks: report.checks || [], coverage: report.coverage || {}, candidateCount: report.candidates?.length || 0,
+    universe: report.universe || 'NOT_TESTED',
+    candidateChecks: (report.candidates || []).filter(c => c.publicIdentityRead).map((c, i) => ({ candidate: `CANDIDATE_${i + 1}`,
+      publicIdentityRead: c.publicIdentityRead, rankingProfileMatch: c.rankingProfileMatch, identityReason: c.identityReason,
+      popularInvestorStatus: c.popularInvestorStatus, holdingsStatus: c.holdingsStatus, holdingsReason: c.holdingsReason })),
     verifiedPublicIdentities: report.candidates?.filter(c => c.identityStatus === 'VERIFIED_READ').length || 0,
     publicPortfoliosReadable: report.candidates?.filter(c => ['AVAILABLE', 'PARTIAL'].includes(c.holdingsStatus)).length || 0,
     comparison: report.comparison || { status: 'NOT_TESTED' }, selection: report.selection || { status: 'NOT_SELECTED', count: 0 },
@@ -159,10 +179,10 @@ module.exports = { VERSION, SOURCE, PERIODS, FIELDS, LIMITS, options, normalizeP
 if (require.main === module) {
   const args = process.argv.slice(2);
   if (args.length === 1 && args[0] === '--read-only-audit') {
-    createDiscovery().refresh().then(report => console.log(JSON.stringify(diagnostic(report), null, 2))).catch(() => {
+    createDiscovery({ configuration: { verifyCount: 3 } }).refresh().then(report => console.log(JSON.stringify(diagnostic(report), null, 2))).catch(() => {
       console.log(JSON.stringify({ readOnly: true, status: 'UNAVAILABLE', reason: 'DIAGNOSTIC_FAILED' })); process.exitCode = 1;
     });
   } else if (!args.length) console.log(JSON.stringify({ version: VERSION, readOnly: true, status: 'NOT_TESTED', providerCalls: 0,
-    command: 'node etoro-trader-discovery.js --read-only-audit', maxRequests: 5, endpoint: RANKINGS, method: 'GET' }, null, 2));
+    command: 'node etoro-trader-discovery.js --read-only-audit', maxRequests: 11, popularInvestor: true, endpoint: RANKINGS, method: 'GET' }, null, 2));
   else { console.log(JSON.stringify({ status: 'UNAVAILABLE', reason: 'UNSUPPORTED_ARGUMENTS', providerCalls: 0 })); process.exitCode = 1; }
 }

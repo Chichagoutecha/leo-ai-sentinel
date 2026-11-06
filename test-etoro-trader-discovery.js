@@ -159,3 +159,64 @@ test('HTTP 200 without valid public identity is not reported as a verified ident
   assert.equal(check.httpStatus, 200); assert.equal(check.status, 'UNAVAILABLE'); assert.equal(check.expectedStructure, 'UNVERIFIED');
   assert.equal(diagnostic(r).verifiedPublicIdentities, 0);
 });
+test('discovery always requests the officially documented active Popular Investor filter', async () => {
+  const s = setup(); await s.discovery.refresh();
+  const ranks = s.calls.filter(c => c.url.startsWith(RANKINGS));
+  assert.equal(ranks.length, 2); assert.ok(ranks.every(c => new URL(c.url).searchParams.get('popularInvestor') === 'true'));
+  const before = s.calls.length;
+  for (const value of [false, 'true', 1, null]) assert.equal((await s.client.read('rankings', { period: 'AbsOneYear', page: 1, pageSize: 20, popularInvestor: value })).reason, 'READ_NOT_ALLOWLISTED');
+  assert.equal(s.calls.length, before);
+});
+for (const [name, reason] of [['OtherTrader', 'RANKING_PROFILE_USERNAME_MISMATCH'], ['trader1', 'RANKING_PROFILE_USERNAME_CASE_DIFFERENCE']]) test(`ranking mismatch ${reason} is explained before any portfolio request`, async () => {
+  const s = setup({ handler: u => u.pathname.endsWith('/people') ? new Response(JSON.stringify({ users: [{ realCID: 1, gcid: 101, username: name }] })) : undefined });
+  const r = await s.discovery.refresh(), d = diagnostic(r);
+  assert.equal(s.calls.length, 3); assert.equal(s.calls.some(c => c.url.endsWith('/portfolio/live')), false);
+  assert.equal(d.candidateChecks[0].publicIdentityRead, 'VERIFIED_READ');
+  assert.equal(d.candidateChecks[0].rankingProfileMatch, 'MISMATCH'); assert.equal(d.candidateChecks[0].identityReason, reason);
+  assert.equal(d.candidateChecks[0].holdingsReason, 'NOT_REQUESTED_IDENTITY_MISMATCH'); assert.equal(d.verifiedPublicIdentities, 0);
+  assert.equal(JSON.stringify(d).includes(name), false);
+});
+test('a forbidden portfolio is local to its candidate; three independent candidates stay within eleven GETs', async () => {
+  const s = setup({ configuration: { verifyCount: 3 }, handler: u => {
+    if (u.pathname.endsWith('/rankings')) return new Response(JSON.stringify({ results: [row(1), row(2), row(3)], pagination: { page: 1, pageSize: 20, hasNext: false, totalItems: 3 } }));
+    if (u.pathname.endsWith('/people')) { const id = Number(u.searchParams.get('cidList')); return new Response(JSON.stringify({ users: [{ realCID: id, gcid: id + 100, username: `Trader${id}`, isPi: true }] })); }
+    if (u.pathname.endsWith('/Trader1/portfolio/live')) return new Response('{}', { status: 403 });
+  } });
+  const r = await s.discovery.refresh(), d = diagnostic(r);
+  assert.equal(s.calls.length, 11); assert.equal(r.maxRequests, 11); assert.equal(r.providerCalls, 11);
+  assert.equal(d.candidateChecks[0].holdingsStatus, 'UNAVAILABLE');
+  assert.equal(d.candidateChecks[0].holdingsReason, 'FORBIDDEN_PRIVACY_UNPROVEN');
+  assert.equal(d.publicPortfoliosReadable, 2); assert.equal(d.verifiedPublicIdentities, 3);
+  assert.equal(d.selection.count, 0); assert.equal(s.calls.filter(c => c.url.endsWith('/Trader1/portfolio/live')).length, 1);
+});
+test('successful filtered rankings contradicted by profile isPi=false never suggest observer enrollment', async () => {
+  const s = setup({ handler: u => u.pathname.endsWith('/people') ? new Response(JSON.stringify({ users: [{ realCID: 1, gcid: 101, username: 'Trader1', isPi: false }] })) : undefined });
+  const r = await s.discovery.refresh(); assert.equal(r.candidates[0].popularInvestorStatus, 'CONTRADICTED_BY_PROFILE');
+  assert.equal(r.candidates[0].observerCandidate, null); assert.equal(r.selection.count, 0);
+});
+test('rejection counts explain unsupported rows without retaining raw types, names or secrets', async () => {
+  const s = setup({ handler: u => u.pathname.endsWith('/rankings') ? new Response(JSON.stringify({ results: [row(), row(2, { type: 'SECRET_USER' }), row(0), row(3, { username: 'unsafe/name' })],
+    pagination: { page: 1, pageSize: 20, hasNext: false, totalItems: 4 } })) : undefined });
+  const r = await s.discovery.refresh();
+  assert.deepEqual(r.coverage.AbsOneYear.rejectedRows, { invalidCid: 1, notDocumentedTraderType: 1, invalidOrUnsafeUsername: 1 });
+  assert.equal(JSON.stringify(r).includes('SECRET_USER'), false); assert.equal(JSON.stringify(r).includes('unsafe/name'), false);
+});
+test('request IDs are fresh correlation UUIDs, not authentication or secret fingerprints', async () => {
+  const s = setup(); const r = await s.discovery.refresh();
+  assert.equal(new Set(r.checks.map(c => c.requestId)).size, 5);
+  assert.ok(r.checks.every(c => /^[a-f0-9-]{36}$/.test(c.requestId)));
+  assert.equal(JSON.stringify(diagnostic(r)).includes('SECRET_APPLICATION'), false);
+});
+test('a 401 during candidate observation stops the remaining candidates without retry', async () => {
+  const s = setup({ configuration: { verifyCount: 3 }, handler: u => {
+    if (u.pathname.endsWith('/rankings')) return new Response(JSON.stringify({ results: [row(1), row(2), row(3)], pagination: { page: 1, pageSize: 20, hasNext: false, totalItems: 3 } }));
+    return new Response('{}', { status: 401 });
+  } });
+  const r = await s.discovery.refresh(); assert.equal(s.calls.length, 3); assert.equal(r.providerCalls, 3);
+  assert.equal(r.checks.at(-1).status, 'UNAUTHORIZED'); assert.equal(r.candidates.filter(c => c.publicIdentityRead).length, 1);
+});
+test('completion timestamp includes the candidate checks rather than only the ranking stage', async () => {
+  let s; s = setup({ handler: () => { s.advance(100); } });
+  const r = await s.discovery.refresh(); assert.ok(r.checks.every(c => Date.parse(c.checkedAt) <= Date.parse(r.generatedAt)));
+  assert.equal(Date.parse(r.generatedAt), AT + 500);
+});
