@@ -1,0 +1,173 @@
+{
+  "status": "BLOCKED",
+  "generatedAt": "2026-11-06T11:51:16.489Z",
+  "account": {
+    "alias": "ACCOUNT_UNVERIFIED",
+    "identityStatus": "SEE_AUTHENTICATED_RUNTIME_EVIDENCE",
+    "namedTokenApiBinding": "TOKEN_BINDING_UNVERIFIED"
+  },
+  "provenance": {
+    "runtimeVerified": false,
+    "source": "CURRENT_PROCESS_ENVIRONMENT_DEPLOYMENT_REQUIRES_SEPARATE_PROOF",
+    "revision": null,
+    "configuredMode": "SHADOW"
+  },
+  "traders": [],
+  "instruments": [],
+  "managedPositions": [],
+  "instrumentUniverseAvailable": false,
+  "limits": {
+    "buyCapUsd": 10,
+    "exitCapUsd": 0,
+    "costCapUsd": 0,
+    "leverage": 1,
+    "maximumOrdersPerScan": 1,
+    "maximumOrdersPer24h": 4,
+    "maximumBuysPer24h": 3,
+    "maximumSellsPer24h": 2,
+    "minimumHoursBetweenExecutions": 2,
+    "cashReserve": "STRICTER_OF_NORMAL_AND_ADVISORY_POLICY_WITH_ABSOLUTE_RESERVE",
+    "managedPositionsOnly": true,
+    "partialClose": "UNSUPPORTED"
+  },
+  "readiness": null,
+  "requiredConfigurationChanges": [
+    {
+      "key": "ETORO_CREDENTIAL_REVISION",
+      "proposed": null,
+      "reason": "IDENTIFY_THE_EXACT_SECRET_PROVISIONING_VERSION_WITHOUT_EXPORTING_IT"
+    },
+    {
+      "key": "TRADER_PROVISIONING_PUBLIC_KEY",
+      "proposed": null,
+      "reason": "APPROVE_THE_OPERATORS_PUBLIC_ED25519_VERIFICATION_KEY"
+    },
+    {
+      "key": "TRADING_MODE",
+      "proposed": "LIVE",
+      "requiresExplicitApproval": true
+    },
+    {
+      "key": "LIVE_EXECUTION_ARMED",
+      "proposed": true,
+      "requiresExplicitApproval": true
+    },
+    {
+      "key": "LIVE_BUY_CONFIRMATION",
+      "proposed": "I_UNDERSTAND_LIVE_BUY_ORDERS",
+      "requiresExplicitApproval": true
+    },
+    {
+      "key": "TRADER_EXECUTION_ENABLED",
+      "proposed": true,
+      "requiresExplicitApproval": true
+    },
+    {
+      "key": "TRADER_EXECUTION_ENTRIES_ENABLED",
+      "proposed": true,
+      "requiresExplicitApproval": true
+    },
+    {
+      "key": "TRADER_EXECUTION_EXITS_ENABLED",
+      "proposed": true,
+      "requiresExplicitApproval": true
+    },
+    {
+      "key": "TRADER_EXECUTION_CONFIRMATION",
+      "proposed": "I_UNDERSTAND_TRADER_STRATEGY_REAL_ORDERS",
+      "requiresExplicitApproval": true
+    },
+    {
+      "key": "TRADER_EXECUTION_MAX_COST_USD",
+      "proposed": null,
+      "reason": "APPROVE_OBSERVED_OR_DOCUMENTED_COST_BUDGET_WITHOUT_RAISING_CAPS_AUTOMATICALLY"
+    },
+    {
+      "key": "TRADER_EXECUTION_MAX_EXIT_NOTIONAL_USD",
+      "proposed": null,
+      "reason": "APPROVE_INDEPENDENT_EXIT_CAP_BEFORE_ENTRY"
+    }
+  ],
+  "requiredRecords": [
+    "SIGNED_PROVISIONING_RECEIPT_AND_NONSECRET_CREDENTIAL_REVISION",
+    "CURRENT_OFFICIAL_CLOSE_TERMS_AND_FEE_MODEL",
+    "REVIEWED_MANAGED_REGISTRY",
+    "CHRONOLOGICAL_RELEASE_APPROVAL_FOR_EXACT_INPUT_AND_POLICY_VERSION"
+  ],
+  "remainingProofs": [
+    "DEPLOYED_COMMIT_NOT_VERIFIED",
+    "AUTHENTICATED_ACCOUNT_AND_TOKEN_NOT_VERIFIED",
+    "TRADER_COLLECTION_NOT_VERIFIED",
+    "SHADOW_RESULTS_NOT_VERIFIED"
+  ],
+  "activationPerformed": false,
+  "deploymentPerformed": false,
+  "executionAttempted": false,
+  "access": {
+    "generatedAt": "2026-11-06T11:51:16.488Z",
+    "readOnly": true,
+    "requests": 0,
+    "credentials": {
+      "apiKeyPresent": false,
+      "userKeyPresent": false,
+      "provenance": "CALLER_PROCESS_ENVIRONMENT"
+    },
+    "configuredContext": "AUTO",
+    "contextEvidence": "UNVERIFIED",
+    "agentMetadataMatch": "UNVERIFIED",
+    "authenticatedIdentityToAgent": "UNVERIFIED",
+    "tokenMetadataMatch": "UNVERIFIED",
+    "tokenBinding": "TOKEN_BINDING_UNVERIFIED",
+    "currentCredentialReportedPermissions": {
+      "realRead": "UNKNOWN",
+      "realWrite": "UNKNOWN"
+    },
+    "selectedTokenMetadataPermissions": {
+      "realRead": "UNKNOWN",
+      "realWrite": "UNKNOWN"
+    },
+    "provenWriteAccess": "NOT_TESTED",
+    "pnlAttribution": "UNVERIFIED_NO_DOCUMENTED_IDENTITY_FIELD_COMPARED",
+    "checks": [
+      {
+        "capability": "AUTHENTICATED_IDENTITY",
+        "endpoint": "https://public-api.etoro.com/api/v1/me",
+        "method": "GET",
+        "environment": "IDENTITY_OR_METADATA",
+        "checkedAt": "2026-11-06T11:51:16.489Z",
+        "status": "NOT_TESTED",
+        "httpStatus": null,
+        "expectedStructure": "NOT_TESTED",
+        "reason": "CREDENTIALS_ABSENT"
+      },
+      {
+        "capability": "AGENT_DISCOVERY",
+        "endpoint": "https://public-api.etoro.com/api/v1/agent-portfolios",
+        "method": "GET",
+        "environment": "IDENTITY_OR_METADATA",
+        "checkedAt": "2026-11-06T11:51:16.489Z",
+        "status": "NOT_TESTED",
+        "httpStatus": null,
+        "expectedStructure": "NOT_TESTED",
+        "reason": "CREDENTIALS_ABSENT"
+      },
+      {
+        "capability": "PNL_READ",
+        "endpoint": "https://public-api.etoro.com/api/v1/trading/info/real/pnl",
+        "method": "GET",
+        "environment": "REAL",
+        "checkedAt": "2026-11-06T11:51:16.489Z",
+        "status": "NOT_TESTED",
+        "httpStatus": null,
+        "expectedStructure": "NOT_TESTED",
+        "reason": "CREDENTIALS_ABSENT"
+      }
+    ],
+    "limitations": [
+      "METADATA_MATCH_DOES_NOT_BIND_LOADED_SECRET",
+      "READ_SUCCESS_DOES_NOT_PROVE_WRITE_ACCESS",
+      "PNL_READ_DOES_NOT_PROVE_SOCIAL_OR_COPY_ACCESS",
+      "CONFIGURED_CONTEXT_IS_NOT_IDENTITY_PROOF"
+    ]
+  }
+}

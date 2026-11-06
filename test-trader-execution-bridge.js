@@ -209,6 +209,7 @@ test('real executor functions in an isolated VM use the existing BUY/close contr
       etoroHeaders: () => ({ 'x-request-id': 'test-request' }),
       fetchJsonWithRetry: async (url, init, opts) => { assert.equal(events.at(-1), 'durable-intent'); assert.equal(opts.retries, 0); assert.equal(opts.executionIntentId, 'intent-test');
         if (scenario === 'PAUSED') throw new sandbox.executionContinuity.ExecutionNotSent('EXECUTION_PAUSED');
+        if (side === 'BUY') assert.equal(JSON.parse(init.body).settlementType, 'real');
         requests.push({ url, method: init.method, body: JSON.parse(init.body) });
         if (scenario === 'NETWORK') throw Error('MOCK_NETWORK'); return { response: { ok: true, status: 200 }, data: { orderId: 'order-test', positionId: '101' } }; },
       compactEtoroExecutionResponse: x => x, hasExecutionBusinessAcknowledgement: () => true,

@@ -145,6 +145,9 @@ const { buildPaperShadowScorecard } = require('./paper-shadow-accounting');
 const traderAdvisory = require('./trader-advisory-policy');
 const traderScanInputs = require('./trader-scan-inputs');
 const traderRuntimeReadiness = require('./trader-runtime-readiness');
+const { buildPlan: buildTraderActivationPlan } = require('./trader-activation-plan');
+const { createRuntimeEvidence, sizingEvidence: buildRuntimeSizingEvidence } = require('./trader-runtime-evidence');
+let lastTraderRuntimeContext = null;
 let lastTraderScanInputs = null;
 const { virtualFill } = require('./paper-shadow-execution');
 const traderShadow = require('./trader-shadow-experiment');
@@ -1515,8 +1518,9 @@ for (const candidate of CONFIGURED_UNIVERSE_CANDIDATES) {
 const TRADE_ALLOWED_ASSETS = new Set(resolveTradeAllowlist(WATCHLIST, process.env));
 const TRADE_ALLOWED_CATEGORIES = new Set(resolveAllowedCategories(process.env));
 const TRADE_EXCLUSION_REASONS = parseExclusionReasons(process.env);
-// Informational registry only. No background refresh or execution integration.
-const instrumentEligibilityRegistry = createEligibilityRegistry({ client: createEligibilityClient({ env: process.env }) });
+// Account-specific informational checks are refreshed only for an active strategy decision.
+const instrumentEligibilityRegistry = createEligibilityRegistry({ client: createEligibilityClient({ env: process.env }), ttlMs: 300000 });
+const traderRuntimeEvidence = createRuntimeEvidence({ env: process.env, registry: instrumentEligibilityRegistry });
 
 const STARTER_PRIORITY = [
   "SPY",
@@ -13922,6 +13926,7 @@ async function executeBuy(asset, amount, marketData = null, options = {}) {
           orderType: "mkt",
           amount: safeAmount,
           orderCurrency: "usd",
+          settlementType: "real",
           leverage: 1
         })
       },
@@ -14809,6 +14814,36 @@ function evaluateAutomaticTraderProposals(context, control, cutoff = Date.now())
   runtimeState.traderAdvisoryState = traderAdvisory.compactState(result.state); lastTraderAdvisoryReport = result.report;
   enqueueTraderAdvisory(result.report, decision, new Date(cutoff).toISOString(), quote?.mid); scheduleSave();
 }
+async function hydrateTraderRuntimeEvidence(context, control) {
+  const decision = control?.finalDecision;
+  if (!control?.approved || !["BUY", "SELL"].includes(decision?.decision)) return context;
+  const universe = buildUniverse(WATCHLIST, ASSET_RULES, CONFIGURED_UNIVERSE_CANDIDATES);
+  const instrument = universe.find(row => row.symbol === decision.asset);
+  if (!instrument) return context;
+  const now = Date.now(), portfolio = context.realPortfolio;
+  const view = buildTraderExposureView({ portfolioResponse: portfolio, observerView: traderObserver.view(),
+    intents: Object.values(runtimeState.orderIntents || {}), universe, now });
+  const targets = view.owned.rows.filter(row => row.instrumentId === instrument.instrumentId &&
+    runtimeState.traderExecutionBridge.managed[row.positionId]?.status === "VERIFIED_MANAGED");
+  if (decision.decision === "SELL" && targets.length !== 1) return context;
+  const quote = context.marketSummary?.ratesByAsset?.[decision.asset] || {};
+  const proposal = { proposalId: "preliminary-runtime-evidence", side: decision.decision, instrumentId: instrument.instrumentId,
+    amountUsd: decision.decision === "BUY" ? decision.amount_usd : undefined,
+    units: decision.decision === "SELL" ? targets[0].units : undefined,
+    positionId: decision.decision === "SELL" ? targets[0].positionId : undefined,
+    priceDriftLimitPct: traderAdvisory.config(JSON.parse(process.env.TRADER_ADVISORY_POLICY_JSON || "{}")).maxDecisionPriceDriftPct };
+  let evidence;
+  try {
+    evidence = await traderRuntimeEvidence.collect({ proposal, portfolio, accountRef: extractPortfolioIdentifier(portfolio), view, quote,
+      receipt: runtimeState.traderExecutionBridge.provisioningReceipt, instrument,
+      allowedAssets: [...TRADE_ALLOWED_ASSETS], allowedCategories: [...TRADE_ALLOWED_CATEGORIES] });
+  } catch { evidence = { status: "UNAVAILABLE", issues: ["RUNTIME_EVIDENCE_COLLECTION_FAILED"] }; }
+  return { ...context, traderRuntimeBinding: evidence.binding || null, traderRuntimeEvidenceStatus: { status: evidence.status, issues: evidence.issues },
+    traderRuntimeEvidenceOperation: proposal,
+    traderAdvisoryCostEvidence: evidence.cost ? { [instrument.instrumentId]: evidence.cost } : {},
+    traderAdvisoryEligibilityEvidence: evidence.eligibility ? { [instrument.instrumentId]: evidence.eligibility } : {},
+    traderExecutionSizingEvidence: evidence.sizing || null, traderRuntimeCloseTerms: evidence.closeTerms || null };
+}
 function prepareTraderExecutionEvidence(p, context) {
   const now = Date.now(), portfolio = context?.realPortfolio;
   const view = buildTraderExposureView({ portfolioResponse: portfolio, observerView: traderObserver.view(), intents: Object.values(runtimeState.orderIntents || {}),
@@ -14820,21 +14855,30 @@ function prepareTraderExecutionEvidence(p, context) {
   const cached = instrumentEligibilityRegistry.inspect({ instrumentId: p.instrumentId, symbol: p.asset, category: row?.category,
     allowedAssets: [...TRADE_ALLOWED_ASSETS], allowedCategories: [...TRADE_ALLOWED_CATEGORIES], operation: { action: p.side === "BUY" ? "OPEN" : "CLOSE", partial: false,
       currency: "USD", settlementType: "Underlying", direction: "LONG", leverage: 1, amount: p.amountUsd } });
+  const runtimeBindingVerified = traderRuntimeEvidence.valid(context?.traderRuntimeBinding, accountRef);
+  const currentSizingEvidence = runtimeBindingVerified && ["STOCK", "CRYPTO"].includes(row?.category) ? buildRuntimeSizingEvidence(view, context.traderRuntimeBinding, now) : null;
+  const reservePct = Math.max(MIN_CASH_RESERVE_PCT, traderAdvisory.config(JSON.parse(process.env.TRADER_ADVISORY_POLICY_JSON || "{}")).minCashReservePct);
+  const reserveUsd = Math.max(10, (currentSizingEvidence?.equityUsd ?? extractPortfolioSummary(portfolio).totalTrackedValue) * reservePct / 100);
   const preview = previewExposureProposal(p.side === "BUY" ? { instrumentId: p.instrumentId, side: "BUY", currency: "USD", amount: p.amountUsd, traderSources: p.traderSources }
     : { instrumentId: p.instrumentId, side: "SELL", currency: "USD", positionId: p.positionId, quantityMode: "FULL_POSITION", traderSources: p.traderSources }, view,
-    { observerState: runtimeState.traderObserver, observerView: traderObserver.view(), now, sizingEvidence: context?.traderExecutionSizingEvidence || null,
+    { observerState: runtimeState.traderObserver, observerView: traderObserver.view(), now, sizingEvidence: currentSizingEvidence,
       policy: { maxOrderUsd: LIVE_BUY_MAX_ORDER_USD, maxInstrumentWeightPct: MAX_ASSET_WEIGHT_PCT,
-        minimumCashReserveUsd: Math.max(10, Number(extractPortfolioSummary(portfolio).totalTrackedValue || 0) * MIN_CASH_RESERVE_PCT / 100) } });
+        minimumCashReserveUsd: reserveUsd } });
   const normalizedEligibility = context?.traderAdvisoryEligibilityEvidence?.[p.instrumentId];
-  const stats = getExecutionStats24h(), binding = context?.validatedPortfolioIdentity;
+  const stats = getExecutionStats24h(), binding = context?.validatedPortfolioIdentity || context?.realSummary?.livePortfolioIdentity;
+  const operation = context?.traderRuntimeEvidenceOperation;
+  const sizeMatched = operation?.instrumentId === p.instrumentId && operation.side === p.side &&
+    (p.side === "BUY" ? operation.amountUsd === p.amountUsd : String(operation.positionId) === String(p.positionId) && operation.units === p.units);
+  const closeTerms = runtimeBindingVerified && sizeMatched && context?.traderRuntimeCloseTerms
+    ? { ...context.traderRuntimeCloseTerms, proposalId: p.proposalId } : null;
   const sourceProof = p.traderSources.every(ref => {
     const trader = traderObserver.view().traders.find(t => t.realCID === ref.traderId);
     return trader && ["AVAILABLE", "PARTIAL"].includes(trader.status) && !trader.historicalSnapshot && trader.observationId === ref.observationId &&
       !runtimeState.traderObserver.observations.some(o => o.corrects === ref.observationId) && trader.snapshot?.portfolio?.positions?.some(row => row.instrumentId === p.instrumentId);
   });
-  // Missing adapters remain unknown. No account/key identity, costs or release is inferred from a read.
+  // Only current session proofs from the authenticated provider can satisfy these gates.
   return { mode: TRADING_MODE_LABEL, armed: LIVE_EXECUTION_ARMED, buyArmed: liveBuyReady(process.env), accountRef,
-    identityVerified: binding?.ok === true, tokenBindingVerified: false,
+    identityVerified: runtimeBindingVerified && binding?.ok === true && ["CONFIRMED", "NOT_REQUIRED"].includes(binding.status), tokenBindingVerified: runtimeBindingVerified,
     release: p.side === "SELL" || runtimeState.traderExecutionBridge.releaseApproval?.inputVersion === traderScanInputs.VERSION
       ? runtimeState.traderExecutionBridge.releaseApproval || null : null, asOf: portfolio?.fetchedAt || null,
     positions: view.owned.rows, portfolioComplete: view.owned.coverage === "COMPLETE", pendingComplete: view.pending.status === "COMPLETE_KNOWN_BUY_UPPER_BOUND",
@@ -14842,11 +14886,10 @@ function prepareTraderExecutionEvidence(p, context) {
     instrument: { instrumentId: row?.instrumentId, asset: row?.symbol, allowed: TRADE_ALLOWED_ASSETS.has(p.asset) && TRADE_ALLOWED_CATEGORIES.has(row?.category) },
     quote: { instrumentId: p.instrumentId, asOf: q?.date, currency: "USD", bid: q?.bid, ask: q?.ask,
       tradable: isMarketRateTradable({ normalized: { ratesByAsset: { [p.asset]: q } } }, p.asset).ok },
-    closeTerms: context?.traderExecutionCloseEvidence?.[p.proposalId] || null,
-    eligibility: { instrumentId: p.instrumentId, side: p.side, asOf: cached.fetchedAt, allowed: cached.technicalEligibility === "ALLOWED_CONFIGURATION",
-      accountRef, currency: cached.currency, leverage: 1, settlementType: "Underlying", minimumUsd: normalizedEligibility?.minimumUsd ?? null, maximumUsd: normalizedEligibility?.maximumUsd ?? null },
-    cost: context?.traderExecutionCosts?.[p.proposalId] || context?.traderAdvisoryCostEvidence?.[p.instrumentId] || null,
-    cashUsd: extractPortfolioSummary(portfolio).availableCash, reserveUsd: Math.max(10, Number(extractPortfolioSummary(portfolio).totalTrackedValue || 0) * MIN_CASH_RESERVE_PCT / 100),
+    closeTerms,
+    eligibility: runtimeBindingVerified && sizeMatched ? normalizedEligibility : null,
+    cost: runtimeBindingVerified && sizeMatched ? context?.traderAdvisoryCostEvidence?.[p.instrumentId] : null,
+    cashUsd: extractPortfolioSummary(portfolio).availableCash, reserveUsd: reserveUsd,
     exposure: { coverage: preview.status === "AVAILABLE_ESTIMATED_ACCOUNT_VALUE_SCENARIO" && preview.sizing.status !== "UNAVAILABLE" ? "COMPLETE" : "INCOMPLETE",
       afterWithinLimits: p.side === "BUY" ? preview.sizing.headroomUsd !== null && p.amountUsd <= preview.sizing.headroomUsd : preview.marginal.proposedDeltaUsd !== null,
       proposalId: p.proposalId, amountUsd: p.amountUsd, units: p.units, asOf: new Date(now).toISOString() },
@@ -14888,15 +14931,17 @@ const traderExecutionController = traderExecution.createController({
     : executeSell(p.asset, traderExecutionContext?.marketData, { strategyExecution: metadata, expectedPositionId: p.positionId, expectedUnits: p.units })
 });
 async function processTraderExecution(context, control) {
+  context = await hydrateTraderRuntimeEvidence(context, control);
   let executionWriterProof = null;
   if (hasUpstashMemory() && await savePersistentState()) {
     const checkedAt = Date.now();
     try { executionWriterProof = { ...await continuity.status(), checkedAt }; } catch { /* unavailable evidence */ }
   }
   traderExecutionContext = { ...context, executionWriterProof, protectiveExitPending: control?.approved && control.finalDecision.decision === "SELL" };
+  lastTraderRuntimeContext = traderExecutionContext;
   try {
     let evaluation;
-    try { evaluation = evaluateAutomaticTraderProposals(context, control); }
+    try { evaluation = evaluateAutomaticTraderProposals(traderExecutionContext, control); }
     catch {
       // Evaluation is cache-only. Dispatch errors must retain uncertainty.
       return { status: "TRADER_LAYER_UNAVAILABLE", executionAttempted: false,
@@ -20013,15 +20058,35 @@ app.get("/trader-shadow-decisions", requireSecret, (_req, res) => {
   res.json({ virtualOnly: true, executionAllowed: false, historyTruncated: runtimeState.traderShadowExperiment.historyTruncated,
     records: runtimeState.traderShadowExperiment.records });
 });
-app.get("/trader-execution-readiness", requireSecret, async (_req, res) => {
+async function currentTraderReadiness() {
   let writer = null;
   if (hasUpstashMemory()) {
     const checkedAt = Date.now();
     try { writer = { ...await continuity.status(), checkedAt }; } catch { /* unavailable proof */ }
   }
-  res.json(traderRuntimeReadiness.report({ credentials: { etoro: Boolean(process.env.ETORO_API_KEY && process.env.ETORO_USER_KEY), persistence: hasUpstashMemory() },
+  const candidateChecks = {};
+  if (lastTraderRuntimeContext) for (const side of ["BUY", "SELL"]) {
+    const proposal = runtimeState.traderExecutionBridge.queue.find(p => p.side === side && !runtimeState.traderExecutionBridge.operations[p.proposalId]);
+    if (proposal) {
+      const evidence = prepareTraderExecutionEvidence(proposal, lastTraderRuntimeContext);
+      candidateChecks[side] = traderExecution.preflight(runtimeState.traderExecutionBridge, proposal, evidence, traderExecutionSettings(), Date.now());
+    }
+  }
+  return traderRuntimeReadiness.report({ credentials: { etoro: Boolean(process.env.ETORO_API_KEY && process.env.ETORO_USER_KEY), persistence: hasUpstashMemory() },
     settings: traderExecutionSettings(), mode: TRADING_MODE_LABEL, armed: LIVE_EXECUTION_ARMED, buyArmed: liveBuyReady(process.env),
-    state: runtimeState.traderExecutionBridge, writer, inputs: lastTraderScanInputs, now: Date.now() }));
+    state: runtimeState.traderExecutionBridge, writer, inputs: lastTraderScanInputs, now: Date.now(), candidateChecks,
+    evidenceIssues: lastTraderRuntimeContext?.traderRuntimeEvidenceStatus?.issues || [] });
+}
+app.get("/trader-execution-readiness", requireSecret, async (_req, res) => {
+  res.json(await currentTraderReadiness());
+});
+app.get("/trader-activation-plan", requireSecret, async (_req, res) => {
+  res.json(buildTraderActivationPlan({ env: process.env, state: runtimeState.traderExecutionBridge,
+    universe: buildUniverse(WATCHLIST, ASSET_RULES, CONFIGURED_UNIVERSE_CANDIDATES), readiness: await currentTraderReadiness(),
+    revision: process.env.RENDER_GIT_COMMIT, runtimeVerified: Boolean(
+      /^[a-f0-9]{40}$/.test(process.env.RENDER_GIT_COMMIT || "") &&
+      runtimeState.traderExecutionBridge.releaseApproval?.reviewedCommit === process.env.RENDER_GIT_COMMIT &&
+      runtimeState.traderExecutionBridge.releaseApproval?.deploymentSource === "RENDER_CONTROL_PLANE") }));
 });
 app.get("/trader-scan-inputs", requireSecret, (_req, res) => {
   res.json({ input: lastTraderScanInputs, executionAllowed: false, collectionTriggered: false });
