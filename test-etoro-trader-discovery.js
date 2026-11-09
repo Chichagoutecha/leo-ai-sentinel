@@ -7,7 +7,7 @@ const { createDiscovery, diagnostic, combine, options } = require('./etoro-trade
 const AT = Date.parse('2026-11-06T15:30:00Z');
 const row = (cid = 1, extra = {}) => ({ cid, username: `Trader${cid}`, type: 'trader', riskScore: 4,
   gain: 30, annualizedReturn: 12, firstActivity: '2020-01-01T00:00:00Z', lastActivity: '2026-11-05T00:00:00Z', ...extra });
-function setup({ configuration, handler, env: overrides } = {}) {
+function setup({ configuration, handler, env: overrides, verifyObserver } = {}) {
   let now = AT; const calls = [], env = { ETORO_API_KEY: 'SECRET_APPLICATION', ETORO_USER_KEY: 'SECRET_USER', ...overrides };
   const state = { version: 1, lastAttemptAt: null, report: null, readQuota: { timestamps: [], blockedUntil: 0 } };
   const client = createTraderReadClient({ env, clock: () => now, quotaStore: () => state.readQuota, fetchImpl: async (url, init) => {
@@ -19,7 +19,7 @@ function setup({ configuration, handler, env: overrides } = {}) {
       : { positions: [{ positionId: 10, instrumentId: 100, isBuy: true, leverage: 1, investmentPct: 10 }], socialTrades: [] };
     return new Response(JSON.stringify(body));
   } });
-  const discovery = createDiscovery({ env, client, clock: () => now, configuration, getState: () => state });
+  const discovery = createDiscovery({ env, client, clock: () => now, configuration, getState: () => state, verifyObserver });
   return { discovery, calls, state, env, client, advance: ms => { now += ms; } };
 }
 test('default CLI imports no startup code and never sends a request', () => {
@@ -115,6 +115,40 @@ test('a changed account behind the same ranked username discards the portfolio',
   assert.equal(report.verifiedPublicIdentities, 0);
   assert.equal(report.publicPortfoliosReadable, 0);
   assert.equal(report.candidateChecks[0].holdingsReason, 'IDENTITY_CONFIRMATION_FAILED');
+});
+test('isolated observer uses the confirmed real CID and reports truncation without disclosing positions', async () => {
+  const positions = Array.from({ length: 105 }, (_, i) => ({ positionId: i + 5000, instrumentId: i + 1000 }));
+  const s = setup({ verifyObserver: true, handler: u => {
+    if (u.pathname.endsWith('/people')) return new Response(JSON.stringify({
+      users: [{ realCID: 999, gcid: 1, username: 'Trader1', isPi: true }]
+    }));
+    if (u.pathname.endsWith('/portfolio/live')) return new Response(JSON.stringify({ positions, socialTrades: [] }));
+  } });
+  const report = diagnostic(await s.discovery.refresh());
+  assert.equal(report.providerCalls, 8);
+  assert.equal(report.maxRequests, 8);
+  assert.equal(s.calls.filter(c => new URL(c.url).search === '?cidList=999').length, 2);
+  assert.deepEqual(report.candidateChecks[0].holdingsCoverage, {
+    returnedDirectRows: 105, returnedCopyRows: 0, retainedRows: 100,
+    localTruncation: true, providerCompleteness: 'UNVERIFIED'
+  });
+  assert.deepEqual(report.observerProbe, {
+    status: 'PARTIAL', reason: 'LOCAL_POSITION_LIMIT', retainedRows: 100, context: 'OBSERVED_PRESENCE_ONLY'
+  });
+  assert.equal(report.selection.count, 0);
+  assert.doesNotMatch(JSON.stringify(report), /Trader1|positionId|instrumentId|expectedGcid/);
+});
+test('a real CID lookup that disagrees with the verified discovery binding stops the observer probe', async () => {
+  const s = setup({ verifyObserver: true, handler: u => {
+    if (u.pathname.endsWith('/people')) return new Response(JSON.stringify({
+      users: [{ realCID: 999, gcid: u.searchParams.has('cidList') ? 2 : 1, username: 'Trader1', isPi: true }]
+    }));
+  } });
+  const report = diagnostic(await s.discovery.refresh());
+  assert.equal(report.providerCalls, 6);
+  assert.equal(s.calls.filter(c => c.url.endsWith('/portfolio/live')).length, 1);
+  assert.equal(report.observerProbe.status, 'UNAVAILABLE');
+  assert.equal(report.observerProbe.reason, 'IDENTITY_CONFLICT');
 });
 test('successful response with missing pagination or an incorrect page is unusable', async () => {
   for (const pagination of [null, { page: 2, pageSize: 20, hasNext: false, totalItems: 1 }]) {

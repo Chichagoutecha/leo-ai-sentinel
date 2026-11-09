@@ -1,9 +1,9 @@
 'use strict';
 // Isolated research/diagnostic entry point. Never import index, start preloads,
 // execution clients, storage credentials, or a scheduler here.
-const { createTraderReadClient, RANKINGS } = require('./etoro-trader-observer');
+const { createTraderReadClient, createTraderObserver, RANKINGS } = require('./etoro-trader-observer');
 const { resolveIdentity, normalizePortfolio, digest, validId, validUsername } = require('./trader-observer');
-const VERSION = 'trader-discovery-v3';
+const VERSION = 'trader-discovery-v4';
 const SOURCE = 'https://api-portal.etoro.com/api-reference/rankings/get-paginated-investor-rankings';
 const PERIODS = Object.freeze(['AbsOneYear', 'AbsTwoYears']);
 const FIELDS = Object.freeze(['annualizedReturn', 'gain', 'riskScore', 'maxMonthlyRiskScore', 'peakToValley',
@@ -140,12 +140,49 @@ async function inspectRankedCandidate(candidate, client, record) {
   candidate.rankingCidBinding = confirmation.binding;
   candidate.popularInvestorStatus = isPi === true ? 'PROFILE_REPORTED_PI' : isPi === false ? 'CONTRADICTED_BY_PROFILE' : 'UNVERIFIED';
   candidate.holdingsStatus = portfolio.status;
+  if (readable) {
+    candidate.holdingsCoverage = {
+      returnedDirectRows: portfolioRead.data.positions.length,
+      returnedCopyRows: Array.isArray(portfolioRead.data.socialTrades)
+        ? portfolioRead.data.socialTrades.reduce((total, copy) => total + (Array.isArray(copy?.positions) ? copy.positions.length : 0), 0)
+        : null,
+      retainedRows: portfolio.positions.length,
+      localTruncation: portfolio.truncated,
+      providerCompleteness: 'UNVERIFIED'
+    };
+  }
   if (readable && isPi !== false) candidate.observerCandidate = { realCID, expectedGcid: gcid };
 }
 
-function createDiscovery({ env = process.env, client, clock = Date.now, configuration = {}, getState, onChange = () => {} } = {}) {
+async function probeObserver(candidate, client, clock, countRequest) {
+  const observer = createTraderObserver({
+    env: { TRADER_OBSERVER_TRADERS_JSON: JSON.stringify([candidate.observerCandidate]) },
+    client: {
+      ...client,
+      async read(kind, selector) {
+        const result = await client.read(kind, selector);
+        if (result.requestAttempted) countRequest();
+        return result;
+      }
+    },
+    clock
+  });
+  const result = await observer.refreshForScan(candidate.observerCandidate.realCID, { expectedUsername: candidate.username });
+  const [observed] = observer.view().traders;
+  const portfolio = observed?.snapshot?.portfolio;
+  const retainedRows = portfolio?.positions?.length || 0;
+  return {
+    status: observed?.historicalSnapshot || !retainedRows ? 'UNAVAILABLE' : 'PARTIAL',
+    reason: observed?.historicalSnapshot ? observed.reason : portfolio?.reason || result.reason,
+    retainedRows,
+    context: retainedRows && !observed?.historicalSnapshot ? 'OBSERVED_PRESENCE_ONLY' : 'UNAVAILABLE'
+  };
+}
+
+function createDiscovery({ env = process.env, client, clock = Date.now, configuration = {}, getState, onChange = () => {}, verifyObserver = false } = {}) {
   const o = options(configuration); let active = false, collectedInProcess = false, local = { version: 1, lastAttemptAt: null, report: null, readQuota: { timestamps: [], blockedUntil: 0 } };
-  const maxRequests = 2 * o.maxPages + 3 * o.verifyCount;
+  const maxRequests = 2 * o.maxPages + 3 * o.verifyCount + (verifyObserver ? 3 : 0);
+  if (maxRequests > 20) throw Error('DISCOVERY_READ_BUDGET_EXCEEDED');
   const state = () => getState ? getState() : local;
   if (!client) client = createTraderReadClient({ env, clock, quotaStore: () => state().readQuota, onQuotaChange: onChange });
   let credentialGeneration = client.context().generation;
@@ -199,8 +236,14 @@ function createDiscovery({ env = process.env, client, clock = Date.now, configur
           return denied;
         });
       }
+      if (verifyObserver) {
+        const candidate = report.candidates.find(c => c.observerCandidate);
+        report.observerProbe = denied || !candidate
+          ? { status: 'NOT_TESTED', reason: denied ? 'READS_STOPPED' : 'NO_VERIFIED_READABLE_CANDIDATE' }
+          : await probeObserver(candidate, client, clock, () => { providerCalls++; });
+      }
       if (client.context().generation !== ctx.generation) { s.report = null; onChange(); return { status: 'UNAVAILABLE', reason: 'CREDENTIAL_CONTEXT_CHANGED', providerCalls, maxRequests }; }
-      report.checks = checks; report.providerCalls = providerCalls; report.maxRequests = 2 * o.maxPages + 3 * o.verifyCount;
+      report.checks = checks; report.providerCalls = providerCalls; report.maxRequests = maxRequests;
       report.generatedAt = new Date(clock()).toISOString();
       s.report = report; collectedInProcess = true; onChange(); return { ...view(), providerCalls };
     } catch {
@@ -218,17 +261,19 @@ function diagnostic(report) {
     universe: report.universe || 'NOT_TESTED',
     candidateChecks: (report.candidates || []).filter(c => c.publicIdentityRead).map((c, i) => ({ candidate: `CANDIDATE_${i + 1}`,
       publicIdentityRead: c.publicIdentityRead, rankingProfileMatch: c.rankingProfileMatch, identityReason: c.identityReason,
-      rankingCidBinding: c.rankingCidBinding || 'UNVERIFIED', popularInvestorStatus: c.popularInvestorStatus, holdingsStatus: c.holdingsStatus, holdingsReason: c.holdingsReason })),
+      rankingCidBinding: c.rankingCidBinding || 'UNVERIFIED', popularInvestorStatus: c.popularInvestorStatus, holdingsStatus: c.holdingsStatus, holdingsReason: c.holdingsReason,
+      holdingsCoverage: c.holdingsCoverage || null })),
     verifiedPublicIdentities: report.candidates?.filter(c => c.identityStatus === 'VERIFIED_READ').length || 0,
     publicPortfoliosReadable: report.candidates?.filter(c => ['AVAILABLE', 'PARTIAL'].includes(c.holdingsStatus)).length || 0,
+    observerProbe: report.observerProbe || { status: 'NOT_TESTED' },
     comparison: report.comparison || { status: 'NOT_TESTED' }, selection: report.selection || { status: 'NOT_SELECTED', count: 0 },
     realAccountIdentity: 'NOT_TESTED', realOrderRights: 'NOT_TESTED', limitations: LIMITS };
 }
 module.exports = { VERSION, SOURCE, PERIODS, FIELDS, LIMITS, options, normalizePage, combine, createDiscovery, diagnostic };
 if (require.main === module) {
   const args = process.argv.slice(2);
-  if (args.length === 1 && args[0] === '--read-only-audit') {
-    createDiscovery({ configuration: { verifyCount: 3 } }).refresh().then(report => console.log(JSON.stringify(diagnostic(report), null, 2))).catch(() => {
+  if (args.length === 1 && ['--read-only-audit', '--verify-observer-read'].includes(args[0])) {
+    createDiscovery({ configuration: { verifyCount: 3 }, verifyObserver: args[0] === '--verify-observer-read' }).refresh().then(report => console.log(JSON.stringify(diagnostic(report), null, 2))).catch(() => {
       console.log(JSON.stringify({ readOnly: true, status: 'UNAVAILABLE', reason: 'DIAGNOSTIC_FAILED' })); process.exitCode = 1;
     });
   } else if (!args.length) console.log(JSON.stringify({ version: VERSION, readOnly: true, status: 'NOT_TESTED', providerCalls: 0,
