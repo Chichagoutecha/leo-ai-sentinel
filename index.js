@@ -1889,6 +1889,7 @@ const runtimeState = {
   exposureProposalTraces: [],
   traderAdvisoryState: traderAdvisory.initialState(),
   traderShadowExperiment: traderShadow.emptyState(),
+  traderRecentOpeningsExperiment: traderShadow.emptyState(),
   traderExecutionBridge: traderExecution.initialState(),
   trendMemory: {},
   equityHistory: [],
@@ -2479,6 +2480,7 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
     traderObserver: compactObserverState(runtimeState.traderObserver),
       traderAdvisoryState: traderAdvisory.compactState(runtimeState.traderAdvisoryState),
       traderShadowExperiment: traderShadow.compact(runtimeState.traderShadowExperiment),
+      traderRecentOpeningsExperiment: traderShadow.compact(runtimeState.traderRecentOpeningsExperiment),
       traderExecutionBridge: traderExecution.compact(runtimeState.traderExecutionBridge),
       exposureProposalTraces: (runtimeState.exposureProposalTraces || []).slice(-20)
     };
@@ -2571,6 +2573,7 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
     traderObserver: compactObserverState(runtimeState.traderObserver),
       traderAdvisoryState: traderAdvisory.compactState(runtimeState.traderAdvisoryState),
       traderShadowExperiment: traderShadow.compact(runtimeState.traderShadowExperiment),
+      traderRecentOpeningsExperiment: traderShadow.compact(runtimeState.traderRecentOpeningsExperiment),
       traderExecutionBridge: traderExecution.compact(runtimeState.traderExecutionBridge),
       exposureProposalTraces: (runtimeState.exposureProposalTraces || []).slice(-20)
   };
@@ -2728,6 +2731,7 @@ function fitPersistentStateToBudget(
       traderObserver: compactObserverState(working.traderObserver, 4000),
       traderAdvisoryState: traderAdvisory.compactState(working.traderAdvisoryState, 4000),
       traderShadowExperiment: traderShadow.compact(working.traderShadowExperiment, 6000),
+      traderRecentOpeningsExperiment: traderShadow.compact(working.traderRecentOpeningsExperiment, 6000),
       traderExecutionBridge: traderExecution.compact(working.traderExecutionBridge, 12000),
       exposureProposalTraces: (working.exposureProposalTraces || []).slice(-5),
       automationGuards: working.automationGuards || {},
@@ -2969,6 +2973,7 @@ function applyPersistentState(state) {
     runtimeState.traderExecutionBridge = traderExecution.recover(traderExecution.compact(state.traderExecutionBridge));
   } else runtimeState.traderExecutionBridge = traderExecution.initialState();
   if (state.traderShadowExperiment?.version === 1 && state.traderShadowExperiment.phases && Array.isArray(state.traderShadowExperiment.records)) runtimeState.traderShadowExperiment = traderShadow.compact(state.traderShadowExperiment);
+  if (state.traderRecentOpeningsExperiment?.version === 1 && state.traderRecentOpeningsExperiment.phases && Array.isArray(state.traderRecentOpeningsExperiment.records)) runtimeState.traderRecentOpeningsExperiment = traderShadow.compact(state.traderRecentOpeningsExperiment);
   if (state.traderAdvisoryState?.version === 1 && state.traderAdvisoryState.roster && Array.isArray(state.traderAdvisoryState.history)) runtimeState.traderAdvisoryState = traderAdvisory.compactState(state.traderAdvisoryState);
   if (state.secInstitutionalWatch && typeof state.secInstitutionalWatch === 'object') {
     runtimeState.secInstitutionalWatch = state.secInstitutionalWatch;
@@ -8779,8 +8784,7 @@ function markPaperPortfolio(marketSummary) {
   return paper;
 }
 
-function paperPortfolioResponse() {
-  const paper = runtimeState.paperPortfolio;
+function paperPortfolioResponse(paper = runtimeState.paperPortfolio) {
   if (!paper) return { status: 200, ok: true, data: { clientPortfolio: { positions: [], ordersForOpen: [], ordersForClose: [], orders: [], credit: PAPER_STARTING_CASH_USD } } };
   const positions = Object.values(paper.positions || {}).map((position, index) => ({
     instrumentID: WATCHLIST[position.asset], positionID: 900000000 + index,
@@ -8887,16 +8891,21 @@ function recordPaperCashFlow({ type, amount, idempotencyKey } = {}) {
   }
   scheduleSave();
   let pairedExperimentFlow = { status: "NO_ACTIVE_SHADOW_EXPERIMENT" };
-  try {
-    const paired = traderShadow.applyFlow({ state: runtimeState.traderShadowExperiment, mode: "SHADOW", now: eventTime,
-      flow: { id: flow.id, type: flow.type, amount: flow.amount, currency: flow.currency },
-      quotes: runtimeState.lastMarketData?.normalized?.ratesByAsset || {} });
-    runtimeState.traderShadowExperiment = traderShadow.compact(paired.state);
-    pairedExperimentFlow = { status: paired.status };
-  } catch {
-    runtimeState.traderShadowExperiment.flowCoverageIncomplete = true;
-    for (const pair of Object.values(runtimeState.traderShadowExperiment.phases || {})) for (const arm of ["strategy", "baseline"]) pair[arm].cashFlowHistoryComplete = false;
-    pairedExperimentFlow = { status: "PAIRED_FLOW_UNAVAILABLE" };
+  const activeExperimentKey = traderShadowStateKey();
+  for (const key of ["traderShadowExperiment", "traderRecentOpeningsExperiment"]) {
+    const state = runtimeState[key];
+    if (key !== activeExperimentKey && !state.protocol) continue;
+    try {
+      const paired = traderShadow.applyFlow({ state, mode: "SHADOW", now: eventTime,
+        flow: { id: flow.id, type: flow.type, amount: flow.amount, currency: flow.currency },
+        quotes: runtimeState.lastMarketData?.normalized?.ratesByAsset || {} });
+      runtimeState[key] = traderShadow.compact(paired.state);
+      if (key === activeExperimentKey) pairedExperimentFlow = { status: paired.status };
+    } catch {
+      state.flowCoverageIncomplete = true;
+      for (const pair of Object.values(state.phases || {})) for (const arm of ["strategy", "baseline"]) pair[arm].cashFlowHistoryComplete = false;
+      if (key === activeExperimentKey) pairedExperimentFlow = { status: "PAIRED_FLOW_UNAVAILABLE" };
+    }
   }
   return { ok: true, duplicate: false, flow, pairedExperimentFlow, executionAttempted: false };
 }
@@ -14454,7 +14463,9 @@ async function buildRuntimeContext(source, { refreshTraders = false } = {}) {
       lastTraderScanInputs = traderInput;
     }
   }
-  const preferredNextAssets = traderScanInputs.prioritize(getPreferredNextAssets(portfolioSummary, marketSummary), traderInput);
+  const traderRecentOpeningsShadow = PAPER_TRADING_ENABLED && process.env.TRADER_RECENT_OPENINGS_SHADOW_ENABLED === "true";
+  const preferredNextAssets = traderScanInputs.prioritize(getPreferredNextAssets(portfolioSummary, marketSummary),
+    traderRecentOpeningsShadow ? null : traderInput);
   const candidates = preferredNextAssets
     .filter((item) => item.eligibleForTrade)
     .slice(0, SECONDARY_MAX_ASSETS_PER_SCAN)
@@ -14524,9 +14535,10 @@ async function buildRuntimeContext(source, { refreshTraders = false } = {}) {
     agentCouncil
   });
 
-  if (traderInput) foundationAgents.traderContext = traderInput;
+  if (traderInput && !traderRecentOpeningsShadow) foundationAgents.traderContext = traderInput;
 
   return {
+    traderRecentOpeningsShadow,
     realPortfolio,
     realSummary,
     decisionPortfolio,
@@ -14704,6 +14716,10 @@ function buildDecisionDiagnostics(context, decisionRaw, control) {
   };
 }
 
+function traderShadowStateKey(recentOpenings = PAPER_TRADING_ENABLED && process.env.TRADER_RECENT_OPENINGS_SHADOW_ENABLED === "true") {
+  return recentOpenings ? "traderRecentOpeningsExperiment" : "traderShadowExperiment";
+}
+
 function recordTraderShadowScan(context, decisionRaw, control, aiDecisionCost, cycleId, cutoff = Date.now()) {
   if (!PAPER_TRADING_ENABLED) return { status: "SHADOW_REQUIRED", brokerCalls: 0 };
   const traderInput = context?.foundationAgents?.traderContext;
@@ -14711,6 +14727,8 @@ function recordTraderShadowScan(context, decisionRaw, control, aiDecisionCost, c
     inputId: traderInput.inputId, inputVersion: traderInput.inputVersion,
     reason: "The normal decision already received trader context; it cannot serve as a trader-free baseline.",
     virtualOnly: true, executionAllowed: false, brokerCalls: 0 };
+  const recentOpenings = context?.traderRecentOpeningsShadow === true;
+  const stateKey = traderShadowStateKey(recentOpenings);
   try {
     const universe = buildUniverse(WATCHLIST, ASSET_RULES, CONFIGURED_UNIVERSE_CANDIDATES);
     const observerView = traderObserver.view();
@@ -14723,11 +14741,15 @@ function recordTraderShadowScan(context, decisionRaw, control, aiDecisionCost, c
     const eligibility = item ? { [item.instrumentId]: { instrumentId: item.instrumentId, side: decisionRaw.decision,
       asOf: cached.fetchedAt, technicalStatus: cached.technicalEligibility, leoPolicyAllowed: cached.leoAuthorization === "AUTHORIZED_BY_CALLER_POLICY",
       technicalEligible: null, currency: cached.currency, contextBinding: "UNVERIFIED", minimumUsd: null, maximumUsd: null } } : {};
-    const result = traderShadow.runCycle({ state: runtimeState.traderShadowExperiment, now: cutoff, cycleId, mode: "SHADOW",
+    const result = traderShadow.runCycle({ state: runtimeState[stateKey], now: cutoff, cycleId, mode: "SHADOW",
       rawDecision: decisionRaw, control, universe, template: { ...runtimeState.paperPortfolio,
         seedCoverage: { ...runtimeState.paperPortfolio?.seedCoverage, complete: runtimeState.paperPortfolio?.seedCoverage?.complete === true &&
           (!runtimeState.paperPortfolio?.seedFromReal || exposure.owned.coverage === "COMPLETE" && exposure.owned.unreconstructedRisk.length === 0) } },
       observerView, observerState: runtimeState.traderObserver, advisorySeed: runtimeState.traderAdvisoryState, quotes: context.marketSummary?.ratesByAsset || {},
+      recentOpenings,
+      allowedEntry: Boolean(item && TRADE_ALLOWED_ASSETS.has(item.symbol) && TRADE_ALLOWED_CATEGORIES.has(item.category)),
+      reviewVirtualArm: recentOpenings ? book => riskController(decisionRaw, paperPortfolioResponse(book),
+        context.marketData, context.trendSummary, context.foundationAgents) : undefined,
       eligibility, costs: item ? { [item.instrumentId]: { instrumentId: item.instrumentId, side: decisionRaw.decision,
         amountUsd: control.finalDecision?.amount_usd ?? null, asOf: null, currency: "USD", coverage: "UNAVAILABLE_NOT_BOUND",
         allInCostPct: null, contextBinding: "UNVERIFIED", estimatedFeePct: PAPER_FEE_PCT, estimatedSlippageBps: PAPER_SLIPPAGE_BPS } } : {}, constraintsEvidence: null,
@@ -14739,11 +14761,11 @@ function recordTraderShadowScan(context, decisionRaw, control, aiDecisionCost, c
       advisoryOverrides: JSON.parse(process.env.TRADER_ADVISORY_POLICY_JSON || "{}"),
       experimentOverrides: JSON.parse(process.env.TRADER_SHADOW_PROTOCOL_JSON || "{}"),
       assumptions: { feePct: PAPER_FEE_PCT, slippageBps: PAPER_SLIPPAGE_BPS, benchmarkAsset: PAPER_BENCHMARK_ASSET, benchmarkCurrency: PAPER_BENCHMARK_CURRENCY } });
-    runtimeState.traderShadowExperiment = traderShadow.compact(result.state);
+    runtimeState[stateKey] = traderShadow.compact(result.state);
     scheduleSave();
     return { status: result.status, phase: result.phase || null, recordId: result.recordId || null, executionAllowed: false, brokerCalls: 0 };
   } catch {
-    runtimeState.traderShadowExperiment.failedCycles = Number(runtimeState.traderShadowExperiment.failedCycles || 0) + 1;
+    runtimeState[stateKey].failedCycles = Number(runtimeState[stateKey].failedCycles || 0) + 1;
     scheduleSave();
     return { status: "SHADOW_EXPERIMENT_INPUT_UNAVAILABLE", executionAllowed: false, brokerCalls: 0 };
   }
@@ -20052,11 +20074,12 @@ for (const [path, field] of [["block-entries", "entries"], ["suspend", "suspende
   });
 }
 app.get("/trader-shadow-status", requireSecret, (_req, res) => {
-  res.json(traderShadow.report(runtimeState.traderShadowExperiment));
+  res.json(traderShadow.report(runtimeState[traderShadowStateKey()]));
 });
 app.get("/trader-shadow-decisions", requireSecret, (_req, res) => {
-  res.json({ virtualOnly: true, executionAllowed: false, historyTruncated: runtimeState.traderShadowExperiment.historyTruncated,
-    records: runtimeState.traderShadowExperiment.records });
+  const experiment = runtimeState[traderShadowStateKey()];
+  res.json({ virtualOnly: true, executionAllowed: false, historyTruncated: experiment.historyTruncated,
+    records: experiment.records });
 });
 async function currentTraderReadiness() {
   let writer = null;
