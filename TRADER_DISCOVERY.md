@@ -25,11 +25,11 @@ Le diagnostic par défaut autorise **onze requêtes GET maximum** :
 
 1. Une page de vingt candidats sur `AbsOneYear`, avec `popularInvestor=true`.
 2. Une page de vingt candidats sur `AbsTwoYears`, avec le même filtre officiel.
-3. Pour au maximum trois candidats distincts présents dans les deux échantillons, lecture du profil officiel.
+3. Pour au maximum trois candidats distincts présents dans les deux échantillons, recherche du profil officiel avec le paramètre documenté `usernames`.
 4. Pour chacun, lecture de son portefeuille public seulement si le CID et le pseudonyme correspondent au classement.
 5. Pour chacun, confirmation du profil pour détecter une course au changement de pseudonyme. Deux lectures de classement plus trois lectures par candidat donnent au maximum onze GET.
 
-L'ordre des candidats par CID sert uniquement à rendre l'échantillonnage reproductible. Le premier candidat vérifié n'est **pas** déclaré meilleur ou sélectionné pour trader. Un CID de classement n'est pas assimilé d'emblée à un realCID : la réponse officielle du profil doit établir cette correspondance.
+L'ordre des candidats par CID sert uniquement à rendre l'échantillonnage reproductible. Le premier candidat vérifié n'est **pas** déclaré meilleur ou sélectionné pour trader. Le rapprochement exige un pseudonyme exact et unique. Le CID du classement doit correspondre au `realCID` ou au `gcid` renvoyé par ce profil. Les deux identifiants doivent rester stables lors de la confirmation. La configuration de l’observateur utilise le `realCID` du profil.
 
 Aucun ajout à `TRADER_OBSERVER_TRADERS_JSON`, `TRADE_ALLOWED_ASSETS`, `TRADE_ALLOWED_CATEGORIES`, aucune modification des plafonds ou des variables Render. La liste des traders effectivement suivis reste celle déjà configurée.
 
@@ -55,7 +55,7 @@ Depuis le Shell du service disposant déjà des clés, les commandes suivantes e
   leo_trader_audit_dir=$(mktemp -d /tmp/leo-traders.XXXXXX)
   for fichier in etoro-trader-discovery.js etoro-trader-observer.js trader-observer.js; do
     curl --fail --silent --show-error --max-time 20 --proto '=https' \
-      "https://raw.githubusercontent.com/Chichagoutecha/leo-ai-sentinel/c1a7be4908b1cad1853d89c31e1118c3a12b640e/$fichier" \
+      "https://raw.githubusercontent.com/Chichagoutecha/leo-ai-sentinel/f4b171a2cd2a66a4e73537180be0b873e58c3525/$fichier" \
       -o "$leo_trader_audit_dir/$fichier"
   done
   node "$leo_trader_audit_dir/etoro-trader-discovery.js" --read-only-audit
@@ -66,7 +66,7 @@ Le bloc s'arrête automatiquement si un téléchargement échoue. Ne pas répét
 
 Par défaut, `node etoro-trader-discovery.js` affiche seulement les instructions : **zéro requête**. Seul `--read-only-audit` déclenche la collecte. Les autres arguments sont refusés. L'import n'a aucun effet réseau.
 
-Le rapport v2 donne les motifs précis de rejet des lignes, la lecture du profil et sa correspondance avec le candidat séparément, ainsi que les motifs d'indisponibilité du portefeuille par alias (`CANDIDATE_1`, etc.). Une différence de casse dans le pseudonyme n'est pas assimilée sans preuve à une identité certaine. Le portefeuille n'est pas demandé si le profil contredit le pseudonyme du classement. Un 403 n'est pas répété pour le même candidat ; il n'interdit pas de vérifier un autre candidat distinct. Les 401 et 429 arrêtent la suite. Les identifiants de requête sont des UUID aléatoires de corrélation pour le support, jamais dérivés des secrets.
+Le rapport v3 donne les motifs précis de rejet des lignes, la lecture du profil et sa correspondance avec le candidat séparément, ainsi que les motifs d'indisponibilité du portefeuille par alias (`CANDIDATE_1`, etc.). Une différence de casse dans le pseudonyme n'est pas assimilée sans preuve à une identité certaine. Le portefeuille n'est pas demandé si le profil contredit le pseudonyme du classement. Un 403 n'est pas répété pour le même candidat ; il n'interdit pas de vérifier un autre candidat distinct. Les 401 et 429 arrêtent la suite. Les identifiants de requête sont des UUID aléatoires de corrélation pour le support, jamais dérivés des secrets.
 
 Le JSON à partager ne contient ni pseudonymes, ni identifiants de compte/trader/jeton, ni positions ou soldes. Il indique méthodes, endpoints génériques, HTTP, structures attendues, dates, couverture et comptes de résultats. Une identité publique de trader vérifiée ne prouve pas l'identité du compte exécutant LEO. Une lecture réussie ne prouve jamais les droits d'ordre.
 
@@ -88,15 +88,17 @@ Conclusion : **BLOCKED pour le réel**, en attente des lectures authentifiées e
 
 ## Vérifications réalisées
 
-- `npm test` : **401 tests réussis**, aucun échec, dont 31 tests de découverte et 26 tests existants de l'observateur.
+- `npm test` : **403 tests réussis**, aucun échec, dont 33 tests de découverte et 26 tests existants de l'observateur.
 - `npm run check` : réussite de la vérification syntaxique.
 - `git diff --check` : réussite.
 - Réponses simulées : fenêtres et pages, données manquantes, doublons et contradictions, changement de pseudonyme, CID ambigu, HTTP 200 sans identité valide, 401/403/429, secrets dans les corps/erreurs, rotation des clés, restauration, expiration, concurrence, décompte des tentatives réseau et refus de toute requête hors liste.
 - Le parcours CLI par défaut est testé dans un sous-processus isolé sans identifiants. Le test principal observe exactement cinq GET simulés pour un candidat et onze pour trois candidats, aucun POST/DELETE, aucune sélection de trading et aucune fonction d'ordre.
 - Ces résultats ne prouvent ni un accès authentifié aux classements ni une performance de stratégie. Aucun ordre, déploiement, changement de variable Render ou fusion n'a eu lieu.
 
-## Preuve reçue de Render et limites de la correction v2
+## Résultats des diagnostics sur Render
 
 Diagnostic v1 communiqué par l’opérateur, le 6 novembre 2026 à **17 h 07 (Paris)** : cinq lectures, classements à un/deux ans HTTP 200 et profils publics HTTP 200 ; portefeuille du candidat HTTP 403. Onze lignes retenues dans chaque fenêtre, une page seulement, aucun trader sélectionné. Les compteurs annonçaient zéro identité liée au classement ; la cause précise n’était pas conservée. Cela établit des accès sélectifs, pas l’absence générale d’accès aux traders. Le caractère privé du candidat et les permissions manquantes ne sont pas prouvés.
 
-Le v1 interrogeait le classement général (plusieurs millions de résultats rapportés), sans le filtre Popular Investor. Le v2 corrige ce périmètre, explique les correspondances et peut vérifier trois candidats distincts. Il ne prétend pas corriger côté client un refus eToro et n’élargit aucune permission. Aucune nouvelle lecture authentifiée depuis cet environnement ; le résultat v2 de Render reste à obtenir. Le CLI demeure isolé du service et du trading.
+Le v1 interrogeait le classement général (plusieurs millions de résultats rapportés), sans le filtre Popular Investor. Le v2 corrige ce périmètre, explique les correspondances et peut vérifier trois candidats distincts. Il ne prétend pas corriger côté client un refus eToro et n’élargit aucune permission. Le v2 a été exécuté sur Render le 9 novembre 2026 à 16 h 34 (Paris). Les deux classements filtrés ont répondu HTTP 200 et annoncé 596 résultats chacun. Vingt candidats ont été collectés. Les trois profils lus par CID ont répondu HTTP 200 avec un pseudonyme différent de celui du classement. Aucun portefeuille n’a été demandé lors de cet essai.
+
+Le v3 utilise la recherche par pseudonyme documentée pour résoudre ces divergences. Il indique quel identifiant du profil correspond au classement, sans divulguer sa valeur. Le résultat authentifié du v3 reste à obtenir sur Render. Le CLI demeure isolé du service et du trading.
