@@ -1,9 +1,9 @@
 'use strict';
 // Isolated research/diagnostic entry point. Never import index, start preloads,
 // execution clients, storage credentials, or a scheduler here.
-const { createTraderReadClient, createTraderObserver, RANKINGS } = require('./etoro-trader-observer');
-const { emptyState, digest, validId, validUsername } = require('./trader-observer');
-const VERSION = 'trader-discovery-v2';
+const { createTraderReadClient, RANKINGS } = require('./etoro-trader-observer');
+const { resolveIdentity, normalizePortfolio, digest, validId, validUsername } = require('./trader-observer');
+const VERSION = 'trader-discovery-v3';
 const SOURCE = 'https://api-portal.etoro.com/api-reference/rankings/get-paginated-investor-rankings';
 const PERIODS = Object.freeze(['AbsOneYear', 'AbsTwoYears']);
 const FIELDS = Object.freeze(['annualizedReturn', 'gain', 'riskScore', 'maxMonthlyRiskScore', 'peakToValley',
@@ -81,6 +81,68 @@ function combine(pages, now) {
       reason: 'NO_VERIFIED_REFRESH_DATE_COMPLETE_HISTORIES_VOLATILITY_COSTS_OR_INDEPENDENCE' },
     selection: { status: 'NOT_SELECTED', count: 0, rule: 'DISCOVERY_NEVER_MODIFIES_OBSERVER_LIST_OR_TRADE_ALLOWLIST' }, limitations: LIMITS };
 }
+function rankedProfile(read, candidate, client) {
+  const users = Array.isArray(read.data?.users) ? read.data.users : [];
+  const profiles = users.filter(row => validId(row?.realCID) && validId(row?.gcid) && client.safeUsername(row?.username));
+  const present = profiles.length > 0;
+  const matches = users.filter(row => row?.username === candidate.username);
+  if (matches.length !== 1) {
+    let reason = read.reason || 'IDENTITY_NOT_RESOLVED';
+    if (matches.length > 1) reason = 'AMBIGUOUS_IDENTITY';
+    else if (present) reason = profiles.some(row => row.username.toLowerCase() === candidate.username.toLowerCase())
+      ? 'RANKING_PROFILE_USERNAME_CASE_DIFFERENCE' : 'RANKING_PROFILE_USERNAME_MISMATCH';
+    return { present, reason };
+  }
+  const identity = resolveIdentity(read.data, { realCID: matches[0].realCID });
+  if (!validId(identity.realCID) || identity.status !== 'AVAILABLE') return { present, reason: identity.reason || 'IDENTITY_NOT_RESOLVED' };
+  const matchesReal = identity.realCID === candidate.providerCid;
+  const matchesGlobal = identity.gcid === candidate.providerCid;
+  if (!matchesReal && !matchesGlobal) return { present, reason: 'RANKING_CID_NOT_CONFIRMED_BY_PROFILE' };
+  return { present, identity, binding: matchesReal ? (matchesGlobal ? 'REAL_CID_AND_GCID' : 'REAL_CID') : 'GCID' };
+}
+
+async function inspectRankedCandidate(candidate, client, record) {
+  const selector = { username: candidate.username };
+  const profileRead = await client.read('profileByUsername', selector);
+  const profile = rankedProfile(profileRead, candidate, client);
+  const stopped = record(profileRead, 'profile', profile.present);
+  candidate.publicIdentityRead = profile.present ? 'VERIFIED_READ' : 'UNVERIFIED';
+  candidate.rankingProfileMatch = profile.identity ? 'MATCH' : profile.present ? 'MISMATCH' : 'UNVERIFIED';
+  candidate.identityReason = profile.reason || null;
+  candidate.holdingsStatus = 'UNAVAILABLE';
+  candidate.holdingsReason = profile.present ? 'NOT_REQUESTED_IDENTITY_MISMATCH' : 'NOT_REQUESTED_PROFILE_UNVERIFIED';
+  candidate.popularInvestorStatus = 'UNVERIFIED';
+  candidate.observerCandidate = null;
+  candidate.transactionHistory = 'UNAVAILABLE_AGGREGATE_STATS_AND_SNAPSHOTS_ARE_NOT_TRANSACTIONS';
+  if (stopped || !profile.identity) return;
+
+  const portfolioRead = await client.read('portfolio', selector);
+  const portfolio = normalizePortfolio(portfolioRead.data);
+  const readable = ['AVAILABLE', 'PARTIAL'].includes(portfolio.status);
+  candidate.holdingsReason = portfolioRead.reason || portfolio.reason;
+  if (record(portfolioRead, 'portfolio', readable)) {
+    candidate.identityReason = 'IDENTITY_CONFIRMATION_NOT_ATTEMPTED';
+    return;
+  }
+
+  const confirmationRead = await client.read('profileByUsername', selector);
+  const confirmation = rankedProfile(confirmationRead, candidate, client);
+  record(confirmationRead, 'profile', confirmation.present);
+  if (confirmation.identity?.realCID !== profile.identity.realCID || confirmation.identity?.gcid !== profile.identity.gcid) {
+    candidate.identityReason = confirmation.reason || 'IDENTITY_OR_CONTEXT_CHANGED_DURING_COLLECTION';
+    candidate.rankingProfileMatch = 'UNVERIFIED';
+    candidate.holdingsReason = 'IDENTITY_CONFIRMATION_FAILED';
+    return;
+  }
+
+  const { realCID, gcid, isPi } = confirmation.identity;
+  candidate.identityStatus = 'VERIFIED_READ';
+  candidate.rankingCidBinding = confirmation.binding;
+  candidate.popularInvestorStatus = isPi === true ? 'PROFILE_REPORTED_PI' : isPi === false ? 'CONTRADICTED_BY_PROFILE' : 'UNVERIFIED';
+  candidate.holdingsStatus = portfolio.status;
+  if (readable && isPi !== false) candidate.observerCandidate = { realCID, expectedGcid: gcid };
+}
+
 function createDiscovery({ env = process.env, client, clock = Date.now, configuration = {}, getState, onChange = () => {} } = {}) {
   const o = options(configuration); let active = false, collectedInProcess = false, local = { version: 1, lastAttemptAt: null, report: null, readQuota: { timestamps: [], blockedUntil: 0 } };
   const maxRequests = 2 * o.maxPages + 3 * o.verifyCount;
@@ -118,37 +180,24 @@ function createDiscovery({ env = process.env, client, clock = Date.now, configur
         }
       }
       const report = combine(pages, clock());
-      // CID in a rankings row is not assumed to be a realCID/GCID. Verify the
-      // possible mapping through the observer's official profile / holdings /
-      // profile sequence before suggesting an observer configuration.
-      if (!denied) for (const candidate of report.candidates.filter(c => c.status === 'RESEARCH_CANDIDATE').slice(0, o.verifyCount)) {
-        const observerState = emptyState(), candidateEnv = { ...env, TRADER_OBSERVER_TRADERS_JSON: JSON.stringify([{ realCID: candidate.providerCid }]) };
-        const observer = createTraderObserver({ env: candidateEnv, client, clock, getState: () => observerState });
-        await observer.refreshForScan(candidate.providerCid, { expectedUsername: candidate.username });
-        const trader = observer.view().traders[0], snapshot = trader?.snapshot;
-        const reads = snapshot ? Object.values(snapshot.reads).filter(r => r.requestAttempted) : observerState.traders[candidate.providerCid]?.lastAttempt?.reads || [];
-        providerCalls += reads.filter(r => r.requestAttempted).length;
-        // Do not turn absence of public portfolio access into proven privacy.
-        candidate.identityStatus = snapshot?.identity?.status === 'AVAILABLE' && snapshot.identity.username === candidate.username ? 'VERIFIED_READ' : 'UNVERIFIED';
-        const firstIdentity = observerState.traders[candidate.providerCid]?.lastAttempt?.identityRead;
-        candidate.publicIdentityRead = snapshot?.identity?.status === 'AVAILABLE' ? 'VERIFIED_READ' : firstIdentity?.status || 'UNVERIFIED';
-        candidate.rankingProfileMatch = candidate.identityStatus === 'VERIFIED_READ' ? 'MATCH' : firstIdentity?.rankingMatch || 'UNVERIFIED';
-        candidate.identityReason = candidate.identityStatus === 'VERIFIED_READ' ? null : firstIdentity?.reason || trader?.reason || 'RANKING_PROFILE_BINDING_UNVERIFIED';
-        candidate.popularInvestorStatus = snapshot?.identity?.isPi === true ? 'PROFILE_REPORTED_PI' : snapshot?.identity?.isPi === false ? 'CONTRADICTED_BY_PROFILE' : 'UNVERIFIED';
-        candidate.holdingsStatus = snapshot?.portfolio?.status || 'UNAVAILABLE';
-        candidate.holdingsReason = snapshot?.portfolio?.reason || (candidate.rankingProfileMatch === 'MISMATCH' ? 'NOT_REQUESTED_IDENTITY_MISMATCH' : trader?.reason || 'NOT_VERIFIED');
-        candidate.transactionHistory = 'UNAVAILABLE_AGGREGATE_STATS_AND_SNAPSHOTS_ARE_NOT_TRANSACTIONS';
-        candidate.observerCandidate = candidate.identityStatus === 'VERIFIED_READ' && candidate.popularInvestorStatus !== 'CONTRADICTED_BY_PROFILE' && ['AVAILABLE', 'PARTIAL'].includes(candidate.holdingsStatus)
-          ? { realCID: snapshot.identity.realCID, expectedGcid: snapshot.identity.gcid } : null;
-        for (const r of reads) {
-          const portfolioRead = r.source?.endsWith('/portfolio/live');
-          const present = portfolioRead ? snapshot && ['AVAILABLE', 'PARTIAL'].includes(snapshot.portfolio?.status) : candidate.publicIdentityRead === 'VERIFIED_READ';
-          checks.push({ capability: portfolioRead ? 'PUBLIC_TRADER_PORTFOLIO' : 'PUBLIC_TRADER_IDENTITY',
-          endpoint: r.source?.endsWith('/portfolio/live') ? 'https://public-api.etoro.com/api/v1/user-info/people/{username}/portfolio/live' : 'https://public-api.etoro.com/api/v1/user-info/people?cidList={cid}',
-          method: 'GET', checkedAt: r.collectedAt, requestId: r.requestId, httpStatus: r.httpStatus, status: r.httpStatus === 401 ? 'UNAUTHORIZED' : r.httpStatus === 403 ? 'FORBIDDEN' : present && r.status === 'AVAILABLE' ? 'VERIFIED_READ' : 'UNAVAILABLE',
-          expectedStructure: present ? 'PRESENT' : 'UNVERIFIED', reason: r.reason || (!present ? 'PUBLIC_IDENTITY_OR_PORTFOLIO_SCHEMA_UNVERIFIED' : null) });
-        }
-        if (reads.some(r => [401, 429].includes(r.httpStatus))) break;
+      const candidates = report.candidates.filter(c => c.status === 'RESEARCH_CANDIDATE').slice(0, o.verifyCount);
+      for (const candidate of candidates) {
+        if (denied) break;
+        await inspectRankedCandidate(candidate, client, (read, kind, present) => {
+          if (read.requestAttempted) {
+            providerCalls++;
+            checks.push({
+              capability: kind === 'profile' ? 'PUBLIC_TRADER_IDENTITY' : 'PUBLIC_TRADER_PORTFOLIO',
+              endpoint: kind === 'profile' ? 'https://public-api.etoro.com/api/v1/user-info/people?usernames={username}' : 'https://public-api.etoro.com/api/v1/user-info/people/{username}/portfolio/live',
+              method: 'GET', checkedAt: read.collectedAt, requestId: read.requestId, httpStatus: read.httpStatus,
+              status: read.httpStatus === 401 ? 'UNAUTHORIZED' : read.httpStatus === 403 ? 'FORBIDDEN' : present ? 'VERIFIED_READ' : 'UNAVAILABLE',
+              expectedStructure: present ? 'PRESENT' : 'UNVERIFIED',
+              reason: read.reason || (present ? null : 'PUBLIC_IDENTITY_OR_PORTFOLIO_SCHEMA_UNVERIFIED')
+            });
+          }
+          denied = [401, 429].includes(read.httpStatus) || ['CREDENTIALS_ABSENT', 'READ_QUOTA_OR_COOLDOWN', 'CREDENTIAL_CONTEXT_CHANGED'].includes(read.reason);
+          return denied;
+        });
       }
       if (client.context().generation !== ctx.generation) { s.report = null; onChange(); return { status: 'UNAVAILABLE', reason: 'CREDENTIAL_CONTEXT_CHANGED', providerCalls, maxRequests }; }
       report.checks = checks; report.providerCalls = providerCalls; report.maxRequests = 2 * o.maxPages + 3 * o.verifyCount;
@@ -169,7 +218,7 @@ function diagnostic(report) {
     universe: report.universe || 'NOT_TESTED',
     candidateChecks: (report.candidates || []).filter(c => c.publicIdentityRead).map((c, i) => ({ candidate: `CANDIDATE_${i + 1}`,
       publicIdentityRead: c.publicIdentityRead, rankingProfileMatch: c.rankingProfileMatch, identityReason: c.identityReason,
-      popularInvestorStatus: c.popularInvestorStatus, holdingsStatus: c.holdingsStatus, holdingsReason: c.holdingsReason })),
+      rankingCidBinding: c.rankingCidBinding || 'UNVERIFIED', popularInvestorStatus: c.popularInvestorStatus, holdingsStatus: c.holdingsStatus, holdingsReason: c.holdingsReason })),
     verifiedPublicIdentities: report.candidates?.filter(c => c.identityStatus === 'VERIFIED_READ').length || 0,
     publicPortfoliosReadable: report.candidates?.filter(c => ['AVAILABLE', 'PARTIAL'].includes(c.holdingsStatus)).length || 0,
     comparison: report.comparison || { status: 'NOT_TESTED' }, selection: report.selection || { status: 'NOT_SELECTED', count: 0 },

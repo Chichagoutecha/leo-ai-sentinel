@@ -15,7 +15,7 @@ function setup({ configuration, handler, env: overrides } = {}) {
     const result = handler && await handler(u, init);
     if (result !== undefined) return result;
     const body = url.startsWith(RANKINGS) ? { results: [row()], pagination: { page: Number(u.searchParams.get('page')), pageSize: Number(u.searchParams.get('pageSize')), hasNext: false, totalItems: 1 } }
-      : u.pathname.endsWith('/people') ? { users: [{ realCID: Number(u.searchParams.get('cidList')), gcid: 101, username: 'Trader1' }] }
+      : u.pathname.endsWith('/people') ? { users: [{ realCID: Number(u.searchParams.get('usernames')?.replace(/^Trader/, '')), gcid: 101, username: 'Trader1' }] }
       : { positions: [{ positionId: 10, instrumentId: 100, isBuy: true, leverage: 1, investmentPct: 10 }], socialTrades: [] };
     return new Response(JSON.stringify(body));
   } });
@@ -93,6 +93,28 @@ test('ranking CID is not blindly declared to be a stable real account ID', async
   const s = setup({ handler: u => u.pathname.endsWith('/people') ? new Response(JSON.stringify({ users: [{ realCID: 999, gcid: 101, username: 'Trader1' }] })) : undefined });
   const r = await s.discovery.refresh(); assert.equal(r.candidates[0].identityStatus, 'UNVERIFIED');
   assert.equal(r.candidates[0].observerCandidate, null); assert.equal(r.candidates[0].holdingsStatus, 'UNAVAILABLE');
+  assert.equal(diagnostic(r).candidateChecks[0].identityReason, 'RANKING_CID_NOT_CONFIRMED_BY_PROFILE');
+  assert.equal(s.calls.some(c => c.url.endsWith('/portfolio/live')), false);
+});
+test('ranking CID can be the global ID while the observer uses the separate real account ID', async () => {
+  const s = setup({ handler: u => u.pathname.endsWith('/people')
+    ? new Response(JSON.stringify({ users: [{ realCID: 999, gcid: 1, username: 'Trader1', isPi: true }] })) : undefined });
+  const report = await s.discovery.refresh();
+  const profiles = s.calls.filter(c => new URL(c.url).pathname.endsWith('/people'));
+  assert.equal(profiles.length, 2);
+  assert.ok(profiles.every(c => new URL(c.url).search === '?usernames=Trader1'));
+  assert.deepEqual(report.candidates[0].observerCandidate, { realCID: 999, expectedGcid: 1 });
+  assert.equal(diagnostic(report).candidateChecks[0].rankingCidBinding, 'GCID');
+});
+test('a changed account behind the same ranked username discards the portfolio', async () => {
+  let profiles = 0;
+  const s = setup({ handler: u => u.pathname.endsWith('/people')
+    ? new Response(JSON.stringify({ users: [{ realCID: ++profiles === 1 ? 999 : 998, gcid: 1, username: 'Trader1' }] })) : undefined });
+  const report = diagnostic(await s.discovery.refresh());
+  assert.equal(report.providerCalls, 5);
+  assert.equal(report.verifiedPublicIdentities, 0);
+  assert.equal(report.publicPortfoliosReadable, 0);
+  assert.equal(report.candidateChecks[0].holdingsReason, 'IDENTITY_CONFIRMATION_FAILED');
 });
 test('successful response with missing pagination or an incorrect page is unusable', async () => {
   for (const pagination of [null, { page: 2, pageSize: 20, hasNext: false, totalItems: 1 }]) {
@@ -179,7 +201,7 @@ for (const [name, reason] of [['OtherTrader', 'RANKING_PROFILE_USERNAME_MISMATCH
 test('a forbidden portfolio is local to its candidate; three independent candidates stay within eleven GETs', async () => {
   const s = setup({ configuration: { verifyCount: 3 }, handler: u => {
     if (u.pathname.endsWith('/rankings')) return new Response(JSON.stringify({ results: [row(1), row(2), row(3)], pagination: { page: 1, pageSize: 20, hasNext: false, totalItems: 3 } }));
-    if (u.pathname.endsWith('/people')) { const id = Number(u.searchParams.get('cidList')); return new Response(JSON.stringify({ users: [{ realCID: id, gcid: id + 100, username: `Trader${id}`, isPi: true }] })); }
+    if (u.pathname.endsWith('/people')) { const id = Number(u.searchParams.get('usernames')?.replace(/^Trader/, '')); return new Response(JSON.stringify({ users: [{ realCID: id, gcid: id + 100, username: `Trader${id}`, isPi: true }] })); }
     if (u.pathname.endsWith('/Trader1/portfolio/live')) return new Response('{}', { status: 403 });
   } });
   const r = await s.discovery.refresh(), d = diagnostic(r);

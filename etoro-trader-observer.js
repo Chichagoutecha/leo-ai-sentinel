@@ -22,6 +22,7 @@ function createTraderReadClient({ env = process.env, fetchImpl = global.fetch, c
     async read(kind, selector) {
       const ctx = context(); let source;
       if (kind === 'profile' && model.validId(selector?.realCID)) source = `${ROOT}?cidList=${selector.realCID}`;
+      else if (kind === 'profileByUsername' && safeUsername(selector?.username)) source = `${ROOT}?${new URLSearchParams({ usernames: selector.username })}`;
       else if (kind === 'rankings' && rankingsSelector(selector)) source = `${RANKINGS}?${new URLSearchParams({ period: selector.period, page: selector.page, pageSize: selector.pageSize, ...(selector.popularInvestor === true ? { popularInvestor: 'true' } : {}) })}`;
       else if (['portfolio', 'performance', 'tradeStats'].includes(kind) && safeUsername(selector?.username)) source = `${ROOT}/${encodeURIComponent(selector.username)}/${({ portfolio: 'portfolio/live', performance: 'gain', tradeStats: 'tradeinfo?period=LastTwoYears' })[kind]}`;
       else return { status: 'UNAVAILABLE', reason: 'READ_NOT_ALLOWLISTED', source: null, data: null };
