@@ -138,14 +138,15 @@ function reviewVirtualArm({ book, exposure, quote, side, asset, instrumentId, co
     vetoes.push(reviewed?.code && /^[A-Z0-9_]{1,80}$/.test(reviewed.code) ? reviewed.code : 'VIRTUAL_ARM_RISK_REVIEW_UNAVAILABLE_OR_VETOED');
   }
   if (vetoes.length || side === 'SELL') return { vetoes, amount: null, estimatedEntryCostPct: null };
-  const amount = Math.min(number(control.finalDecision.amount_usd) ?? 0, number(reviewed.finalDecision.amount_usd) ?? 0);
+  const amount = number(reviewed.finalDecision.amount_usd) ?? 0;
+  const commonLimit = number(control.finalDecision.amount_usd) ?? 0;
   const simulatedPrice = quote.ask * (1 + assumptions.slippageBps / 10000);
   const estimatedEntryCostPct = (1 + assumptions.feePct / 100 - quote.mid / simulatedPrice) * 100;
   const equity = book.snapshots.at(-1).equity;
   const outlay = amount * (1 + assumptions.feePct / 100);
   const markedEntry = amount * quote.mid / simulatedPrice;
   const afterEquity = equity - outlay + markedEntry;
-  if (amount <= 0 || amount > policy.maxOrderUsd) vetoes.push('VIRTUAL_ORDER_SIZE_OUTSIDE_POLICY');
+  if (amount <= 0 || amount > commonLimit || amount > policy.maxOrderUsd) vetoes.push('VIRTUAL_ORDER_SIZE_OUTSIDE_POLICY');
   if (estimatedEntryCostPct > policy.maxCostPct) vetoes.push('ESTIMATED_VIRTUAL_ENTRY_COST_LIMIT');
   if (afterEquity <= 0 || book.cash - outlay < afterEquity * policy.minCashReservePct / 100) vetoes.push('VIRTUAL_CASH_RESERVE_LIMIT');
   const afterExposure = (exposure.owned.knownValuesByInstrument[instrumentId] ?? 0) + markedEntry;

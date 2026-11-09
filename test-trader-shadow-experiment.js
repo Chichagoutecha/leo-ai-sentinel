@@ -111,6 +111,9 @@ test('confirmed openings do not override LEO, arm risk, trade scope, or expensiv
   for (const [change, code] of [
     [input => { input.control.approved = false; }, 'LEO_ANALYSIS_OR_RISK_VETO'],
     [input => { input.reviewVirtualArm = () => ({ approved: false, code: 'ALLOCATION_ENTRY_VETO' }); }, 'ALLOCATION_ENTRY_VETO'],
+    [input => { input.control.finalDecision.amount_usd = 8; input.reviewVirtualArm = () => ({
+      approved: true, finalDecision: { decision: 'BUY', asset: 'AAPL', amount_usd: 10 }
+    }); }, 'VIRTUAL_ORDER_SIZE_OUTSIDE_POLICY'],
     [input => { input.allowedEntry = false; }, 'INSTRUMENT_NOT_ALLOWED_BY_LEO'],
     [input => { input.quotes.AAPL.ask = 11; }, 'ESTIMATED_VIRTUAL_ENTRY_COST_LIMIT'],
     [input => { input.template.cash = 10; }, 'VIRTUAL_CASH_RESERVE_LIMIT'],
