@@ -55,16 +55,16 @@ Depuis le Shell du service disposant déjà des clés, les commandes suivantes e
   leo_trader_audit_dir=$(mktemp -d /tmp/leo-traders.XXXXXX)
   for fichier in etoro-trader-discovery.js etoro-trader-observer.js trader-observer.js; do
     curl --fail --silent --show-error --max-time 20 --proto '=https' \
-      "https://raw.githubusercontent.com/Chichagoutecha/leo-ai-sentinel/f4b171a2cd2a66a4e73537180be0b873e58c3525/$fichier" \
+      "https://raw.githubusercontent.com/Chichagoutecha/leo-ai-sentinel/d0acab72fc0630f769053732e89d87d4a4c1831a/$fichier" \
       -o "$leo_trader_audit_dir/$fichier"
   done
-  node "$leo_trader_audit_dir/etoro-trader-discovery.js" --read-only-audit
+  node "$leo_trader_audit_dir/etoro-trader-discovery.js" --verify-observer-read
 )
 ```
 
 Le bloc s'arrête automatiquement si un téléchargement échoue. Ne pas répéter un 401/403. Le programme ne fait aucune répétition automatique, borne chaque lecture à huit secondes et réutilise le client de lecture avec son budget de vingt requêtes par minute. Un 429 arrête la collecte. Les requêtes de diagnostic sont supplémentaires à celles du serveur déjà actif : la limite locale ne coordonne pas les autres processus. Exécuter une seule fois, pas dans une boucle ni une tâche planifiée.
 
-Par défaut, `node etoro-trader-discovery.js` affiche seulement les instructions : **zéro requête**. Seul `--read-only-audit` déclenche la collecte. Les autres arguments sont refusés. L'import n'a aucun effet réseau.
+Par défaut, `node etoro-trader-discovery.js` affiche seulement les instructions : **zéro requête**. `--read-only-audit` vérifie la découverte en onze lectures au maximum. `--verify-observer-read` ajoute jusqu’à trois lectures pour tester le parcours de scan de l’observateur avec le premier candidat confirmé dont le portefeuille est lisible. L’essai conserve son état en mémoire et partage le quota du diagnostic. Les autres arguments sont refusés. L'import n'a aucun effet réseau.
 
 Le rapport v3 donne les motifs précis de rejet des lignes, la lecture du profil et sa correspondance avec le candidat séparément, ainsi que les motifs d'indisponibilité du portefeuille par alias (`CANDIDATE_1`, etc.). Une différence de casse dans le pseudonyme n'est pas assimilée sans preuve à une identité certaine. Le portefeuille n'est pas demandé si le profil contredit le pseudonyme du classement. Un 403 n'est pas répété pour le même candidat ; il n'interdit pas de vérifier un autre candidat distinct. Les 401 et 429 arrêtent la suite. Les identifiants de requête sont des UUID aléatoires de corrélation pour le support, jamais dérivés des secrets.
 
@@ -88,7 +88,7 @@ Conclusion : **BLOCKED pour le réel**, en attente des lectures authentifiées e
 
 ## Vérifications réalisées
 
-- `npm test` : **403 tests réussis**, aucun échec, dont 33 tests de découverte et 26 tests existants de l'observateur.
+- `npm test` : **405 tests réussis**, aucun échec, dont 35 tests de découverte et 26 tests existants de l'observateur.
 - `npm run check` : réussite de la vérification syntaxique.
 - `git diff --check` : réussite.
 - Réponses simulées : fenêtres et pages, données manquantes, doublons et contradictions, changement de pseudonyme, CID ambigu, HTTP 200 sans identité valide, 401/403/429, secrets dans les corps/erreurs, rotation des clés, restauration, expiration, concurrence, décompte des tentatives réseau et refus de toute requête hors liste.
@@ -101,4 +101,6 @@ Diagnostic v1 communiqué par l’opérateur, le 6 novembre 2026 à **17 h 07 (P
 
 Le v1 interrogeait le classement général (plusieurs millions de résultats rapportés), sans le filtre Popular Investor. Le v2 corrige ce périmètre, explique les correspondances et peut vérifier trois candidats distincts. Il ne prétend pas corriger côté client un refus eToro et n’élargit aucune permission. Le v2 a été exécuté sur Render le 9 novembre 2026 à 16 h 34 (Paris). Les deux classements filtrés ont répondu HTTP 200 et annoncé 596 résultats chacun. Vingt candidats ont été collectés. Les trois profils lus par CID ont répondu HTTP 200 avec un pseudonyme différent de celui du classement. Aucun portefeuille n’a été demandé lors de cet essai.
 
-Le v3 utilise la recherche par pseudonyme documentée pour résoudre ces divergences. Il indique quel identifiant du profil correspond au classement, sans divulguer sa valeur. Le résultat authentifié du v3 reste à obtenir sur Render. Le CLI demeure isolé du service et du trading.
+Le v3 utilise la recherche par pseudonyme documentée pour résoudre ces divergences. Il indique quel identifiant du profil correspond au classement, sans divulguer sa valeur. Le v3 a été exécuté sur Render le 9 novembre 2026 à 16 h 40 (Paris). Les trois profils contrôlés correspondaient au GCID du classement et étaient déclarés Popular Investors. Un portefeuille a répondu HTTP 200 avec la structure attendue. L’observateur a signalé sa limite locale de positions. Les deux autres réponses étaient HTTP 403, avec une cause non établie.
+
+Le v4 rapporte les nombres de lignes reçues et retenues. Le plafond local reste de 100 positions par portefeuille normalisé. Les comptages ne prouvent pas que la réponse du fournisseur est exhaustive. L’essai sur le parcours normal de l’observateur reste à exécuter sur Render. Le CLI demeure isolé du service et du trading.
