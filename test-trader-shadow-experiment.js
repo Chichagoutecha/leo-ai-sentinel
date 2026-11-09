@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const lab = require('./trader-shadow-experiment');
 const { virtualFill } = require('./paper-shadow-execution');
 const { calculateSizingHeadroom } = require('./trader-exposure-link');
+const { normalizePortfolio } = require('./trader-observer');
 const START = Date.parse('2026-11-02T12:00:00Z'), DAY = 86400000, iso = n => new Date(n).toISOString();
 function fixture(now = START, n = 1) {
   const observationId = n.toString(16).padStart(64, '0');
@@ -44,6 +45,95 @@ test('both arms share real LEO ideas, market windows and common constraints; sou
   assert.equal(b.state.records[1].arms.strategy.final, 'BUY');
   assert.equal(b.state.records[1].observations[0].publishedAt, null);
   assert.equal(b.state.records[1].observations[0].receivedAt, iso(START + 120000));
+});
+function recentOpeningFixture() {
+  const input = fixture();
+  input.recentOpenings = true;
+  input.allowedEntry = true;
+  input.reviewVirtualArm = () => input.control;
+  input.template.positions = {};
+  input.costs = {};
+  input.eligibility = {};
+  input.constraintsEvidence = null;
+  const first = input.observerView.traders[0];
+  first.snapshot.portfolio = normalizePortfolio({ positions: [{
+    positionId: 100, instrumentId: 1, isBuy: true, leverage: 1, openTimestamp: iso(START - DAY)
+  }], socialTrades: [] });
+  const second = structuredClone(first);
+  second.realCID = second.snapshot.realCID = second.snapshot.identity.realCID = 9;
+  second.snapshot.identity.gcid = 10;
+  second.observationId = 'a'.repeat(64);
+  input.observerView.traders.push(second);
+  input.advisorySeed = lab.emptyState().advisoryState;
+  for (const trader of input.observerView.traders) {
+    input.advisorySeed.roster[trader.realCID] = { traderId: trader.realCID, gcid: trader.snapshot.identity.gcid,
+      state: 'SELECTED_CONTEXT_ONLY', since: iso(START - DAY), qualifyingIds: [trader.observationId], qualificationStartedAt: iso(START - DAY) };
+  }
+  return input;
+}
+
+test('two recent direct long openings confirm a virtual LEO entry with simulated costs only', () => {
+  const r = lab.runCycle(recentOpeningFixture()).state.records[0];
+  assert.equal(r.recentOpeningSignal.status, 'CONFIRMED_VISIBLE_OPENINGS');
+  assert.equal(r.recentOpeningSignal.distinctTraders, 2);
+  assert.equal(r.recentOpeningSignal.transactionProven, false);
+  assert.equal(r.arms.strategy.final, 'BUY');
+  assert.equal(r.arms.baseline.final, 'BUY');
+  assert.ok(r.arms.strategy.estimatedEntryCostPct > 0);
+  assert.equal(r.arms.strategy.simulation.executionAttempted, false);
+});
+
+test('copied, stale, future or duplicate-account openings cannot confirm the strategy arm', () => {
+  const invalid = [
+    t => { t.snapshot.portfolio.positions[0].container = 'COPY:17'; },
+    t => { t.snapshot.portfolio = normalizePortfolio({ positions: [{
+      positionId: 101, instrumentId: 1, isBuy: true, leverage: 1, openTimestamp: iso(START - DAY), socialTradeId: 17
+    }] }); },
+    t => { t.snapshot.portfolio.positions[0].reportedOpenAt = iso(START - 4 * DAY); },
+    t => { t.snapshot.portfolio.positions[0].reportedOpenAt = iso(START + 1); },
+    t => { t.snapshot.identity.gcid = 8; },
+    t => { t.snapshot.portfolio.positions[0].leverage = 2; },
+    t => { t.snapshot.collectedAt = iso(START - DAY); }
+  ];
+  for (const change of invalid) {
+    const input = recentOpeningFixture();
+    const trader = input.observerView.traders[1];
+    change(trader);
+    input.advisorySeed.roster[trader.realCID].gcid = trader.snapshot.identity.gcid;
+    const r = lab.runCycle(input).state.records[0];
+    assert.equal(r.arms.strategy.final, 'HOLD');
+    assert.equal(r.arms.baseline.final, 'BUY');
+    assert.equal(r.recentOpeningSignal.status, 'UNCONFIRMED');
+  }
+});
+
+test('confirmed openings do not override LEO, arm risk, trade scope, or expensive quotes', () => {
+  for (const [change, code] of [
+    [input => { input.control.approved = false; }, 'LEO_ANALYSIS_OR_RISK_VETO'],
+    [input => { input.reviewVirtualArm = () => ({ approved: false, code: 'ALLOCATION_ENTRY_VETO' }); }, 'ALLOCATION_ENTRY_VETO'],
+    [input => { input.allowedEntry = false; }, 'INSTRUMENT_NOT_ALLOWED_BY_LEO'],
+    [input => { input.quotes.AAPL.ask = 11; }, 'ESTIMATED_VIRTUAL_ENTRY_COST_LIMIT'],
+    [input => { input.template.cash = 10; }, 'VIRTUAL_CASH_RESERVE_LIMIT'],
+    [input => { input.template.seedCoverage.complete = false; }, 'VIRTUAL_EXPOSURE_INCOMPLETE']
+  ]) {
+    const input = recentOpeningFixture();
+    change(input);
+    const r = lab.runCycle(input).state.records[0];
+    assert.equal(r.recentOpeningSignal.status, 'CONFIRMED_VISIBLE_OPENINGS');
+    assert.ok(r.arms.strategy.vetoes.includes(code));
+    assert.ok(r.arms.baseline.vetoes.includes(code));
+  }
+});
+
+test('loss of trader visibility cannot veto an otherwise approved virtual exit', () => {
+  const input = recentOpeningFixture();
+  input.template.positions = fixture().template.positions;
+  input.rawDecision.decision = input.control.finalDecision.decision = 'SELL';
+  input.observerView.traders = [];
+  const r = lab.runCycle(input).state.records[0];
+  assert.equal(r.recentOpeningSignal, undefined);
+  assert.equal(r.arms.strategy.final, 'SELL');
+  assert.equal(r.arms.baseline.final, 'SELL');
 });
 test('hard LEO veto and unknown costs block both arms rather than giving the baseline looser constraints', () => {
   for (const mutate of [f => { f.control.approved = false; }, f => { f.costs = {}; }, f => { f.pendingComplete = false; }, f => { f.constraintsEvidence = null; }]) {
@@ -218,10 +308,16 @@ test('actual scan hook and SHADOW final dispatcher share virtual accounting and 
     const hook = app.recordTraderShadowScan({ realPortfolio: { ok: true, accountEnvironment: 'REAL', fetchedAt: iso(now), data: { clientPortfolio: { positions: [], mirrors: [], orders: [], ordersForOpen: [] } } }, marketSummary },
       { decision: 'BUY', asset: 'SPY', amount_usd: 10 }, control, null, 'actual-scan-0001', now);
     assert.equal(hook.status, 'RECORDED_VIRTUAL_PAIR');
+    const recentHook = app.recordTraderShadowScan({ traderRecentOpeningsShadow: true, realPortfolio: { ok: true,
+      accountEnvironment: 'REAL', fetchedAt: iso(now), data: { clientPortfolio: { positions: [], mirrors: [], orders: [], ordersForOpen: [] } } }, marketSummary },
+    { decision: 'BUY', asset: 'SPY', amount_usd: 10 }, { approved: false, finalDecision: { decision: 'HOLD' } }, null, 'actual-scan-0002', now);
+    assert.equal(recentHook.status, 'RECORDED_VIRTUAL_PAIR');
+    assert.equal(app.runtimeState.traderRecentOpeningsExperiment.records[0].arms.strategy.final, 'HOLD');
     const buy = await app.executeControlledDecision(control, md); assert.equal(buy.simulated, true);
     const sell = await app.executeControlledDecision({ approved: true, finalDecision: { decision: 'SELL', asset: 'SPY' } }, md); assert.equal(sell.simulated, true);
     assert.equal(calls, 0); assert.equal(app.runtimeState.traderShadowExperiment.records.length, 1);
     const savedState = app.buildPersistentState({ compact: false }); assert.equal(savedState.traderShadowExperiment.version, 1);
+    assert.equal(savedState.traderRecentOpeningsExperiment.protocol.spec.entrySignal.minimumDistinctTraders, 2);
     assert.equal(app.app._router.stack.some(r => r.route?.path === '/trader-shadow-status'), true);
   } finally { global.fetch = original; global.setTimeout = timer; for (const k of keys) if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
 });

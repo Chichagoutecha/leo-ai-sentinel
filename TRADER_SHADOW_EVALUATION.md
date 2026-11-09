@@ -18,6 +18,14 @@ Le capital de départ provient du portefeuille PAPER, distinct des avoirs réels
 
 La sélection consultative antérieure peut être reprise au premier scan uniquement si son état et son historique ne sont pas futurs. L'expérience fait ensuite évoluer sa propre sélection avec la même politique figée ; une consultation manuelle ne réécrit pas une sélection expérimentale passée.
 
+### Filtre expérimental des ouvertures récentes
+
+En mode `SHADOW`, `TRADER_RECENT_OPENINGS_SHADOW_ENABLED=true` démarre une expérience séparée du protocole précédent. Elle reprend une idée de LEO générée sans contexte traders. La référence applique les contrôles de LEO. La variante exige en plus deux GCID distincts parmi les traders déjà suivis et qualifiés pour l’observation, chacun avec une position directe, longue, sans levier et datée des 72 dernières heures. Une exposition copiée, une date future ou une collecte périmée ne compte pas. Les seuils de deux comptes et de 72 heures sont des paramètres du protocole initial, fixés avant toute mesure.
+
+Chaque portefeuille virtuel repasse par le contrôleur de risque avec ses propres positions et liquidités. La simulation vérifie le prix, la liste d’instruments autorisés, le plafond de taille, la réserve de cash et le poids maximal par instrument. Les coûts d’entrée estimés combinent le spread observé, le glissement et les frais configurés pour SHADOW. Les frais réels restent inconnus. Les sorties virtuelles suivent les contrôles de LEO et sont évaluées même en l’absence de signal traders.
+
+Les résultats se consultent via `/trader-shadow-status` et `/trader-shadow-decisions`. Le signal décrit des positions encore visibles et leur date d’ouverture déclarée. Le nombre de comptes ne mesure pas l’indépendance de leurs décisions. Avec un seul portefeuille lisible, la variante attend un deuxième compte qualifié. Le classement et l’inscription des traders restent des étapes distinctes.
+
 ## Preuves figées et horloges
 
 Chaque cycle possède un identifiant stable, un cutoff de décision finale et un enregistrement contenant :

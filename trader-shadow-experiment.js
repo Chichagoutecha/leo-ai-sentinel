@@ -9,6 +9,7 @@ const number = v => typeof v === 'number' && Number.isFinite(v) ? v : null;
 const stamp = v => typeof v === 'string' && Number.isFinite(Date.parse(v)) ? Date.parse(v) : null;
 const iso = v => new Date(v).toISOString();
 const SOURCE_VETOES = new Set(['NO_SELECTED_CURRENT_SOURCE_FOR_INSTRUMENT', 'CONFLICTING_OR_UNKNOWN_SOURCE_DIRECTIONS', 'SOURCE_CONTEXT_OPPOSES_LONG_ENTRY', 'SOURCE_LEVERAGE_UNKNOWN_OR_NOT_ONE', 'TRADER_SOURCE_UNVERIFIED_OR_STALE']);
+const RECENT_OPENINGS = Object.freeze({ version: 'recent-direct-openings-v1', windowHours: 72, minimumDistinctTraders: 2 });
 const DEFAULTS = Object.freeze({ designDays: 30, evaluationDays: 90, minimumEvaluationDays: 60, minimumDecisions: 100, minimumFullClosures: 20, maxRecords: 120 });
 function protocolConfig(overrides = {}) {
   if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides) || Object.keys(overrides).some(k => !(k in DEFAULTS))) throw Error('INVALID_EXPERIMENT_PROTOCOL');
@@ -92,6 +93,66 @@ function virtualExposure(book, universe, quotes, now, pendingComplete) {
   return { generatedAt: iso(now), owned: { scope: 'VIRTUAL_EXPERIMENT_ONLY', rows, knownValuesByInstrument: values, fresh: complete,
     coverage: complete ? 'COMPLETE' : 'INCOMPLETE', unreconstructedRisk: [] }, pending: { status: pendingComplete ? 'COMPLETE_KNOWN_BUY_UPPER_BOUND' : 'INCOMPLETE', knownBuyUpperBoundByInstrument: {} }, dimensions: { status: 'UNAVAILABLE_WITHOUT_LOOK_THROUGH' } };
 }
+
+function recentOpeningSignal({ view, report, instrumentId, now, policy }) {
+  const selected = new Set(report.selection.filter(row => row.state === 'SELECTED_CONTEXT_ONLY').map(row => row.traderId));
+  const current = new Set(report.assessments.filter(row => row.usableForContext).map(row => row.traderId));
+  const sources = new Map();
+  let contradictoryDirection = false;
+  for (const trader of view.traders) {
+    if (!selected.has(trader.realCID) || !current.has(trader.realCID)) continue;
+    const snapshot = trader.snapshot;
+    const collected = stamp(snapshot.collectedAt);
+    const received = stamp(snapshot.receivedAt || snapshot.collectedAt);
+    if (collected === null || received === null || received < collected || received > now) continue;
+    const direct = snapshot.portfolio.positions.filter(row => row.container === 'DIRECT' && row.copyLinked === false && row.instrumentId === instrumentId);
+    if (direct.some(row => row.isBuy !== true || row.leverage !== 1)) contradictoryDirection = true;
+    const opened = direct
+      .filter(row => row.isBuy === true && row.leverage === 1)
+      .map(row => stamp(row.reportedOpenAt))
+      .filter(at => at !== null && at <= collected && at >= now - policy.windowHours * 3600000)
+      .sort((a, b) => b - a)[0];
+    if (opened === undefined || sources.has(snapshot.identity.gcid)) continue;
+    sources.set(snapshot.identity.gcid, {
+      traderId: trader.realCID, observationId: trader.observationId, reportedOpenAt: iso(opened),
+      receivedAt: iso(received)
+    });
+  }
+  const veto = contradictoryDirection ? 'CONTRADICTORY_VISIBLE_DIRECT_DIRECTION_OR_LEVERAGE'
+    : sources.size < policy.minimumDistinctTraders ? 'INSUFFICIENT_DISTINCT_RECENT_OPENINGS' : null;
+  return { ...policy, status: veto ? 'UNCONFIRMED' : 'CONFIRMED_VISIBLE_OPENINGS', veto,
+    distinctTraders: sources.size, traderSources: [...sources.values()].sort((a, b) => a.traderId - b.traderId),
+    evidence: 'PROVIDER_REPORTED_OPEN_TIME_OF_VISIBLE_POSITIONS', independence: 'UNVERIFIED', transactionProven: false };
+}
+
+function reviewVirtualArm({ book, exposure, quote, side, asset, instrumentId, control, review, allowedEntry, policy, assumptions }) {
+  const vetoes = [];
+  if (control.approved !== true || control.finalDecision?.decision !== side || control.finalDecision?.asset !== asset) vetoes.push('LEO_ANALYSIS_OR_RISK_VETO');
+  if (!instrumentId) vetoes.push('INSTRUMENT_NOT_IDENTIFIED');
+  if (quote?.priceStatus !== 'FRESH' || number(quote.bid) === null || number(quote.ask) === null ||
+      quote.bid <= 0 || quote.ask < quote.bid || quote.mid < quote.bid || quote.mid > quote.ask) vetoes.push('QUOTE_MISSING_STALE_OR_INCOMPATIBLE');
+  if (side === 'BUY' && allowedEntry !== true) vetoes.push('INSTRUMENT_NOT_ALLOWED_BY_LEO');
+  if (side === 'BUY' && exposure.owned.coverage !== 'COMPLETE') vetoes.push('VIRTUAL_EXPOSURE_INCOMPLETE');
+  const reviewed = vetoes.length === 0 && typeof review === 'function' ? review(structuredClone(book)) : null;
+  if (vetoes.length === 0 && (reviewed?.approved !== true || reviewed.finalDecision?.decision !== side || reviewed.finalDecision?.asset !== asset)) {
+    vetoes.push(reviewed?.code && /^[A-Z0-9_]{1,80}$/.test(reviewed.code) ? reviewed.code : 'VIRTUAL_ARM_RISK_REVIEW_UNAVAILABLE_OR_VETOED');
+  }
+  if (vetoes.length || side === 'SELL') return { vetoes, amount: null, estimatedEntryCostPct: null };
+  const amount = Math.min(number(control.finalDecision.amount_usd) ?? 0, number(reviewed.finalDecision.amount_usd) ?? 0);
+  const simulatedPrice = quote.ask * (1 + assumptions.slippageBps / 10000);
+  const estimatedEntryCostPct = (1 + assumptions.feePct / 100 - quote.mid / simulatedPrice) * 100;
+  const equity = book.snapshots.at(-1).equity;
+  const outlay = amount * (1 + assumptions.feePct / 100);
+  const markedEntry = amount * quote.mid / simulatedPrice;
+  const afterEquity = equity - outlay + markedEntry;
+  if (amount <= 0 || amount > policy.maxOrderUsd) vetoes.push('VIRTUAL_ORDER_SIZE_OUTSIDE_POLICY');
+  if (estimatedEntryCostPct > policy.maxCostPct) vetoes.push('ESTIMATED_VIRTUAL_ENTRY_COST_LIMIT');
+  if (afterEquity <= 0 || book.cash - outlay < afterEquity * policy.minCashReservePct / 100) vetoes.push('VIRTUAL_CASH_RESERVE_LIMIT');
+  const afterExposure = (exposure.owned.knownValuesByInstrument[instrumentId] ?? 0) + markedEntry;
+  if (afterEquity <= 0 || afterExposure > afterEquity * policy.maxInstrumentWeightPct / 100) vetoes.push('VIRTUAL_INSTRUMENT_WEIGHT_LIMIT');
+  return { vetoes, amount, estimatedEntryCostPct };
+}
+
 function runCycle(input = {}) {
   const { now, mode, rawDecision = {}, control = {}, universe = [], template, costs = {}, eligibility = {}, realExposure = null, constraintsEvidence = null,
     extraAiCostUsd = null, experimentOverrides = {}, advisoryOverrides = {}, assumptions = {}, flow = null } = input;
@@ -101,6 +162,7 @@ function runCycle(input = {}) {
   if (state.disabledReason) return { state, status: 'ARCHIVE_REQUIRED', brokerCalls: 0 };
   const p = protocolConfig(experimentOverrides), a = advisory.config(advisoryOverrides);
   const spec = { experiment: p, advisory: a, assumptions: { feePct: assumptions.feePct, slippageBps: assumptions.slippageBps, benchmarkAsset: assumptions.benchmarkAsset, benchmarkCurrency: assumptions.benchmarkCurrency } };
+  if (input.recentOpenings === true) spec.entrySignal = RECENT_OPENINGS;
   if (number(spec.assumptions.feePct) === null || spec.assumptions.feePct < 0 || number(spec.assumptions.slippageBps) === null || spec.assumptions.slippageBps < 0 || spec.assumptions.slippageBps >= 10000) throw Error('INVALID_SHADOW_COST_ASSUMPTIONS');
   const specId = digest(spec);
   if (!state.protocol && input.advisorySeed) {
@@ -161,6 +223,11 @@ function runCycle(input = {}) {
     sharedLeoAiCostUsd: number(extraAiCostUsd), extraInfrastructureCostUsd: null, arms: {} };
   const receiptFuture = [costs[instrumentId]?.asOf, costs[instrumentId]?.receivedAt, eligibility[instrumentId]?.asOf, eligibility[instrumentId]?.receivedAt, constraintsEvidence?.asOf, constraintsEvidence?.receivedAt].some(t => stamp(t) !== null && stamp(t) > now);
   let nextAdvisoryState;
+  const selection = spec.entrySignal ? advisory.evaluate({ state: state.advisoryState,
+    observerView: observed.view, observerState: observed.state, overrides: advisoryOverrides, now }) : null;
+  if (selection && side === 'BUY' && instrumentId) frozen.recentOpeningSignal = recentOpeningSignal({
+    view: observed.view, report: selection.report, instrumentId, now, policy: spec.entrySignal
+  });
   for (const arm of ['strategy', 'baseline']) {
     const book = pair[arm], exposure = virtualExposure(book, universe, quotes, now, input.pendingComplete === true);
     const target = exposure.owned.rows.find(r => r.instrumentId === instrumentId);
@@ -170,19 +237,29 @@ function runCycle(input = {}) {
       hardVeto: control.approved !== true, referencePrice: q?.mid ?? null, positionId: target?.positionId || null, exitExplicit: input.exitExplicit === true }] : [];
     const sized = constraintsEvidence?.lookThroughCoverage === 'COMPLETE' && constraintsEvidence?.virtualOnly === true && exposure.owned.coverage === 'COMPLETE' ? {
       ...constraintsEvidence, equityUsd: book.snapshots.at(-1).equity, availableCashUsd: book.cash, sourceType: 'VIRTUAL_SHADOW_LEDGER', sourceUrl: 'local:shadow-ledger' } : null;
-    const result = advisory.evaluate({ state: state.advisoryState, observerView: observed.view, observerState: observed.state, ideas, exposure, quotes: instrumentId ? { [instrumentId]: { instrumentId, mid: q?.mid ?? null, asOf: q?.date, currency: 'USD' } } : {},
+    const result = selection || advisory.evaluate({ state: state.advisoryState, observerView: observed.view, observerState: observed.state, ideas, exposure, quotes: instrumentId ? { [instrumentId]: { instrumentId, mid: q?.mid ?? null, asOf: q?.date, currency: 'USD' } } : {},
       costs, eligibility, sizingEvidence: sized, overrides: advisoryOverrides, now });
-    if (arm === 'strategy') nextAdvisoryState = result.state;
-    frozen.selection = structuredClone(result.report.selection);
+    if (arm === 'strategy') {
+      nextAdvisoryState = result.state;
+      frozen.selection = structuredClone(result.report.selection);
+    }
     const proposal = result.report.proposals[0];
     let vetoes = proposal ? proposal.vetoes.filter(v => arm === 'strategy' || !SOURCE_VETOES.has(v)) : side === 'HOLD' ? ['LEO_HOLD'] : ['INSTRUMENT_NOT_IDENTIFIED'];
+    const virtualReview = selection && side !== 'HOLD' ? reviewVirtualArm({
+      book, exposure, quote: q, side, asset: symbol, instrumentId, control, review: input.reviewVirtualArm,
+      allowedEntry: input.allowedEntry, policy: a, assumptions
+    }) : null;
+    if (virtualReview) {
+      vetoes = virtualReview.vetoes;
+      if (arm === 'strategy' && side === 'BUY' && frozen.recentOpeningSignal?.veto) vetoes = [...vetoes, frozen.recentOpeningSignal.veto];
+    }
     if (receiptFuture) vetoes = [...vetoes, 'EVIDENCE_RECEIVED_AFTER_DECISION'];
     // Cost/eligibility evidence refers to an intended size: each arm must bind it to its own size.
-    const units = target ? (input.exitExplicit === true ? target.units : target.units * a.reductionFraction) : null;
-    const draft = proposal?.draft || (side === 'BUY' && number(ideas[0]?.amountUsd) !== null && ideas[0].amountUsd > 0 ? { amount: Math.min(a.maxOrderUsd, ideas[0].amountUsd) } : null);
+    const units = target ? (selection || input.exitExplicit === true ? target.units : target.units * a.reductionFraction) : null;
+    const draft = virtualReview ? { amount: virtualReview.amount } : proposal?.draft || (side === 'BUY' && number(ideas[0]?.amountUsd) !== null && ideas[0].amountUsd > 0 ? { amount: Math.min(a.maxOrderUsd, ideas[0].amountUsd) } : null);
     const finalSide = vetoes.length ? 'HOLD' : side;
     const fill = finalSide !== 'HOLD' ? virtualFill(book, { asset: symbol, side, amount: draft?.amount, units: side === 'SELL' ? units : undefined }, q,
-      { now, orderId: digest({ cutoffId, arm }), feePct: assumptions.feePct, slippageBps: assumptions.slippageBps, tradable: q?.eligibleForTrade === true, allowReinforcement: true }) : { paper: book, result: { skipped: true, reason: 'VETO_OR_HOLD', simulated: true, executionAttempted: false } };
+      { now, orderId: digest({ cutoffId, arm }), feePct: assumptions.feePct, slippageBps: assumptions.slippageBps, tradable: q?.eligibleForTrade === true, allowReinforcement: !selection }) : { paper: book, result: { skipped: true, reason: 'VETO_OR_HOLD', simulated: true, executionAttempted: false } };
     pair[arm] = fill.paper;
     if (fill.result.ok && side === 'SELL') {
       if (fill.result.fullyClosed) pair.fullClosures[arm]++;
@@ -194,6 +271,7 @@ function runCycle(input = {}) {
       exposureBefore: { virtualOnly: true, valuesByInstrument: exposure.owned.knownValuesByInstrument, coverage: exposure.owned.coverage, pendingStatus: exposure.pending.status },
       lookThroughCoverage: constraintsEvidence?.lookThroughCoverage || 'UNAVAILABLE',
       final: fill.result.ok ? side : 'HOLD', vetoes: [...new Set(vetoes)].sort(), simulation: structuredClone(fill.result) };
+    if (virtualReview) frozen.arms[arm].estimatedEntryCostPct = virtualReview.estimatedEntryCostPct;
   }
   state.advisoryState = nextAdvisoryState;
   // Paired flows are explicit and apply to both arms; an unaffordable withdrawal is rejected for both.

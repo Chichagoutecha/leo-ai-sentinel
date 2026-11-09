@@ -34,9 +34,12 @@ function normalizePortfolio(data) {
   const positions = [], seen = new Map(); let invalid = 0, truncated = false;
   function add(raw, container) {
     if (!raw || !validId(raw.positionId) || !validId(raw.instrumentId)) { invalid++; return; }
+    const links = [raw.socialTradeId, raw.parentPositionId];
+    const copyLinked = container !== 'DIRECT' || links.some(validId) ? true
+      : links.every(value => value == null || value === 0) ? false : null;
     const row = { key: `${container}:${raw.positionId}`, container, positionId: raw.positionId, instrumentId: raw.instrumentId,
       isBuy: typeof raw.isBuy === 'boolean' ? raw.isBuy : null, reportedOpenAt: date(raw.openTimestamp),
-      openRate: numeric(raw.openRate), leverage: numeric(raw.leverage), investmentPct: numeric(raw.investmentPct), units: null };
+      openRate: numeric(raw.openRate), leverage: numeric(raw.leverage), investmentPct: numeric(raw.investmentPct), units: null, copyLinked };
     if (seen.has(row.key)) { if (canonical(seen.get(row.key)) !== canonical(row)) { invalid++; const index = positions.findIndex(p => p.key === row.key); if (index >= 0) positions.splice(index, 1); } return; }
     seen.set(row.key, row);
     if (positions.length >= 100) { truncated = true; return; }

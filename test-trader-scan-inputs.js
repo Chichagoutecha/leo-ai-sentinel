@@ -136,9 +136,10 @@ test('ordinary scan collects before analysis and carries the same input to decis
     runtimeState: { traderAdvisoryState: data.options.state, traderObserver: data.options.observerState },
     getPortfolio: async () => ({}), validatePortfolioResponse: () => ({ ok: true }), extractPortfolioSummary: () => ({ uniqueOpenAssets: [] }),
     getMarketRates: async () => ({ normalized: { ratesByAsset: data.input.quotes }, trendSummary: {} }), recordEquitySnapshot() {},
-    buildLivePerformanceReport: noOp, scheduleSave() {}, buildUniverse: () => data.input.universe,
+    buildLivePerformanceReport: noOp, ensurePaperPortfolio: noOp, markPaperPortfolio: noOp, paperPortfolioResponse: noOp,
+    scheduleSave() {}, buildUniverse: () => data.input.universe,
     getPreferredNextAssets: () => [{ asset: 'SPY', eligibleForTrade: true }, { asset: 'AAPL', eligibleForTrade: true }],
-    buildDataIntegrityReport: async () => ({}), buildTechnicalAnalysisReport: async options => { events.push('technical'); assert.equal(options.preferredNextAssets[0].asset, events.includes('collect') ? 'AAPL' : 'SPY'); return {}; },
+    buildDataIntegrityReport: async () => ({}), buildTechnicalAnalysisReport: async options => { events.push('technical'); assert.equal(options.preferredNextAssets[0].asset, events.includes('collect') && !sandbox.process.env.TRADER_RECENT_OPENINGS_SHADOW_ENABLED ? 'AAPL' : 'SPY'); return {}; },
     buildMarketRegimeAgent: noOp, buildIntelligenceAnalysisReport: async () => ({}), buildMacroCreditFundamentalRegimeAgent: noOp,
     calculatePaperPerformance: noOp, buildStrategyValidationAgent: noOp, buildRiskSellIntelligenceAgent: noOp, buildAgentCouncil: noOp, buildFoundationAgents: noOp };
   vm.createContext(sandbox); vm.runInContext(block, sandbox);
@@ -151,6 +152,13 @@ test('ordinary scan collects before analysis and carries the same input to decis
   assert.deepEqual(events, ['technical']);
   assert.equal(dashboard.foundationAgents.traderContext, undefined);
   assert.equal(sandbox.runtimeState.traderAdvisoryState.history.length, history);
+  sandbox.PAPER_TRADING_ENABLED = true;
+  sandbox.process.env.TRADER_RECENT_OPENINGS_SHADOW_ENABLED = 'true';
+  events.length = 0;
+  const experimental = await sandbox.buildRuntimeContext('manual-scan', { refreshTraders: true });
+  assert.deepEqual(events, ['collect', 'technical']);
+  assert.equal(experimental.traderRecentOpeningsShadow, true);
+  assert.equal(experimental.foundationAgents.traderContext, undefined);
 });
 
 test('the execution bridge derives writer evidence only after a successful durable save', async () => {
