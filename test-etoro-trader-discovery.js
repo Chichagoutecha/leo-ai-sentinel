@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const { createTraderReadClient, RANKINGS } = require('./etoro-trader-observer');
 const { createDiscovery, diagnostic, combine, options } = require('./etoro-trader-discovery');
+const { research, screenAnnual } = require('./trader-allocation-research');
 const AT = Date.parse('2026-11-06T15:30:00Z');
 const row = (cid = 1, extra = {}) => ({ cid, username: `Trader${cid}`, type: 'trader', riskScore: 4,
   gain: 30, annualizedReturn: 12, firstActivity: '2020-01-01T00:00:00Z', lastActivity: '2026-11-05T00:00:00Z', ...extra });
@@ -22,6 +23,108 @@ function setup({ configuration, handler, env: overrides, verifyObserver } = {}) 
   const discovery = createDiscovery({ env, client, clock: () => now, configuration, getState: () => state, verifyObserver });
   return { discovery, calls, state, env, client, advance: ms => { now += ms; } };
 }
+test('allocation research compares common closed days using only five allowlisted GETs', async () => {
+  const holdings = (...instrumentIds) => instrumentIds.map(instrumentId => ({ instrumentId, valuePct: 0.2 }));
+  const day = (date, ...ids) => ({ date, assets: holdings(...ids) });
+  const s = setup({ handler: u => {
+    const username = u.pathname.split('/')[4];
+    assert.equal(u.origin, 'https://public-api.etoro.com');
+    assert.equal(u.pathname, `/api/v2/portfolios/${username}/assets/history`);
+    assert.equal(u.search, '?period=CurrMonth&count=7');
+    if (username === 'WildNico') return new Response('SECRET_ERROR', { status: 403 });
+    const rows = {
+      tintinmelo75: [day('2026-11-05', 1, 2), day('2026-11-06', 3), day('2026-11-07', 3)],
+      Cleonfe: [day('2026-11-05', 1), day('2026-11-06', 3), day('2026-11-07', 3)],
+      HaoNing: [day('2026-11-05', 2), day('2026-11-05', 3)],
+      IsraMX: [day('2026-11-05', 1, 1)]
+    };
+    return Response.json({ userName: username.toLowerCase(), results: rows[username], token: 'SECRET_RESPONSE' });
+  } });
+  const report = await research({ client: s.client, clock: () => AT });
+  assert.equal(report.status, 'OBSERVED_OVERLAP_ONLY');
+  assert.equal(report.calls, 5);
+  assert.deepEqual(report.comparison, { day: '2026-11-05', profiles: ['tintinmelo75', 'Cleonfe'],
+    sharedInstruments: [{ instrumentId: 1, profiles: ['tintinmelo75', 'Cleonfe'] }] });
+  assert.equal(report.executionAllowed, false);
+  assert.equal(report.transactionEvidence, false);
+  assert.equal(report.coverageComplete, null);
+  assert.ok(s.calls.every(c => c.method === 'GET' && c.body === undefined && c.redirect === 'error'));
+  assert.doesNotMatch(JSON.stringify(report), /SECRET/);
+});
+test('allocation research rejects another profile and stops on authorization or quota errors', async () => {
+  for (const status of [401, 429]) {
+    const s = setup({ handler: u => u.pathname.includes('tintinmelo75')
+      ? Response.json({ userName: 'different', results: [{ date: '2026-11-05', assets: [{ instrumentId: 1, valuePct: 0.2 }] }] })
+      : new Response('', { status }) });
+    const report = await research({ client: s.client, clock: () => AT });
+    assert.equal(report.status, 'NO_COMPARABLE_CLOSED_DAY');
+    assert.equal(report.calls, 2);
+    assert.equal(report.profiles[0].reason, 'ALLOCATION_RESPONSE_UNVERIFIED');
+    assert.equal(report.profiles[1].httpStatus, status);
+    assert.equal((await s.client.read('allocationHistory', { username: 'valid', path: '/orders' })).reason, 'READ_NOT_ALLOWLISTED');
+    assert.equal(s.calls.length, 2);
+  }
+});
+
+function annualSetup(gains, { allocStatus = 200, identityChange = false } = {}) {
+  const ids = Object.keys(gains).map(Number);
+  const identities = new Map();
+  return setup({ handler: u => {
+    if (u.pathname.endsWith('/rankings')) return Response.json({ results: ids.map(id => row(id, { firstActivity: '2019-07-01T00:00:00Z' })),
+      pagination: { page: 1, pageSize: 100, hasNext: false, totalItems: ids.length } });
+    const username = u.searchParams.get('usernames') || u.pathname.split('/').find(part => /^Trader\d+$/.test(part));
+    const id = Number(username?.slice(6));
+    if (u.searchParams.has('usernames')) {
+      const seen = identities.get(id) || 0; identities.set(id, seen + 1);
+      return Response.json({ users: [{ realCID: id, gcid: identityChange && seen ? 7000 + id : 1000 + id, username, isPi: true }] });
+    }
+    if (u.pathname.endsWith('/gain')) return Response.json({ yearly: gains[id].map(([year, gain]) => ({ timestamp: `${year}-01-01T00:00:00Z`, gain })) });
+    assert.ok(u.pathname.endsWith('/assets/history'));
+    if (allocStatus !== 200) return new Response('SECRET_ALLOCATION_RESPONSE', { status: allocStatus });
+    return Response.json({ userName: username, results: ['2026-11-04', '2026-11-05'].map(date => ({ date,
+      assets: [{ instrumentId: 1, valuePct: 0.1 }] })) });
+  } });
+}
+
+const positiveFullYears = Array.from({ length: 6 }, (_, i) => [2020 + i, i]);
+test('annual screen checks earlier complete years, rejects gaps and contradictions, ignores partial calendar years', async () => {
+  const s = annualSetup({ 1: [[2019, -99], ...positiveFullYears, [2026, -99]],
+    2: [[2020, -1], ...positiveFullYears.slice(1)], 3: positiveFullYears.filter(([year]) => year !== 2022),
+    4: [...positiveFullYears, [2025, -1]] });
+  const r = await screenAnnual({ client: s.client, clock: () => AT });
+  assert.deepEqual(r.requiredYears, [2021, 2022, 2023, 2024, 2025]);
+  assert.deepEqual(r.candidates, ['Trader1']);
+  assert.deepEqual(r.profiles.map(x => x.status), ['RESEARCH_CANDIDATE', 'NEGATIVE_FULL_YEAR', 'ANNUAL_HISTORY_INCOMPLETE', 'ANNUAL_HISTORY_INVALID']);
+  assert.equal(r.profiles[0].years.length, 6);
+  assert.equal(r.profiles[0].years[0].gainPct, 0);
+  assert.equal(s.calls.filter(x => x.url.includes('/assets/history')).length, 1);
+  assert.equal(r.executionAllowed, false);
+  assert.ok(s.calls.every(x => x.method === 'GET' && x.body === undefined));
+});
+test('annual success alone does not qualify a profile with denied allocations or conflicting identity', async () => {
+  for (const setup of [{ allocStatus: 403 }, { identityChange: true }]) {
+    const s = annualSetup({ 1: positiveFullYears }, setup);
+    const r = await screenAnnual({ client: s.client, clock: () => AT });
+    assert.deepEqual(r.candidates, []);
+    assert.equal(r.profiles[0].status, setup.allocStatus ? 'ANNUAL_PASS_ALLOCATIONS_UNAVAILABLE' : 'IDENTITY_CONFIRMATION_FAILED');
+    assert.doesNotMatch(JSON.stringify(r), /SECRET/);
+  }
+});
+test('annual screen stays inside the shared quota and can resume at the returned offset', async () => {
+  const gains = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [i + 1, positiveFullYears]));
+  const first = annualSetup(gains);
+  const a = await screenAnnual({ client: first.client, clock: () => AT });
+  assert.deepEqual(a.next, { page: 1, offset: 4 });
+  assert.equal(a.calls, 17);
+  const second = annualSetup(gains);
+  const b = await screenAnnual({ ...a.next, client: second.client, clock: () => AT });
+  assert.equal(b.candidates[0], 'Trader5');
+  assert.equal(b.calls, 17);
+  const denied = setup({ handler: () => new Response('', { status: 429 }) });
+  const c = await screenAnnual({ page: 1, offset: 8, client: denied.client, clock: () => AT });
+  assert.equal(c.calls, 1);
+  assert.deepEqual(c.next, { page: 1, offset: 8 });
+});
 test('default CLI imports no startup code and never sends a request', () => {
   const result = spawnSync(process.execPath, ['etoro-trader-discovery.js'], { cwd: __dirname, env: {}, encoding: 'utf8' });
   assert.equal(result.status, 0); assert.equal(JSON.parse(result.stdout).providerCalls, 0);

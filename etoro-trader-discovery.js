@@ -269,7 +269,7 @@ function diagnostic(report) {
     comparison: report.comparison || { status: 'NOT_TESTED' }, selection: report.selection || { status: 'NOT_SELECTED', count: 0 },
     realAccountIdentity: 'NOT_TESTED', realOrderRights: 'NOT_TESTED', limitations: LIMITS };
 }
-module.exports = { VERSION, SOURCE, PERIODS, FIELDS, LIMITS, options, normalizePage, combine, createDiscovery, diagnostic };
+module.exports = { VERSION, SOURCE, PERIODS, FIELDS, LIMITS, options, normalizePage, rankedProfile, combine, createDiscovery, diagnostic };
 if (require.main === module) {
   const args = process.argv.slice(2);
   if (args.length === 1 && ['--read-only-audit', '--verify-observer-read'].includes(args[0])) {

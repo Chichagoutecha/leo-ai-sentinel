@@ -24,6 +24,9 @@ function createTraderReadClient({ env = process.env, fetchImpl = global.fetch, c
       if (kind === 'profile' && model.validId(selector?.realCID)) source = `${ROOT}?cidList=${selector.realCID}`;
       else if (kind === 'profileByUsername' && safeUsername(selector?.username)) source = `${ROOT}?${new URLSearchParams({ usernames: selector.username })}`;
       else if (kind === 'rankings' && rankingsSelector(selector)) source = `${RANKINGS}?${new URLSearchParams({ period: selector.period, page: selector.page, pageSize: selector.pageSize, ...(selector.popularInvestor === true ? { popularInvestor: 'true' } : {}) })}`;
+      else if (kind === 'allocationHistory' && safeUsername(selector?.username) && Object.keys(selector).length === 1) {
+        source = `https://public-api.etoro.com/api/v2/portfolios/${encodeURIComponent(selector.username)}/assets/history?period=CurrMonth&count=7`;
+      }
       else if (['portfolio', 'performance', 'tradeStats'].includes(kind) && safeUsername(selector?.username)) source = `${ROOT}/${encodeURIComponent(selector.username)}/${({ portfolio: 'portfolio/live', performance: 'gain', tradeStats: 'tradeinfo?period=LastTwoYears' })[kind]}`;
       else return { status: 'UNAVAILABLE', reason: 'READ_NOT_ALLOWLISTED', source: null, data: null };
       const base = { source, collectedAt: new Date(clock()).toISOString(), context: ctx, httpStatus: null, requestId: null, requestAttempted: false, effectiveAt: null, delaySeconds: null, missingFields: ['sourceUpdateTimestamp'], pagination: { mode: 'NOT_DOCUMENTED', pagesFetched: 0, complete: null } };
