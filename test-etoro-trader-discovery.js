@@ -66,7 +66,7 @@ test('allocation research rejects another profile and stops on authorization or 
   }
 });
 
-function annualSetup(gains, { allocStatus = 200, identityChange = false, months = {} } = {}) {
+function annualSetup(gains, { allocStatus = 200, identityChange = false, months = {}, mismatch = false } = {}) {
   const ids = Object.keys(gains).map(Number);
   const identities = new Map();
   return setup({ handler: u => {
@@ -78,8 +78,10 @@ function annualSetup(gains, { allocStatus = 200, identityChange = false, months 
       const seen = identities.get(id) || 0; identities.set(id, seen + 1);
       return Response.json({ users: [{ realCID: id, gcid: identityChange && seen ? 7000 + id : 1000 + id, username, isPi: true }] });
     }
-    if (u.pathname.endsWith('/gain')) return Response.json({ yearly: gains[id].map(([year, gain]) => ({ timestamp: `${year}-01-01T00:00:00Z`, gain })),
-      monthly: months[id]?.map(timestamp => ({ timestamp, gain: 0 })) });
+    if (u.pathname.endsWith('/gain/yearly')) return Response.json({ username: mismatch ? 'AnotherUser' : username.toLowerCase(),
+      granularity: 'yearly', gains: gains[id].map(([year, gain]) => ({ date: `${year}-01-01`, gain: gain / 100 })) });
+    if (u.pathname.endsWith('/gain/monthly')) return Response.json({ username, granularity: 'monthly',
+      gains: (months[id] || []).map(date => ({ date, gain: 0 })) });
     assert.ok(u.pathname.endsWith('/assets/history'));
     if (allocStatus !== 200) return new Response('SECRET_ALLOCATION_RESPONSE', { status: allocStatus });
     return Response.json({ userName: username, results: ['2026-11-04', '2026-11-05'].map(date => ({ date,
@@ -88,30 +90,42 @@ function annualSetup(gains, { allocStatus = 200, identityChange = false, months 
 }
 
 const positiveFullYears = Array.from({ length: 6 }, (_, i) => [2020 + i, i]);
-test('annual screen reads performance even when ranking activity is recent or missing', async () => {
-  const s = annualSetup({ 1: [...positiveFullYears, [2026, -99]],
+test('annual screen uses v2 year buckets even when ranking activity is recent or missing', async () => {
+  const s = annualSetup({ 1: positiveFullYears,
     2: [[2019, 1], [2020, -1], ...positiveFullYears.slice(1)], 3: positiveFullYears.filter(([year]) => year !== 2022),
-    4: [...positiveFullYears, [2025, -1]], 5: [[2019, -99], ...positiveFullYears] });
+    4: [...positiveFullYears, [2025, -1]], 5: [[2019, -99], ...positiveFullYears], 6: [...positiveFullYears, [2026, -99]] });
   const r = await screenAnnual({ client: s.client, clock: () => AT });
   assert.deepEqual(r.requiredYears, [2021, 2022, 2023, 2024, 2025]);
   assert.deepEqual(r.candidates, ['Trader1']);
   assert.deepEqual(r.profiles.map(x => x.status), ['RESEARCH_CANDIDATE', 'NEGATIVE_FULL_YEAR', 'ANNUAL_HISTORY_INCOMPLETE',
-    'ANNUAL_HISTORY_INVALID', 'NEGATIVE_FIRST_YEAR_COVERAGE_UNVERIFIED']);
+    'ANNUAL_HISTORY_INVALID', 'NEGATIVE_FIRST_YEAR_COVERAGE_UNVERIFIED', 'ANNUAL_HISTORY_INVALID']);
   assert.equal(r.profiles[0].years.length, 6);
   assert.equal(r.profiles[0].years[0].gainPct, 0);
+  assert.equal(r.profiles[0].years.at(-1).gainPct, 5);
+  assert.ok(s.calls.filter(x => x.url.includes('/gain/')).every(x => /\/gain\/yearly\?minDate=2007-01-01&maxDate=2025-12-31$/.test(x.url)));
   assert.equal(s.calls.filter(x => x.url.includes('/assets/history')).length, 1);
   assert.equal(r.executionAllowed, false);
   assert.ok(s.calls.every(x => x.method === 'GET' && x.body === undefined));
 });
 test('the first reported year counts only with twelve reported months', async () => {
-  const monthRows = Array.from({ length: 12 }, (_, i) => `2021-${String(i + 1).padStart(2, '0')}-01T00:00:00Z`);
+  const monthRows = Array.from({ length: 12 }, (_, i) => `2021-${String(i + 1).padStart(2, '0')}-01`);
   const five = positiveFullYears.slice(1);
-  const s = annualSetup({ 1: five, 2: five, 3: five }, { months: { 1: monthRows, 2: monthRows.slice(1), 3: ['2020-12-01T00:00:00Z', ...monthRows] } });
+  const s = annualSetup({ 1: five, 2: five, 3: five }, { months: { 1: monthRows, 2: monthRows.slice(1), 3: ['2020-12-01', ...monthRows.slice(1)] } });
   const r = await screenAnnual({ client: s.client, clock: () => AT });
   assert.deepEqual(r.candidates, ['Trader1']);
   assert.equal(r.profiles[0].firstCountedYear, 2021);
   assert.equal(r.profiles[1].status, 'ANNUAL_HISTORY_INCOMPLETE');
   assert.equal(r.profiles[2].status, 'ANNUAL_HISTORY_INCOMPLETE');
+  assert.ok(s.calls.filter(x => x.url.includes('/gain/monthly')).every(x => /\?minDate=2021-01-01&maxDate=2021-12-31$/.test(x.url)));
+});
+test('gain-series response must echo the profile and request selectors cannot alter the endpoint', async () => {
+  const s = annualSetup({ 1: positiveFullYears }, { mismatch: true });
+  const r = await screenAnnual({ client: s.client, clock: () => AT });
+  assert.equal(r.profiles[0].status, 'ANNUAL_HISTORY_UNAVAILABLE');
+  assert.deepEqual(r.candidates, []);
+  assert.equal((await s.client.read('yearlyGains', { username: 'Trader1', minDate: '2021-01-01' })).reason, 'READ_NOT_ALLOWLISTED');
+  assert.equal((await s.client.read('monthlyGains', { username: 'Trader1', year: 2026 })).reason, 'READ_NOT_ALLOWLISTED');
+  assert.equal(s.calls.length, 3);
 });
 test('annual success alone does not qualify a profile with denied allocations or conflicting identity', async () => {
   for (const setup of [{ allocStatus: 403 }, { identityChange: true }]) {

@@ -4,6 +4,7 @@ const model = require('./trader-observer');
 const ROOT = 'https://public-api.etoro.com/api/v1/user-info/people';
 const DOCS = 'https://api-portal.etoro.com/api-reference/users-info/';
 const RANKINGS = 'https://public-api.etoro.com/api/v2/portfolios/rankings';
+const FIRST_RESEARCH_YEAR = 2007;
 function rankingsSelector(s) {
   return s && Object.keys(s).every(k => ['period', 'page', 'pageSize', 'popularInvestor'].includes(k)) &&
     (s.popularInvestor === undefined || s.popularInvestor === true) &&
@@ -26,6 +27,12 @@ function createTraderReadClient({ env = process.env, fetchImpl = global.fetch, c
       else if (kind === 'rankings' && rankingsSelector(selector)) source = `${RANKINGS}?${new URLSearchParams({ period: selector.period, page: selector.page, pageSize: selector.pageSize, ...(selector.popularInvestor === true ? { popularInvestor: 'true' } : {}) })}`;
       else if (kind === 'allocationHistory' && safeUsername(selector?.username) && Object.keys(selector).length === 1) {
         source = `https://public-api.etoro.com/api/v2/portfolios/${encodeURIComponent(selector.username)}/assets/history?period=CurrMonth&count=7`;
+      } else if (kind === 'yearlyGains' && safeUsername(selector?.username) && Object.keys(selector).length === 1) {
+        const lastYear = new Date(clock()).getUTCFullYear() - 1;
+        source = `https://public-api.etoro.com/api/v2/portfolios/${encodeURIComponent(selector.username)}/gain/yearly?minDate=${FIRST_RESEARCH_YEAR}-01-01&maxDate=${lastYear}-12-31`;
+      } else if (kind === 'monthlyGains' && safeUsername(selector?.username) && Object.keys(selector).length === 2 &&
+          Number.isSafeInteger(selector.year) && selector.year >= FIRST_RESEARCH_YEAR && selector.year < new Date(clock()).getUTCFullYear()) {
+        source = `https://public-api.etoro.com/api/v2/portfolios/${encodeURIComponent(selector.username)}/gain/monthly?minDate=${selector.year}-01-01&maxDate=${selector.year}-12-31`;
       }
       else if (['portfolio', 'performance', 'tradeStats'].includes(kind) && safeUsername(selector?.username)) source = `${ROOT}/${encodeURIComponent(selector.username)}/${({ portfolio: 'portfolio/live', performance: 'gain', tradeStats: 'tradeinfo?period=LastTwoYears' })[kind]}`;
       else return { status: 'UNAVAILABLE', reason: 'READ_NOT_ALLOWLISTED', source: null, data: null };
@@ -154,4 +161,4 @@ function createTraderObserver({ env = process.env, client, clock = Date.now, get
   }
   return { view, refresh, refreshForScan: (realCID, { expectedUsername } = {}) => refresh(realCID, { portfolioOnly: true, expectedUsername }) };
 }
-module.exports = { ROOT, DOCS, RANKINGS, createTraderReadClient, createTraderObserver };
+module.exports = { ROOT, DOCS, RANKINGS, FIRST_RESEARCH_YEAR, createTraderReadClient, createTraderObserver };
