@@ -4,7 +4,8 @@ const { validId } = require('./trader-observer');
 const { normalizePage, rankedProfile } = require('./etoro-trader-discovery');
 
 const TRADERS = Object.freeze(['tintinmelo75', 'Cleonfe', 'HaoNing', 'WildNico', 'IsraMX']);
-const ALLOCATION_PROBE_TRADERS = Object.freeze(['thomaspj', 'triangulacapital', 'tintinmelo75']);
+const ALLOCATION_COHORT = Object.freeze(['thomaspj', 'triangulacapital']);
+const ALLOCATION_PROBE_TRADERS = Object.freeze([...ALLOCATION_COHORT, 'tintinmelo75']);
 const SOURCE = 'https://api-portal.etoro.com/api-reference/user-stats/get-asset-allocation-history';
 const STOP = new Set(['CREDENTIALS_ABSENT', 'READ_QUOTA_OR_COOLDOWN', 'CREDENTIAL_CONTEXT_CHANGED']);
 const MINIMUM_YEARS = 5, MAX_REQUESTS = 20;
@@ -47,7 +48,7 @@ function inspectClosedDays(data, username, today) {
     }
     for (const id of duplicateIds) resolved.delete(id);
     for (const issue of issues) reject(issue);
-    const allocated = new Set([...resolved].filter(([, weight]) => weight > 0).map(([id]) => id));
+    const allocated = new Map([...resolved].filter(([, weight]) => weight > 0));
     if (allocated.size) days.set(day, { allocated, unresolvedRows: row.assets.length - resolved.size });
     else if (!issues.size) reject('NO_POSITIVE_VALUE_PCT');
   }
@@ -68,7 +69,7 @@ function compareDays(byDay) {
   const day = [...byDay.keys()].sort().reverse().find(date => byDay.get(date).size >= 2);
   if (!day) return null;
   const portfolios = byDay.get(day), overlap = new Map();
-  for (const [username, snapshot] of portfolios) for (const id of snapshot.allocated) {
+  for (const [username, snapshot] of portfolios) for (const id of snapshot.allocated.keys()) {
     if (!overlap.has(id)) overlap.set(id, []);
     overlap.get(id).push(username);
   }
@@ -79,6 +80,23 @@ function compareDays(byDay) {
     byProfile: [...portfolios].map(([username, snapshot]) => ({ username, knownInstruments: snapshot.allocated.size, unresolvedRows: snapshot.unresolvedRows })),
     knownSharedInstrumentCount: shared.length,
     sharedInstruments: shared.slice(0, 25).map(([instrumentId, profiles]) => ({ instrumentId, profiles })) };
+}
+
+function cohortHistory(byDay) {
+  const days = [];
+  for (const [day, snapshots] of [...byDay].sort(([a], [b]) => a.localeCompare(b))) {
+    const [left, right] = ALLOCATION_COHORT.map(username => snapshots.get(username));
+    if (!left || !right) continue;
+    const knownSharedInstrumentCount = [...left.allocated.keys()].filter(id => right.allocated.has(id)).length;
+    const byProfile = [...snapshots].map(([username, row]) => {
+      const largest = [...row.allocated].sort(([aId, aWeight], [bId, bWeight]) => bWeight - aWeight || aId - bId)[0];
+      return { username, knownInstruments: row.allocated.size, unresolvedRows: row.unresolvedRows,
+        largestKnown: { instrumentId: largest[0], reportedValuePct: largest[1] } };
+    });
+    days.push({ day, knownSharedInstrumentCount, byProfile });
+  }
+  return { commonDays: days.length, daysWithKnownOverlap: days.filter(row => row.knownSharedInstrumentCount > 0).length,
+    daysWithUnresolvedRows: days.filter(row => row.byProfile.some(profile => profile.unresolvedRows > 0)).length, days };
 }
 
 async function research({ client = createTraderReadClient(), clock = Date.now } = {}) {
@@ -103,21 +121,24 @@ async function research({ client = createTraderReadClient(), clock = Date.now } 
   return { ...report, status: report.comparison ? 'OBSERVED_OVERLAP_ONLY' : 'NO_COMPARABLE_CLOSED_DAY' };
 }
 
-async function allocationProbe({ client = createTraderReadClient(), clock = Date.now } = {}) {
+async function allocationProbe({ client = createTraderReadClient(), clock = Date.now, observe = false } = {}) {
   const collectedAt = new Date(clock()).toISOString(), today = collectedAt.slice(0, 10);
   const context = client.context();
   const report = { collectedAt, source: SOURCE, executionAllowed: false, transactionEvidence: false, calls: 0, profiles: [] };
   const byDay = new Map();
-  for (const username of ALLOCATION_PROBE_TRADERS) {
+  for (const username of observe ? ALLOCATION_COHORT : ALLOCATION_PROBE_TRADERS) {
     const read = await client.read('allocationHistory', { username });
     if (read.requestAttempted) report.calls++;
     const { days, coverage } = read.status === 'AVAILABLE' ? inspectClosedDays(read.data, username, today) : {};
     report.profiles.push({ username, httpStatus: read.httpStatus ?? null, reason: read.reason ?? null, coverage: coverage ?? null });
-    if (username !== 'tintinmelo75') addDays(byDay, username, days);
+    if (ALLOCATION_COHORT.includes(username)) addDays(byDay, username, days);
     if ([401, 429].includes(read.httpStatus) || STOP.has(read.reason)) break;
   }
   if (client.context().generation !== context.generation) return { ...report, profiles: [], status: 'CREDENTIAL_CONTEXT_CHANGED' };
-  return { ...report, comparison: compareDays(byDay) };
+  const comparison = compareDays(byDay);
+  if (!observe) return { ...report, comparison };
+  return { ...report, mode: 'SHADOW_RESEARCH_OBSERVATION', stableIdentitiesVerified: false, coverageComplete: null,
+    independenceVerified: false, weightUnit: 'FRACTION_AS_REPORTED', comparison, history: cohortHistory(byDay) };
 }
 
 function gainRows(data, username, granularity) {
@@ -230,6 +251,7 @@ if (require.main === module) {
   const [mode, page = '1', offset = '0', ...extra] = process.argv.slice(2);
   const run = mode === '--read-only' && process.argv.length === 3 ? research
     : mode === '--inspect-allocations' && process.argv.length === 3 ? allocationProbe
+    : mode === '--observe-cohort' && process.argv.length === 3 ? () => allocationProbe({ observe: true })
     : mode === '--screen-annual' && !extra.length && /^[1-3]$/.test(page) && /^\d{1,2}$/.test(offset)
       ? () => screenAnnual({ page: Number(page), offset: Number(offset) }) : null;
   if (!run) {

@@ -113,6 +113,34 @@ test('known allocation rows remain comparable while unresolved rows and duplicat
   assert.equal(r.transactionEvidence, false);
 });
 
+test('cohort observation measures every common closed day with only the two candidate reads', async () => {
+  const s = setup({ handler: u => {
+    const username = u.pathname.split('/')[4], left = username === 'thomaspj';
+    const asset = (instrumentId, valuePct) => ({ instrumentId, valuePct });
+    const dates = [
+      { date: '2026-11-06', assets: [asset(3, 0.5)] },
+      { date: '2026-11-05', assets: [asset(left ? 7 : 8, 0.25), asset(0, 0.6)] },
+      { date: '2026-11-04', assets: [asset(1, 0.2), asset(2, 0.2)] },
+      ...(left ? [{ date: '2026-11-03', assets: [asset(9, 0.5)] }] : [])
+    ];
+    return Response.json({ userName: username, results: dates });
+  } });
+  const r = await allocationProbe({ client: s.client, clock: () => AT, observe: true });
+  assert.equal(r.mode, 'SHADOW_RESEARCH_OBSERVATION');
+  assert.equal(r.calls, 2);
+  assert.deepEqual(r.profiles.map(row => row.username), ['thomaspj', 'triangulacapital']);
+  assert.equal(r.history.commonDays, 2);
+  assert.equal(r.history.daysWithKnownOverlap, 1);
+  assert.equal(r.history.daysWithUnresolvedRows, 1);
+  assert.deepEqual(r.history.days.map(row => row.day), ['2026-11-04', '2026-11-05']);
+  assert.deepEqual(r.history.days[0].byProfile[0].largestKnown, { instrumentId: 1, reportedValuePct: 0.2 });
+  assert.deepEqual(r.history.days[1].byProfile[0].largestKnown, { instrumentId: 7, reportedValuePct: 0.25 });
+  assert.equal(r.comparison.knownSharedInstrumentCount, 0);
+  assert.equal(r.executionAllowed, false);
+  assert.equal(r.transactionEvidence, false);
+  assert.equal(r.stableIdentitiesVerified, false);
+});
+
 function annualSetup(gains, { allocStatus = 200, identityChange = false, months = {}, mismatch = false, partial = false } = {}) {
   const ids = Object.keys(gains).map(Number);
   const identities = new Map();
