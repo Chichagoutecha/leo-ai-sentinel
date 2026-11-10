@@ -43,8 +43,9 @@ test('allocation research compares common closed days using only five allowliste
   const report = await research({ client: s.client, clock: () => AT });
   assert.equal(report.status, 'OBSERVED_OVERLAP_ONLY');
   assert.equal(report.calls, 5);
-  assert.deepEqual(report.comparison, { day: '2026-11-05', profiles: ['tintinmelo75', 'Cleonfe'],
-    sharedInstruments: [{ instrumentId: 1, profiles: ['tintinmelo75', 'Cleonfe'] }] });
+  assert.equal(report.comparison.day, '2026-11-05');
+  assert.deepEqual(report.comparison.sharedInstruments, [{ instrumentId: 1, profiles: ['tintinmelo75', 'Cleonfe'] }]);
+  assert.equal(report.comparison.coverageComplete, null);
   assert.equal(report.executionAllowed, false);
   assert.equal(report.transactionEvidence, false);
   assert.equal(report.coverageComplete, null);
@@ -83,6 +84,7 @@ test('targeted allocation probe distinguishes empty data from rejected rows with
   assert.equal(r.profiles[0].coverage.reportedDays, 0);
   assert.equal(r.profiles[1].coverage.daysWithAssets, 3);
   assert.equal(r.profiles[1].coverage.usableDays, 0);
+  assert.deepEqual(r.profiles[1].coverage.invalidInstrumentIdKinds, { ZERO: 1 });
   assert.deepEqual(r.profiles[1].coverage.rejectionReasons, { DUPLICATE_INSTRUMENT_ID: 1, MISSING_OR_INVALID_VALUE_PCT: 1,
     INVALID_INSTRUMENT_ID: 1, NEGATIVE_VALUE_PCT: 1, CURRENT_OR_FUTURE_DATE: 1 });
   assert.equal(r.profiles[2].coverage.latestUsableDay, '2026-11-05');
@@ -90,8 +92,28 @@ test('targeted allocation probe distinguishes empty data from rejected rows with
   assert.equal(r.executionAllowed, false);
   assert.doesNotMatch(JSON.stringify(r), /SECRET|instrumentId/);
 });
+test('known allocation rows remain comparable while unresolved rows and duplicate instruments are excluded', async () => {
+  const asset = (instrumentId, valuePct = 0.2) => ({ instrumentId, valuePct });
+  const s = setup({ handler: u => {
+    const username = u.pathname.split('/')[4];
+    const assets = username === 'thomaspj' ? [asset(1), asset(2), asset(0), asset(2)]
+      : username === 'triangulacapital' ? [asset(1), asset(2), asset(null), asset('3'), asset(4, 0)]
+        : [asset(1)];
+    return Response.json({ userName: username, results: [{ date: '2026-11-05', assets }] });
+  } });
+  const r = await allocationProbe({ client: s.client, clock: () => AT });
+  assert.equal(r.profiles[0].coverage.usableDays, 1);
+  assert.equal(r.profiles[0].coverage.partialDays, 1);
+  assert.deepEqual(r.profiles[1].coverage.invalidInstrumentIdKinds, { MISSING_OR_NULL: 1, STRING: 1 });
+  assert.deepEqual(r.comparison.byProfile, [{ username: 'thomaspj', knownInstruments: 1, unresolvedRows: 3 },
+    { username: 'triangulacapital', knownInstruments: 2, unresolvedRows: 2 }]);
+  assert.deepEqual(r.comparison.sharedInstruments, [{ instrumentId: 1, profiles: ['thomaspj', 'triangulacapital'] }]);
+  assert.equal(r.comparison.coverageComplete, null);
+  assert.equal(r.comparison.independenceVerified, false);
+  assert.equal(r.transactionEvidence, false);
+});
 
-function annualSetup(gains, { allocStatus = 200, identityChange = false, months = {}, mismatch = false } = {}) {
+function annualSetup(gains, { allocStatus = 200, identityChange = false, months = {}, mismatch = false, partial = false } = {}) {
   const ids = Object.keys(gains).map(Number);
   const identities = new Map();
   return setup({ handler: u => {
@@ -109,8 +131,9 @@ function annualSetup(gains, { allocStatus = 200, identityChange = false, months 
       gains: (months[id] || []).map(date => ({ date, gain: 0 })) });
     assert.ok(u.pathname.endsWith('/assets/history'));
     if (allocStatus !== 200) return new Response('SECRET_ALLOCATION_RESPONSE', { status: allocStatus });
-    return Response.json({ userName: username, results: ['2026-11-04', '2026-11-05'].map(date => ({ date,
-      assets: [{ instrumentId: 1, valuePct: 0.1 }] })) });
+    const assets = [{ instrumentId: 1, valuePct: 0.1 }];
+    if (partial) assets.push({ instrumentId: 0, valuePct: 0.2 });
+    return Response.json({ userName: username, results: ['2026-11-04', '2026-11-05'].map(date => ({ date, assets })) });
   } });
 }
 
@@ -160,6 +183,15 @@ test('annual success alone does not qualify a profile with denied allocations or
     assert.equal(r.profiles[0].status, setup.allocStatus ? 'ANNUAL_PASS_ALLOCATIONS_UNAVAILABLE' : 'IDENTITY_CONFIRMATION_FAILED');
     assert.doesNotMatch(JSON.stringify(r), /SECRET/);
   }
+});
+test('annual screen lists usable partial allocations separately after confirming identity', async () => {
+  const s = annualSetup({ 1: positiveFullYears }, { partial: true });
+  const r = await screenAnnual({ client: s.client, clock: () => AT });
+  assert.deepEqual(r.candidates, []);
+  assert.deepEqual(r.partialCandidates, ['Trader1']);
+  assert.equal(r.profiles[0].status, 'PARTIAL_ALLOCATION_RESEARCH_CANDIDATE');
+  assert.equal(r.profiles[0].allocationCoverage.partialDays, 2);
+  assert.equal(s.calls.length, 5);
 });
 test('annual screen stays inside the shared quota and can resume at the returned offset', async () => {
   const gains = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [i + 1, positiveFullYears]));
