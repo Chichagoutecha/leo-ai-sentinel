@@ -4,32 +4,50 @@ const { validId } = require('./trader-observer');
 const { normalizePage, rankedProfile } = require('./etoro-trader-discovery');
 
 const TRADERS = Object.freeze(['tintinmelo75', 'Cleonfe', 'HaoNing', 'WildNico', 'IsraMX']);
+const ALLOCATION_PROBE_TRADERS = Object.freeze(['thomaspj', 'triangulacapital', 'tintinmelo75']);
 const SOURCE = 'https://api-portal.etoro.com/api-reference/user-stats/get-asset-allocation-history';
 const STOP = new Set(['CREDENTIALS_ABSENT', 'READ_QUOTA_OR_COOLDOWN', 'CREDENTIAL_CONTEXT_CHANGED']);
 const MINIMUM_YEARS = 5, MAX_REQUESTS = 20;
 
-function closedDays(data, username, today) {
-  if (typeof data?.userName !== 'string' || data.userName.toLowerCase() !== username.toLowerCase() ||
-      !Array.isArray(data.results) || data.results.length > 31) return null;
+function inspectClosedDays(data, username, today) {
+  const coverage = { reportedDays: Array.isArray(data?.results) ? data.results.length : null, daysWithAssets: 0,
+    usableDays: null, latestUsableDay: null, rejectionReasons: {} };
+  const reject = reason => { coverage.rejectionReasons[reason] = (coverage.rejectionReasons[reason] || 0) + 1; };
+  if (typeof data?.userName !== 'string' || data.userName.toLowerCase() !== username.toLowerCase()) {
+    reject('USERNAME_UNVERIFIED'); return { days: null, coverage };
+  }
+  if (!Array.isArray(data.results) || data.results.length > 31) {
+    reject('ALLOCATION_ROWS_MISSING_OR_OVER_LIMIT'); return { days: null, coverage };
+  }
   const days = new Map(), seen = new Set();
   for (const row of data.results) {
     const day = row?.date;
-    if (typeof day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(day) || day >= today) continue;
-    const time = Date.parse(day);
-    if (!Number.isFinite(time) || new Date(time).toISOString().slice(0, 10) !== day) continue;
-    if (seen.has(day)) { days.delete(day); continue; }
+    if (Array.isArray(row?.assets) && row.assets.length) coverage.daysWithAssets++;
+    const time = typeof day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(day) ? Date.parse(day) : NaN;
+    if (!Number.isFinite(time) || new Date(time).toISOString().slice(0, 10) !== day) { reject('INVALID_DATE'); continue; }
+    if (day >= today) { reject('CURRENT_OR_FUTURE_DATE'); continue; }
+    if (seen.has(day)) { reject('DUPLICATE_DATE'); days.delete(day); continue; }
     seen.add(day);
-    if (!Array.isArray(row.assets) || row.assets.length > 2000) continue;
+    if (!Array.isArray(row.assets) || row.assets.length > 2000) { reject('ASSET_ROWS_MISSING_OR_OVER_LIMIT'); continue; }
+    if (!row.assets.length) { reject('EMPTY_ASSETS'); continue; }
     const ids = new Set(), allocated = new Set();
+    const issues = new Set();
     for (const asset of row.assets) {
-      if (!validId(asset?.instrumentId) || ids.has(asset.instrumentId) ||
-          !Number.isFinite(asset.valuePct) || asset.valuePct < 0) break;
-      ids.add(asset.instrumentId);
-      if (asset.valuePct > 0) allocated.add(asset.instrumentId);
+      const id = asset?.instrumentId, weight = asset?.valuePct;
+      if (!validId(id)) issues.add('INVALID_INSTRUMENT_ID');
+      else if (ids.has(id)) issues.add('DUPLICATE_INSTRUMENT_ID');
+      else ids.add(id);
+      if (!Number.isFinite(weight)) issues.add('MISSING_OR_INVALID_VALUE_PCT');
+      else if (weight < 0) issues.add('NEGATIVE_VALUE_PCT');
+      else if (weight > 0 && validId(id)) allocated.add(id);
     }
-    if (ids.size === row.assets.length && allocated.size) days.set(day, allocated);
+    if (issues.size) for (const issue of issues) reject(issue);
+    else if (!allocated.size) reject('NO_POSITIVE_VALUE_PCT');
+    else days.set(day, allocated);
   }
-  return days;
+  coverage.usableDays = days.size;
+  coverage.latestUsableDay = [...days.keys()].sort().at(-1) ?? null;
+  return { days, coverage };
 }
 
 async function research({ client = createTraderReadClient(), clock = Date.now } = {}) {
@@ -43,7 +61,7 @@ async function research({ client = createTraderReadClient(), clock = Date.now } 
   for (const username of TRADERS) {
     const read = await client.read('allocationHistory', { username });
     if (read.requestAttempted) report.calls++;
-    const days = read.httpStatus === 200 ? closedDays(read.data, username, today) : null;
+    const days = read.httpStatus === 200 ? inspectClosedDays(read.data, username, today).days : null;
     report.profiles.push({ username, httpStatus: read.httpStatus ?? null, usableDays: days?.size ?? null,
       reason: read.reason || (days === null ? 'ALLOCATION_RESPONSE_UNVERIFIED' : days.size === 0 ? 'NO_USABLE_CLOSED_DAY' : null) });
     for (const [day, assets] of days || []) {
@@ -65,6 +83,21 @@ async function research({ client = createTraderReadClient(), clock = Date.now } 
       .sort(([a, aa], [b, bb]) => bb.length - aa.length || a - b)
       .map(([instrumentId, profiles]) => ({ instrumentId, profiles })) };
   return { ...report, status: 'OBSERVED_OVERLAP_ONLY' };
+}
+
+async function allocationProbe({ client = createTraderReadClient(), clock = Date.now } = {}) {
+  const collectedAt = new Date(clock()).toISOString(), today = collectedAt.slice(0, 10);
+  const context = client.context();
+  const report = { collectedAt, source: SOURCE, executionAllowed: false, calls: 0, profiles: [] };
+  for (const username of ALLOCATION_PROBE_TRADERS) {
+    const read = await client.read('allocationHistory', { username });
+    if (read.requestAttempted) report.calls++;
+    const coverage = read.status === 'AVAILABLE' ? inspectClosedDays(read.data, username, today).coverage : null;
+    report.profiles.push({ username, httpStatus: read.httpStatus ?? null, reason: read.reason ?? null, coverage });
+    if ([401, 429].includes(read.httpStatus) || STOP.has(read.reason)) break;
+  }
+  if (client.context().generation !== context.generation) return { ...report, profiles: [], status: 'CREDENTIAL_CONTEXT_CHANGED' };
+  return report;
 }
 
 function gainRows(data, username, granularity) {
@@ -150,9 +183,10 @@ async function screenAnnual({ page = 1, offset = 0, client = createTraderReadCli
     if (report.stopReason || result.status !== 'NO_NEGATIVE_REPORTED_FULL_YEAR') continue;
     const allocation = await read('allocationHistory', query);
     result.allocationHttp = allocation.httpStatus;
-    const days = allocation.status === 'AVAILABLE' ? closedDays(allocation.data, row.username, today) : null;
-    result.usableAllocationDays = days?.size ?? null;
-    result.latestAllocationDay = days?.size ? [...days.keys()].sort().at(-1) : null;
+    const { days, coverage } = allocation.status === 'AVAILABLE' ? inspectClosedDays(allocation.data, row.username, today) : {};
+    result.usableAllocationDays = coverage?.usableDays ?? null;
+    result.latestAllocationDay = coverage?.latestUsableDay ?? null;
+    result.allocationCoverage = coverage ?? null;
     if (report.stopReason || !days || days.size < 2) { result.status = 'ANNUAL_PASS_ALLOCATIONS_UNAVAILABLE'; continue; }
     const confirmationRead = await read('profileByUsername', query);
     const confirmation = rankedProfile(confirmationRead, candidate, client).identity;
@@ -169,11 +203,12 @@ async function screenAnnual({ page = 1, offset = 0, client = createTraderReadCli
   return { ...report, status: report.stopReason ? 'READS_STOPPED' : !rankings.pagination ? 'RANKINGS_UNAVAILABLE' : 'BOUNDED_SCREEN_COMPLETE' };
 }
 
-module.exports = { research, screenAnnual };
+module.exports = { research, allocationProbe, screenAnnual };
 
 if (require.main === module) {
   const [mode, page = '1', offset = '0', ...extra] = process.argv.slice(2);
   const run = mode === '--read-only' && process.argv.length === 3 ? research
+    : mode === '--inspect-allocations' && process.argv.length === 3 ? allocationProbe
     : mode === '--screen-annual' && !extra.length && /^[1-3]$/.test(page) && /^\d{1,2}$/.test(offset)
       ? () => screenAnnual({ page: Number(page), offset: Number(offset) }) : null;
   if (!run) {

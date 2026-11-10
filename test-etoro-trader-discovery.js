@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const { createTraderReadClient, RANKINGS } = require('./etoro-trader-observer');
 const { createDiscovery, diagnostic, combine, options } = require('./etoro-trader-discovery');
-const { research, screenAnnual } = require('./trader-allocation-research');
+const { research, allocationProbe, screenAnnual } = require('./trader-allocation-research');
 const AT = Date.parse('2026-11-06T15:30:00Z');
 const row = (cid = 1, extra = {}) => ({ cid, username: `Trader${cid}`, type: 'trader', riskScore: 4,
   gain: 30, annualizedReturn: 12, firstActivity: '2020-01-01T00:00:00Z', lastActivity: '2026-11-05T00:00:00Z', ...extra });
@@ -64,6 +64,31 @@ test('allocation research rejects another profile and stops on authorization or 
     assert.equal((await s.client.read('allocationHistory', { username: 'valid', path: '/orders' })).reason, 'READ_NOT_ALLOWLISTED');
     assert.equal(s.calls.length, 2);
   }
+});
+test('targeted allocation probe distinguishes empty data from rejected rows without leaking assets', async () => {
+  const s = setup({ handler: u => {
+    const username = u.pathname.split('/')[4];
+    assert.equal(u.pathname, `/api/v2/portfolios/${username}/assets/history`);
+    const asset = { instrumentId: 1, valuePct: 0.2, symbol: 'SECRET_SIMULATED_SYMBOL' };
+    const results = username === 'thomaspj' ? [] : username === 'triangulacapital' ? [
+      { date: '2026-11-04', assets: [asset, { instrumentId: 1, valuePct: null }] },
+      { date: '2026-11-05', assets: [{ instrumentId: 0, valuePct: -0.1 }] },
+      { date: '2026-11-06', assets: [asset] }
+    ] : [{ date: '2026-11-05', assets: [asset] }];
+    return Response.json({ userName: username, results, token: 'SECRET_RESPONSE' });
+  } });
+  const r = await allocationProbe({ client: s.client, clock: () => AT });
+  assert.deepEqual(r.profiles.map(p => p.username), ['thomaspj', 'triangulacapital', 'tintinmelo75']);
+  assert.equal(r.calls, 3);
+  assert.equal(r.profiles[0].coverage.reportedDays, 0);
+  assert.equal(r.profiles[1].coverage.daysWithAssets, 3);
+  assert.equal(r.profiles[1].coverage.usableDays, 0);
+  assert.deepEqual(r.profiles[1].coverage.rejectionReasons, { DUPLICATE_INSTRUMENT_ID: 1, MISSING_OR_INVALID_VALUE_PCT: 1,
+    INVALID_INSTRUMENT_ID: 1, NEGATIVE_VALUE_PCT: 1, CURRENT_OR_FUTURE_DATE: 1 });
+  assert.equal(r.profiles[2].coverage.latestUsableDay, '2026-11-05');
+  assert.ok(s.calls.every(x => x.method === 'GET' && x.body === undefined));
+  assert.equal(r.executionAllowed, false);
+  assert.doesNotMatch(JSON.stringify(r), /SECRET|instrumentId/);
 });
 
 function annualSetup(gains, { allocStatus = 200, identityChange = false, months = {}, mismatch = false } = {}) {
