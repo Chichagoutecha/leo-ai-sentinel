@@ -67,35 +67,40 @@ async function research({ client = createTraderReadClient(), clock = Date.now } 
   return { ...report, status: 'OBSERVED_OVERLAP_ONLY' };
 }
 
-function firstFullYear(firstActivity) {
-  const first = new Date(firstActivity || NaN);
-  if (!Number.isFinite(first.getTime())) return null;
-  const year = first.getUTCFullYear();
-  return first.getTime() === Date.UTC(year, 0, 1) ? year : year + 1;
-}
-
-function annualResult(data, firstYear, currentYear) {
+function annualResult(data, currentYear) {
   if (!Array.isArray(data?.yearly) || data.yearly.length > 50) return { status: 'ANNUAL_HISTORY_UNAVAILABLE' };
   const gains = new Map();
   for (const row of data.yearly) {
     const year = new Date(typeof row?.timestamp === 'string' ? row.timestamp : NaN).getUTCFullYear();
     if (!Number.isInteger(year) || year > currentYear) return { status: 'ANNUAL_HISTORY_INVALID' };
-    if (year < firstYear || year === currentYear) continue;
+    if (year === currentYear) continue;
     if (!Number.isFinite(row.gain) || (gains.has(year) && gains.get(year) !== row.gain)) return { status: 'ANNUAL_HISTORY_INVALID' };
     gains.set(year, row.gain);
   }
   const years = [...gains].sort(([a], [b]) => a - b).map(([year, gainPct]) => ({ year, gainPct }));
-  if (years.some(row => row.gainPct < 0)) return { status: 'NEGATIVE_FULL_YEAR', years };
-  if (years.length !== currentYear - firstYear || years.length < MINIMUM_YEARS) return { status: 'ANNUAL_HISTORY_INCOMPLETE', years };
-  return { status: 'NO_NEGATIVE_REPORTED_FULL_YEAR', years };
+  const firstYear = years[0]?.year ?? currentYear;
+  const monthly = new Set();
+  for (const row of Array.isArray(data.monthly) ? data.monthly : []) {
+    const at = new Date(typeof row?.timestamp === 'string' ? row.timestamp : NaN);
+    const year = at.getUTCFullYear();
+    if (year < firstYear) return { status: 'ANNUAL_HISTORY_INCOMPLETE', years };
+    if (year === firstYear && Number.isFinite(row.gain)) monthly.add(at.getUTCMonth());
+  }
+  const firstYearCovered = monthly.size === 12;
+  if (years.some(row => row.gainPct < 0 && (row.year > firstYear || firstYearCovered))) return { status: 'NEGATIVE_FULL_YEAR', years };
+  if (years[0]?.gainPct < 0) return { status: 'NEGATIVE_FIRST_YEAR_COVERAGE_UNVERIFIED', years };
+  const firstCountedYear = firstYearCovered ? firstYear : firstYear + 1;
+  if (years.length !== currentYear - firstYear || currentYear - firstCountedYear < MINIMUM_YEARS) return { status: 'ANNUAL_HISTORY_INCOMPLETE', years };
+  return { status: 'NO_NEGATIVE_REPORTED_FULL_YEAR', years, firstCountedYear };
 }
 
 async function screenAnnual({ page = 1, offset = 0, client = createTraderReadClient(), clock = Date.now } = {}) {
   if (!Number.isInteger(page) || page < 1 || page > 3 || !Number.isInteger(offset) || offset < 0 || offset >= 100) throw Error('INVALID_SCREEN_CURSOR');
   const collectedAt = new Date(clock()).toISOString(), today = collectedAt.slice(0, 10), currentYear = Number(today.slice(0, 4));
   const context = client.context();
-  const report = { version: 'annual-trader-screen-v1', collectedAt, scope: 'READ_ONLY_RESEARCH', executionAllowed: false,
+  const report = { version: 'annual-trader-screen-v2', collectedAt, scope: 'READ_ONLY_RESEARCH', executionAllowed: false,
     transactionEvidence: false, universeComplete: false, page, offset, maxRequests: MAX_REQUESTS,
+    historyBasis: 'REPORTED_PERFORMANCE_PERIODS_ONLY', lifetimeCoverage: 'UNVERIFIED',
     requiredYears: Array.from({ length: MINIMUM_YEARS }, (_, i) => currentYear - MINIMUM_YEARS + i),
     calls: 0, stopReason: null, next: null, profiles: [], candidates: [] };
   const read = async (kind, selector) => {
@@ -111,24 +116,22 @@ async function screenAnnual({ page = 1, offset = 0, client = createTraderReadCli
   const seen = new Set();
   let i = offset;
   for (; i < rankings.rows.length && !report.stopReason && report.calls + 4 <= MAX_REQUESTS; i++) {
-    const row = rankings.rows[i], firstYear = firstFullYear(row.firstActivity);
-    const result = { username: row.username, status: 'FIRST_ACTIVITY_UNVERIFIED' };
+    // A period-scoped ranking row cannot establish the start of lifetime trading activity.
+    const row = rankings.rows[i];
+    const result = { username: row.username, status: 'POPULAR_INVESTOR_IDENTITY_UNVERIFIED' };
     report.profiles.push(result);
-    if (firstYear === null || firstYear > currentYear) continue;
-    if (firstYear > currentYear - MINIMUM_YEARS) { result.status = 'FEWER_THAN_FIVE_FULL_YEARS'; continue; }
     const query = { username: row.username };
     const profileRead = await read('profileByUsername', query);
     const candidate = { ...query, providerCid: row.providerCid };
     const profile = rankedProfile(profileRead, candidate, client);
     result.profileHttp = profileRead.httpStatus;
-    result.status = 'POPULAR_INVESTOR_IDENTITY_UNVERIFIED';
     if (report.stopReason || profile.identity?.isPi !== true) continue;
     const { realCID, gcid } = profile.identity;
     if (seen.has(gcid)) { result.status = 'DUPLICATE_PROFILE'; continue; }
     seen.add(gcid);
     const performance = await read('performance', query);
     result.performanceHttp = performance.httpStatus;
-    Object.assign(result, annualResult(performance.data, firstYear, currentYear));
+    Object.assign(result, annualResult(performance.data, currentYear));
     if (report.stopReason || result.status !== 'NO_NEGATIVE_REPORTED_FULL_YEAR') continue;
     const allocation = await read('allocationHistory', query);
     result.allocationHttp = allocation.httpStatus;
