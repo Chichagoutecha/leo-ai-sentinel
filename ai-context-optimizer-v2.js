@@ -40,6 +40,7 @@ const MAX_STRING_CHARS = clampInt(process.env.AI_CONTEXT_V2_MAX_STRING_CHARS, 60
 
 const IMPORTANT_KEY_RE = /^(?:source|time|version|trading_mode|max_order_usd|starter_portfolio_mode|preferred_next_assets|watchlist|asset_rules|progressive_order_policy|execution_stats_24h|instruction|execution_awareness|action|decision|asset|symbol|ticker|instrument|instrumentId|name|provider|endpoint|status|reason|approved|approval|hardVeto|veto|blocked|blockReason|circuitBreakerOpen|newBuyBlocked|tradable|eligibleForTrade|fresh|stale|confidence|score|technicalScore|researchScore|weight|weightPct|price|bid|ask|last|mid|cash|availableCash|totalTrackedValue|amount|amountUsd|category|regime|profile|allocation|allocationPlan|recommendedBuys|recommended_buys|approvedBuyAssets|approvedSellAssets|approved_buys|approved_sells|thresholds|ranking|topCandidates|candidateDiagnostics|support|opposition|reasons|vetoes|healthy|mode|confirmationMode|buyThreshold|sellThreshold|buySupportPct|sellSupportPct|disagreementPct|participationCount|buyAgentCount|sellAgentCount|executionSafe|requiredSatisfied|primaryAligned|marketState|priceStatus|ageSeconds|freshnessSeconds)$/i;
 const IMPORTANT_VALUE_RE = /(BUY|SELL|HOLD|VETO|BLOCK|BREAKER|ERROR|FAIL|UNSAFE|STALE|CLOSED|REJECT|RISK|APPROVED|INCONCLUSIVE|ORDER_NO_EFFECT|REBALANCE|MIXED|RISK_OFF|HIGH_VOLATILITY)/i;
+const ANALYSIS_SCALAR_RE = /^(interval|requestedObservations|volatilityObservations|drawdownObservations|missingObservations|inputAssetsOmitted|scope|identityProof|freshnessBasis|sourceEffectiveAt|snapshotAgeMs|snapshotOnly|metricBasis|value|held|pending|pendingUpperBoundsOmitted|returnPct|relativeReturnPp|assetReturnPct|benchmarkReturnPct|volatilityPctPerBar|maxDrawdownPct|observations|pairedReturns|currency|basis|coverage|knownSubtotalUsd|knownSubtotalWeightPct|totalPortfolioWeightPct|knownValueUsd|latestVolume|averagePrior20|ratioPrior20|from|to|sourceAsOf|sourceAgeMs|fetchAgeMs|lastClosedBarAgeMs|rejectedObservations|unfinishedObservations|pendingStatus|pendingBasis|pendingIsHeld|unreconstructedRisk|analysisOnly|providerCalls|canPlaceOrder|canOverrideRiskController|executionReference|generatedAt|issues|problems|pendingIssues|caveat|omittedAssets|portfolioLinksOmitted|concentrationOmitted)$/i;
 const SENSITIVE_KEY_RE = /(secret|password|authorization|cookie|x-api-key|x-user-key|apikey|api_key|userkey|user_key|bearer)/i;
 
 let lastEvent = null;
@@ -109,7 +110,7 @@ function projectArray(value, key, depth) {
 function projectValue(value, key = '', depth = 0) {
   if (depth > 12 || value === undefined) return undefined;
   if (scalar(value)) {
-    if (IMPORTANT_KEY_RE.test(key) || IMPORTANT_VALUE_RE.test(String(value))) {
+    if (IMPORTANT_KEY_RE.test(key) || ANALYSIS_SCALAR_RE.test(key) || IMPORTANT_VALUE_RE.test(String(value))) {
       return typeof value === 'string' ? compactString(value) : value;
     }
     return undefined;

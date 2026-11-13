@@ -136,6 +136,7 @@ const { randomUUID, createHash, timingSafeEqual } = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { marketSourceAudit, decisionMarketEvidence } = require('./market-source-audit');
+const { buildMarketAnalysisEvidence, compactMarketAnalysisEvidence, marketAnalysisSnapshotView, reportedNumber } = require('./market-analysis-evidence');
 const { createTraderObserver } = require('./etoro-trader-observer');
 const { emptyState: emptyTraderObserverState, compactObserverState } = require('./trader-observer');
 const { buildTraderExposureView, validateProposal: validateExposureProposal, previewProposal: previewExposureProposal } = require('./trader-exposure-link');
@@ -1895,6 +1896,7 @@ const runtimeState = {
   lastMarketDataFusion: null,
   technicalCache: {},
   lastTechnicalAnalysis: null,
+  lastMarketAnalysisEvidence: null,
   intelligenceCache: {},
   lastIntelligenceAnalysis: null,
   redditAccessToken: null,
@@ -1964,6 +1966,7 @@ Tu reçois les conclusions de plusieurs agents déterministes :
 - ProviderHealthAgent : détecte les fournisseurs instables, les met temporairement en quarantaine et conserve leur fiabilité.
 - HistoricalDataAgent : choisit et compare les historiques multi-sources sans jamais remplacer le prix eToro d'exécution.
 - TrendMemoryAgent : évolution entre les observations fraîches.
+- MarketAnalysisEvidence : métriques descriptives réutilisant les caches et le contexte du portefeuille agent existant ; les valeurs nulles et corrélations inconnues ne valent jamais zéro ni diversification. Ni tendance, volume ni popularité ne constitue une prévision de rendement. Cette analyse ne modifie aucune autorisation ni aucun veto.
 - TechnicalAnalysisAgent : bougies eToro, RSI, MACD, ATR, EMA/SMA, momentum, supports et résistances sur plusieurs horizons.
 - MarketRegimeAgent : régime global BULL, RISK_ON, SIDEWAYS, RISK_OFF ou HIGH_VOLATILITY.
 - NewsAgent : actualités récentes, récence, diversité des sources, sentiment et risques vérifiés.
@@ -2289,6 +2292,7 @@ function compactLogForPersistence(log) {
       topCandidates: Array.isArray(log.decisionDiagnostics.topCandidates) ? log.decisionDiagnostics.topCandidates.slice(0, 3) : []
     } : null,
     marketEvidence: log.marketEvidence || null,
+    marketAnalysisEvidence: compactMarketAnalysisEvidence(log.marketAnalysisEvidence,log.decision?.asset),
     risk_reason: String(log.risk_reason || "").slice(0, 800),
     execution: compactExecutionForPersistence(log.execution),
     error: log.error || null
@@ -2409,6 +2413,7 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
       lastMarketDataFusion: runtimeState.lastMarketDataFusion || null,
       technicalCache: runtimeState.technicalCache || {},
       lastTechnicalAnalysis: runtimeState.lastTechnicalAnalysis || null,
+      lastMarketAnalysisEvidence: compactMarketAnalysisEvidence(runtimeState.lastMarketAnalysisEvidence),
       intelligenceCache: runtimeState.intelligenceCache || {},
       lastIntelligenceAnalysis: runtimeState.lastIntelligenceAnalysis || null,
       marketRegimeHistory: (runtimeState.marketRegimeHistory || []).slice(-500),
@@ -2502,6 +2507,7 @@ function buildPersistentState({ compact = hasUpstashMemory() } = {}) {
     paperPortfolio: compactPaperPortfolioForPersistence(runtimeState.paperPortfolio),
     systemHealth: runtimeState.systemHealth || {},
     providerHealth: runtimeState.providerHealth || {},
+    lastMarketAnalysisEvidence: compactMarketAnalysisEvidence(runtimeState.lastMarketAnalysisEvidence),
     marketRegimeHistory: (runtimeState.marketRegimeHistory || []).slice(-120),
     macroCreditRegimeHistory: (runtimeState.macroCreditRegimeHistory || []).slice(-Math.min(120, MACRO_REGIME_HISTORY_LIMIT)),
     lastMacroCreditRegime: runtimeState.lastMacroCreditRegime || null,
@@ -2780,6 +2786,7 @@ function fitPersistentStateToBudget(
 
 function applyPersistentState(state) {
   if (!state || typeof state !== "object") return false;
+  runtimeState.lastMarketAnalysisEvidence = compactMarketAnalysisEvidence(state.lastMarketAnalysisEvidence);
 
   if (state.automationGuards && typeof state.automationGuards === "object") {
     runtimeState.automationGuards = {
@@ -4631,6 +4638,7 @@ function normalizeMarketRates(data, metadata = {}) {
       instrumentId,
       provider: "eToro",
       source: "ETORO_PUBLIC_API",
+      currency: /^[A-Z]{3}$/.test(rate.currency || "") ? rate.currency : null,
       fetchMode: metadata.fetchMode || "unknown",
       bid: roundNumber(bid, 6),
       ask: roundNumber(ask, 6),
@@ -7869,7 +7877,7 @@ function normalizeTwelveDataCandles(data, asset, interval) {
     const high = Number(item?.high);
     const low = Number(item?.low);
     const close = Number(item?.close);
-    const volume = Number(item?.volume);
+    const volume = reportedNumber(item?.volume);
     if (![open, high, low, close].every(Number.isFinite) || Math.min(open, high, low, close) <= 0) continue;
     const parsed = parseProviderDate(item?.datetime);
     const key = parsed.timestamp !== null ? String(parsed.timestamp) : `${item?.datetime}-${byTime.size}`;
@@ -7884,6 +7892,7 @@ function normalizeTwelveDataCandles(data, asset, interval) {
       low,
       close,
       volume: Number.isFinite(volume) ? volume : null,
+      currency: /^[A-Z]{3}$/.test(data?.meta?.currency || "") ? data.meta.currency : null,
       provider: "Twelve Data",
       source: "TWELVE_DATA_TIME_SERIES"
     });
@@ -7903,7 +7912,7 @@ function normalizeAlphaVantageCandles(data, asset, interval) {
     const high = getFirstNumber(item, ["2. high", "2a. high (USD)", "2b. high (USD)", "high"]);
     const low = getFirstNumber(item, ["3. low", "3a. low (USD)", "3b. low (USD)", "low"]);
     const close = getFirstNumber(item, ["4. close", "4a. close (USD)", "4b. close (USD)", "close"]);
-    const volume = getFirstNumber(item, ["5. volume", "5. volume", "6. volume", "volume"]);
+    const volume = reportedNumber(getFirstValue(item, ["5. volume", "6. volume", "volume"]));
     if (![open, high, low, close].every(Number.isFinite) || Math.min(open, high, low, close) <= 0) continue;
     const parsed = parseProviderDate(dateText);
     candles.push({
@@ -7966,6 +7975,7 @@ async function getTwelveDataCandles(asset, interval, candlesCount, force = false
       asset,
       interval,
       candlesCountRequested: count,
+      currency: /^[A-Z]{3}$/.test(data?.meta?.currency || data?.currency || "") ? (data.meta?.currency || data.currency) : null,
       fetchedAt: nowIso(),
       endpoint: "https://api.twelvedata.com/time_series",
       provider: "Twelve Data",
@@ -8134,6 +8144,7 @@ async function getAlphaVantageCandles(asset, interval, candlesCount, force = fal
       asset,
       interval,
       candlesCountRequested: count,
+      currency: /^[A-Z]{3}$/.test(data?.meta?.currency || data?.currency || "") ? (data.meta?.currency || data.currency) : null,
       fetchedAt: nowIso(),
       endpoint: "https://www.alphavantage.co/query",
       provider: "Alpha Vantage",
@@ -9189,7 +9200,7 @@ function normalizeCandleHistory(data, asset, interval) {
     const high = getFirstNumber(candle, ["high", "High"]);
     const low = getFirstNumber(candle, ["low", "Low"]);
     const close = getFirstNumber(candle, ["close", "Close"]);
-    const volume = getFirstNumber(candle, ["volume", "Volume"]);
+    const volume = reportedNumber(getFirstValue(candle, ["volume", "Volume"]));
     const date = normalizeCandleDate(candle);
     if (![open, high, low, close].every(Number.isFinite)) continue;
     if (Math.min(open, high, low, close) <= 0) continue;
@@ -9205,7 +9216,8 @@ function normalizeCandleHistory(data, asset, interval) {
       high,
       low,
       close,
-      volume: Number.isFinite(volume) ? volume : null
+      volume: Number.isFinite(volume) ? volume : null,
+      currency: /^[A-Z]{3}$/.test(candle.currency || "") ? candle.currency : null
     });
   }
   return [...byTime.values()].sort((a, b) => {
@@ -9261,6 +9273,7 @@ async function getEtoroCandles(asset, interval, candlesCount, force = false) {
       asset,
       interval,
       candlesCountRequested: count,
+      currency: /^[A-Z]{3}$/.test(data?.meta?.currency || data?.currency || "") ? (data.meta?.currency || data.currency) : null,
       fetchedAt: nowIso(),
       endpoint: url,
       provider: "eToro",
@@ -9301,7 +9314,7 @@ function analyzeCandleSeries(candles, label) {
   const closes = sorted.map((candle) => Number(candle.close)).filter(Number.isFinite);
   const highs = sorted.map((candle) => Number(candle.high)).filter(Number.isFinite);
   const lows = sorted.map((candle) => Number(candle.low)).filter(Number.isFinite);
-  const volumes = sorted.map((candle) => Number(candle.volume)).filter(Number.isFinite);
+  const volumes = sorted.map((candle) => reportedNumber(candle.volume));
   if (!closes.length) {
     return { label, available: false, observations: 0, reason: "Aucune bougie exploitable" };
   }
@@ -9321,7 +9334,7 @@ function analyzeCandleSeries(candles, label) {
   const sma200 = latestSma(closes, 200);
   const ema12 = latestEma(closes, 12);
   const ema26 = latestEma(closes, 26);
-  const averageVolume20 = volumes.length >= 20 ? average(volumes.slice(-20)) : null;
+  const averageVolume20 = volumes.length >= 20 && volumes.slice(-20).every(value=>value !== null) ? average(volumes.slice(-20)) : null;
   const latestVolume = volumes.length ? volumes[volumes.length - 1] : null;
   return {
     label,
@@ -13143,7 +13156,7 @@ function riskSellCheckForDecision(agent, decision) {
   return { ok: true, reason: "Décision non concernée", multiplier: 1, record: null };
 }
 
-function buildFoundationAgents({ portfolioSummary, marketSummary, trendSummary, dataIntegrityAgent, technicalAnalysisAgent = null, marketRegimeAgent = null, macroCreditRegimeAgent = null, intelligenceAnalysisAgent = null, strategyValidationAgent = null, paperPerformanceAgent = null, livePerformanceAgent = null, riskSellIntelligenceAgent = null, agentCouncil = null }) {
+function buildFoundationAgents({ portfolioSummary, marketSummary, trendSummary, dataIntegrityAgent, technicalAnalysisAgent = null, marketRegimeAgent = null, macroCreditRegimeAgent = null, intelligenceAnalysisAgent = null, strategyValidationAgent = null, paperPerformanceAgent = null, livePerformanceAgent = null, riskSellIntelligenceAgent = null, agentCouncil = null, marketAnalysisEvidence = null }) {
   const riskBudgetAgent = buildRiskBudgetState(portfolioSummary);
   const healthAgent = buildHealthAgent();
   const providerHealthAgent = dataIntegrityAgent?.providerHealthAgent || buildProviderHealthAgent();
@@ -13212,6 +13225,7 @@ function buildFoundationAgents({ portfolioSummary, marketSummary, trendSummary, 
     assets: {}, sellCandidates: [], emergencyReviews: []
   };
   const agents = {
+    marketAnalysisEvidence: compactMarketAnalysisEvidence(marketAnalysisEvidence),
     marketDataAgent,
     dataIntegrityAgent,
     marketDataFusionAgent: dataIntegrityAgent,
@@ -14375,6 +14389,20 @@ async function askDecisionAgent(portfolioSummary, marketSummary, trendSummary, s
 }
 
 
+function buildCachedMarketAnalysis({ realPortfolio, realSummary, marketSummary, technicalAnalysisAgent, trendSummary }, now = Date.now()) {
+  const universe = buildUniverse(WATCHLIST, ASSET_RULES, CONFIGURED_UNIVERSE_CANDIDATES);
+  const equityCategories = new Set(["STOCK", "ETF_CORE", "ETF_GROWTH", "AI_BIG_TECH", "AI_SPEC_GROWTH", "CYBERSECURITY", "CRYPTO_EQUITY", "QUANTUM", "SPACE", "SPACE_SPECULATIVE", "CHINA", "DEFENSIVE", "HEALTHCARE", "ENERGY", "FINANCIAL"]);
+  const benchmarkByAsset = Object.fromEntries(universe.filter(row=>WATCHLIST[row.symbol]).map(row=>[row.symbol,
+    CRYPTO_ASSETS.has(row.symbol) ? "BTC" : equityCategories.has(ASSET_RULES[row.symbol]?.category) ? "SPY" : null]));
+  const report = buildMarketAnalysisEvidence({ marketSummary, technicalAnalysisAgent, trendSummary,
+    technicalCache: runtimeState.technicalCache, historicalCache: runtimeState.historicalCache,
+    portfolioResponse: realPortfolio, portfolioIdentity: realSummary?.livePortfolioIdentity,
+    universe, intents: Object.values(runtimeState.orderIntents || {}), benchmarkByAsset, now,
+    quoteMaxAgeMs: MAX_RATE_AGE_MINUTES * 60000, historyMaxAgeMs: HISTORICAL_CACHE_MINUTES * 60000 });
+  runtimeState.lastMarketAnalysisEvidence = compactMarketAnalysisEvidence(report);
+  return report;
+}
+
 async function buildRuntimeContext(source) {
   let realPortfolio;
   try {
@@ -14473,7 +14501,9 @@ async function buildRuntimeContext(source) {
     paperPerformanceAgent,
     preferredNextAssets
   });
+  const marketAnalysisEvidence = buildCachedMarketAnalysis({ realPortfolio, realSummary, marketSummary, technicalAnalysisAgent, trendSummary });
   const foundationAgents = buildFoundationAgents({
+    marketAnalysisEvidence,
     portfolioSummary,
     marketSummary,
     trendSummary,
@@ -14490,6 +14520,7 @@ async function buildRuntimeContext(source) {
   });
 
   return {
+    marketAnalysisEvidence,
     realPortfolio,
     realSummary,
     decisionPortfolio,
@@ -14981,7 +15012,9 @@ async function scanMarket(source = "manual-scan") {
         preferredNextAssets: getPreferredNextAssets(context.portfolioSummary, context.marketSummary),
         assetsOverride: [decisionAsset]
       });
+      context.marketAnalysisEvidence = buildCachedMarketAnalysis(context);
       context.foundationAgents = buildFoundationAgents({
+        marketAnalysisEvidence: context.marketAnalysisEvidence,
         portfolioSummary: context.portfolioSummary,
         marketSummary: context.marketSummary,
         trendSummary: context.trendSummary,
@@ -15056,6 +15089,7 @@ async function scanMarket(source = "manual-scan") {
       decision: control.finalDecision,
       decisionDiagnostics,
       marketEvidence,
+      marketAnalysisEvidence: compactMarketAnalysisEvidence(marketAnalysisSnapshotView(context.marketAnalysisEvidence,Date.now(),MAX_RATE_AGE_MINUTES*60000,HISTORICAL_CACHE_MINUTES*60000),control.finalDecision.asset),
       execution,
       memory: memoryStatus()
     };
@@ -15064,6 +15098,7 @@ async function scanMarket(source = "manual-scan") {
       decision: control.finalDecision, decision_raw: decisionRaw, traderShadowMeasurement,
       decisionDiagnostics,
       marketEvidence,
+      marketAnalysisEvidence: compactMarketAnalysisEvidence(marketAnalysisSnapshotView(context.marketAnalysisEvidence,Date.now(),MAX_RATE_AGE_MINUTES*60000,HISTORICAL_CACHE_MINUTES*60000),control.finalDecision.asset),
       risk_reason: control.reason, execution,
       foundationAgents: context.foundationAgents,
       agentCouncil: context.agentCouncil || context.foundationAgents?.agentCouncil || null,
@@ -16024,7 +16059,7 @@ function auditHistoricalCandles(asset, candles, metadata = {}) {
     const high = getFirstNumber(candle, ["high", "High"]);
     const low = getFirstNumber(candle, ["low", "Low"]);
     const close = getFirstNumber(candle, ["close", "Close"]);
-    const volume = getFirstNumber(candle, ["volume", "Volume"]);
+    const volume = reportedNumber(getFirstValue(candle, ["volume", "Volume"]));
     const prices = [open, high, low, close];
     const validPrices = prices.every((value) => Number.isFinite(value) && value > 0);
     const validEnvelope = validPrices && high >= low && high >= Math.max(open, close) && low <= Math.min(open, close);
@@ -16045,7 +16080,8 @@ function auditHistoricalCandles(asset, candles, metadata = {}) {
       high,
       low,
       close,
-      volume: Number.isFinite(volume) ? volume : null
+      volume: Number.isFinite(volume) ? volume : null,
+      currency: /^[A-Z]{3}$/.test(candle.currency || "") ? candle.currency : null
     });
   }
 
@@ -20061,6 +20097,8 @@ app.get("/data-sources", requireSecret, (req, res) => {
     liveAudit: marketSourceAudit(runtimeState.lastMarketData, runtimeState.lastMarketDataFusion,
       providerHealthAgent, Date.now(), MAX_RATE_AGE_MINUTES),
     lastMarketDataFusion: runtimeState.lastMarketDataFusion,
+    marketAnalysisEvidence: marketAnalysisSnapshotView(runtimeState.lastMarketAnalysisEvidence,Date.now(),MAX_RATE_AGE_MINUTES*60000,HISTORICAL_CACHE_MINUTES*60000),
+    marketAnalysisSnapshotOnly: true,
     cache: {
       consensusEntries: Object.keys(runtimeState.marketConsensusCache || {}).length,
       historicalEntries: Object.keys(runtimeState.historicalCache || {}).length,
@@ -20832,6 +20870,7 @@ module.exports = {
   parseProviderDate,
   buildConsensusCluster,
   priceDeviationPct,
+  buildCachedMarketAnalysis,
   normalizeTwelveDataCandles,
   normalizeAlphaVantageCandles,
   compareHistoricalSeries,

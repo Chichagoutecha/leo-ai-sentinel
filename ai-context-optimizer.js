@@ -33,6 +33,7 @@ const IMPORTANT_VALUE_RE = /(VETO|BLOCK|BREAKER|ERROR|FAIL|UNSAFE|STALE|CLOSED|R
 const SAFETY_KEY_RE = /^(action|status|reason|approved|approval|hardVeto|veto|blocked|blockReason|circuitBreakerOpen|newBuyBlocked|tradable|stale|fresh|confidence|canTrade|canAuthorizeLive|livePromotionAllowed|portfolioIdentityConfirmed|identityConfirmed)$/i;
 const IDENTITY_KEY_RE = /^(asset|symbol|ticker|instrument|instrumentId|provider|source|name|endpoint|time|timestamp|fetchedAt|updatedAt)$/i;
 const DECISION_SCALAR_RE = /^(price|bid|ask|last|open|high|low|close|score|technicalScore|researchScore|confidence|weight|weightPct|amount|amountUsd|cash|availableCash|value|totalTrackedValue|ageSeconds|freshnessSeconds)$/i;
+const ANALYSIS_SCALAR_RE = /^(interval|requestedObservations|volatilityObservations|drawdownObservations|missingObservations|inputAssetsOmitted|scope|identityProof|freshnessBasis|sourceEffectiveAt|snapshotAgeMs|snapshotOnly|metricBasis|value|held|pending|pendingUpperBoundsOmitted|returnPct|relativeReturnPp|assetReturnPct|benchmarkReturnPct|volatilityPctPerBar|maxDrawdownPct|observations|pairedReturns|currency|basis|coverage|knownSubtotalUsd|knownSubtotalWeightPct|totalPortfolioWeightPct|knownValueUsd|latestVolume|averagePrior20|ratioPrior20|from|to|sourceAsOf|sourceAgeMs|fetchAgeMs|lastClosedBarAgeMs|rejectedObservations|unfinishedObservations|pendingStatus|pendingBasis|pendingIsHeld|unreconstructedRisk|analysisOnly|providerCalls|canPlaceOrder|canOverrideRiskController|executionReference|generatedAt|issues|problems|pendingIssues|caveat|omittedAssets|portfolioLinksOmitted|concentrationOmitted)$/i;
 const OPAQUE_BULK_KEY_RE = /^(raw|rawData|rawPayload|rawResponse|payload|providerPayload|providerResponse|responseBody|responseData|adapterPayload)$/i;
 
 let lastEvent = null;
@@ -189,7 +190,7 @@ function dedupeLargeSubtrees(value, path = 'root', seen = new Map(), metrics = {
 function safetyProjection(value, key = '', depth = 0) {
   if (depth > 12 || value === undefined) return undefined;
   if (scalar(value)) {
-    if (SAFETY_KEY_RE.test(key) || IDENTITY_KEY_RE.test(key) || DECISION_SCALAR_RE.test(key)) {
+    if (SAFETY_KEY_RE.test(key) || IDENTITY_KEY_RE.test(key) || DECISION_SCALAR_RE.test(key) || ANALYSIS_SCALAR_RE.test(key)) {
       return typeof value === 'string' ? sanitizeString(value, key) : value;
     }
     return undefined;
@@ -208,7 +209,7 @@ function safetyProjection(value, key = '', depth = 0) {
   for (const [childKey, childValue] of Object.entries(value)) {
     if (noisyKey(childKey)) continue;
     if (scalar(childValue)) {
-      if (SAFETY_KEY_RE.test(childKey) || IDENTITY_KEY_RE.test(childKey) || DECISION_SCALAR_RE.test(childKey)) {
+      if (SAFETY_KEY_RE.test(childKey) || IDENTITY_KEY_RE.test(childKey) || DECISION_SCALAR_RE.test(childKey) || ANALYSIS_SCALAR_RE.test(childKey)) {
         out[childKey] = typeof childValue === 'string' ? sanitizeString(childValue, childKey) : childValue;
       }
       continue;
