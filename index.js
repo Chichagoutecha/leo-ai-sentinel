@@ -1481,7 +1481,8 @@ const ASSET_RULES = {
   CRWD: { category: "CYBERSECURITY", buyThreshold: 78, sellThreshold: 76 }
 };
 
-const ANALYSIS_ONLY_CANDIDATES = parseAnalysisCandidates(process.env.ANALYSIS_ONLY_CANDIDATES_JSON || "[]");
+const CONFIGURED_UNIVERSE_CANDIDATES = parseAnalysisCandidates(process.env.ANALYSIS_ONLY_CANDIDATES_JSON || "[]");
+const ANALYSIS_ONLY_CANDIDATES = CONFIGURED_UNIVERSE_CANDIDATES;
 const TRADE_ALLOWED_ASSETS = new Set(resolveTradeAllowlist(WATCHLIST, process.env));
 const TRADE_ALLOWED_CATEGORIES = new Set(resolveAllowedCategories(process.env));
 const TRADE_EXCLUSION_REASONS = parseExclusionReasons(process.env);
