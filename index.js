@@ -149,6 +149,7 @@ const traderExecution = require('./trader-execution-bridge');
 const tradingAvailability = require('./trading-availability');
 const { ENDPOINT: SEC_BLACKROCK_ENDPOINT, REFRESH_INTERVAL_MS: SEC_REFRESH_INTERVAL_MS,
   normalizeBlackRockFilings, institutionalWatchStatus } = require('./sec-institutional-watch');
+const { createCandidateDiscoveryClient, parseAnalysisCandidates } = require('./analysis-candidate-discovery');
 
 const app = express();
 app.use(express.json());
@@ -1480,31 +1481,13 @@ const ASSET_RULES = {
   CRWD: { category: "CYBERSECURITY", buyThreshold: 78, sellThreshold: 76 }
 };
 
-const CONFIGURED_UNIVERSE_CANDIDATES = (() => {
-  try {
-    const parsed = JSON.parse(String(process.env.ANALYSIS_ONLY_CANDIDATES_JSON || "[]"));
-    return Array.isArray(parsed) ? parsed : [];
-  } catch { return []; }
-})();
-for (const candidate of CONFIGURED_UNIVERSE_CANDIDATES) {
-  const symbol = String(candidate?.symbol || "").trim().toUpperCase();
-  const instrumentId = Number(candidate?.instrumentId);
-  const category = String(candidate?.category || "").trim().toUpperCase();
-  if (!/^[A-Z0-9.:-]{1,24}$/.test(symbol) || WATCHLIST[symbol] ||
-      !Number.isSafeInteger(instrumentId) || instrumentId <= 0 ||
-      !["ETF", "STOCK", "CRYPTO"].includes(category)) continue;
-  WATCHLIST[symbol] = instrumentId;
-  ASSET_RULES[symbol] = {
-    category: category === "ETF" ? "ETF_CONFIGURED" : category === "CRYPTO" ? "CRYPTO_CONFIGURED" : "STOCK_CONFIGURED",
-    buyThreshold: category === "CRYPTO" ? 78 : 72,
-    sellThreshold: 76
-  };
-}
+const ANALYSIS_ONLY_CANDIDATES = parseAnalysisCandidates(process.env.ANALYSIS_ONLY_CANDIDATES_JSON || "[]");
 const TRADE_ALLOWED_ASSETS = new Set(resolveTradeAllowlist(WATCHLIST, process.env));
 const TRADE_ALLOWED_CATEGORIES = new Set(resolveAllowedCategories(process.env));
 const TRADE_EXCLUSION_REASONS = parseExclusionReasons(process.env);
 // Informational registry only. No background refresh or execution integration.
 const instrumentEligibilityRegistry = createEligibilityRegistry({ client: createEligibilityClient({ env: process.env }) });
+const analysisCandidateDiscovery = createCandidateDiscoveryClient({ env: process.env, headersFactory: etoroHeaders });
 
 const STARTER_PRIORITY = [
   "SPY",
@@ -20001,15 +19984,21 @@ app.post("/trader-exposure-proposal-preview", requireSecret, async (req, res) =>
   } catch { res.status(500).json({ executionAttempted: false, error: "EXPOSURE_PREVIEW_UNAVAILABLE" }); }
 });
 
+app.get("/analysis-candidates/lookup", requireSecret, async (req, res) => {
+  const result = await analysisCandidateDiscovery.lookup({
+    symbol: req.query.symbol,
+    sectorInterest: req.query.sector
+  });
+  const httpStatus = result.status === "INVALID_REQUEST" ? 400
+    : result.status === "RATE_LIMITED" ? 429
+      : result.status === "NOT_TESTED" ? 503
+        : result.status === "UNAVAILABLE" ? 502 : 200;
+  res.status(httpStatus).json({ version: VERSION, ...result, executionAttempted: false });
+});
+
 app.get("/portfolio-universe-status", requireSecret, async (_req, res) => {
   try {
-    const rawCandidates = String(process.env.ANALYSIS_ONLY_CANDIDATES_JSON || "[]");
-    let extraCandidates = [];
-    try {
-      const parsed = JSON.parse(rawCandidates);
-      if (Array.isArray(parsed)) extraCandidates = parsed;
-    } catch { /* malformed optional analysis data stays unavailable */ }
-    const universe = buildUniverse(WATCHLIST, ASSET_RULES, extraCandidates).map((item) => ({
+    const universe = buildUniverse(WATCHLIST, ASSET_RULES, ANALYSIS_ONLY_CANDIDATES).map((item) => ({
       ...item,
       tradable: Boolean(item.tradable && TRADE_ALLOWED_ASSETS.has(item.symbol) && TRADE_ALLOWED_CATEGORIES.has(item.category)),
       status: item.tradable && (!TRADE_ALLOWED_ASSETS.has(item.symbol) || !TRADE_ALLOWED_CATEGORIES.has(item.category))
