@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const discovery = require('./analysis-candidate-discovery');
+const universePolicy = require('./trade-universe-policy');
 
 test('manual candidate configuration is bounded, deduplicated, and never authorizes a buy', () => {
   const rows = discovery.parseAnalysisCandidates(JSON.stringify([
@@ -21,6 +22,9 @@ test('manual candidate configuration is bounded, deduplicated, and never authori
   assert.equal(rows[0].buyAuthorization, 'NOT_AUTHORIZED');
   assert.equal(rows[1].category, 'UNCLASSIFIED');
   assert.equal(rows[1].sectorInterest, null);
+  const universe = universePolicy.buildUniverse({ SPY: 3417 }, { SPY: { category: 'ETF_CORE' } }, rows);
+  assert.equal(universe.find(row => row.symbol === 'XYZ').tradable, false);
+  assert.equal(universePolicy.resolveTradeAllowlist({ SPY: 3417 }, { TRADE_ALLOWED_ASSETS: 'XYZ' }).includes('XYZ'), false);
 });
 
 test('exact symbol resolution rejects partial, ambiguous, malformed and unknown matches', () => {
